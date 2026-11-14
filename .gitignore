@@ -1,0 +1,15 @@
+docs/
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+data/
+*.sqlite
+*.sqlite-*
+.vite/
+coverage/
+.DS_Store
+images/machine/machined.mjs
+images/machine/fs-worker.mjs
