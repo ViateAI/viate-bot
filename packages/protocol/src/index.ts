@@ -8,6 +8,21 @@
 /** machined 监听端口。只对控制面所在的 Docker 网络开放。 */
 export const MACHINED_PORT = 7070;
 
+/** 容器内 Chromium 远程调试端口。只绑定 127.0.0.1，不向容器外发布。 */
+export const BROWSER_DEBUG_PORT = 9222;
+
+/** GET /browser/status */
+export interface BrowserStatusResponse {
+  running: boolean;
+  /** CDP /json/version 的 Browser 字段。未运行时为 null。 */
+  version: string | null;
+}
+
+/** POST /browser/restart */
+export interface BrowserRestartResponse {
+  ok: true;
+}
+
 export interface HealthResponse {
   ok: true;
   version: string;

@@ -215,16 +215,25 @@ importers:
 
   apps/machined:
     dependencies:
+      '@viate-bot/browser':
+        specifier: workspace:*
+        version: link:../../packages/browser
       '@viate-bot/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
       fastify:
         specifier: ^5.6.1
         version: 5.12.8
+      ws:
+        specifier: ^8.18.3
+        version: 8.22.2
     devDependencies:
       '@types/node':
         specifier: ^24.10.1
         version: 24.19.2
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.2
       esbuild:
         specifier: ^0.25.11
         version: 0.25.12
@@ -274,6 +283,25 @@ importers:
       vite:
         specifier: ^7.1.10
         version: 7.3.8(@types/node@24.19.2)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.15)
+
+  packages/browser:
+    dependencies:
+      ws:
+        specifier: ^8.18.3
+        version: 8.22.2
+    devDependencies:
+      '@types/node':
+        specifier: ^24.10.1
+        version: 24.19.2
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@24.19.2)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.15)
 
   packages/protocol:
     devDependencies:
@@ -1232,6 +1260,9 @@ packages:
 
   '@types/ssh2@1.15.6':
     resolution: {integrity: sha512-oGdxhBqcRTwSTKFm+9EiKzkNVYRLEFkcW44lhguvBalGJbWfGnDt/ezwSUZc+SF9m9bMc3VyklNAtp7zICjS5w==}
+
+  '@types/ws@8.18.2':
+    resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
 
   '@vitejs/plugin-react@5.2.0':
     resolution: {integrity: sha512-YmKkfhOAi3wsB1PhJq5Scj3GXMn3WvtQ/JC0xoopuHoXSdmtdStOpFrYaT1kie2YgFBcIe64ROzMYRjCrYOdYw==}
@@ -2907,6 +2938,10 @@ snapshots:
   '@types/ssh2@1.15.6':
     dependencies:
       '@types/node': 18.19.130
+
+  '@types/ws@8.18.2':
+    dependencies:
+      '@types/node': 24.19.2
 
   '@vitejs/plugin-react@5.2.0(vite@7.3.8(@types/node@24.19.2)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.15))':
     dependencies:

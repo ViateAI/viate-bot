@@ -1,9 +1,9 @@
 /**
- * 这些路由只服务控制面：健康检查、指标、在机器内执行命令、读写机器内的文件。
+ * 这些路由只服务控制面：健康检查、指标、在机器内执行命令、读写机器内的文件、转发本机浏览器 CDP。
  * machined 不提供“把应用地址交给控制面去连”的接口。远程 MCP 从机器内发起。
  */
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, statfs } from "node:fs/promises";
 import { Readable, type Readable as ReadableStream } from "node:stream";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import type {
@@ -15,6 +15,7 @@ import type {
   HealthResponse,
   MetricsResponse,
 } from "@viate-bot/protocol";
+import { attachBrowser } from "./browser-route.js";
 import { createFsClient, type FsClient } from "./fs-client.js";
 import { resolveConfined } from "./paths.js";
 
@@ -28,6 +29,12 @@ const MAX_WRITE_BYTES = 8 * 1024 * 1024;
 export interface MachinedOptions {
   token: string;
   version?: string;
+  /** 缺省 http://127.0.0.1:9222/json/version。测试可以指到假的 Chromium。 */
+  browserVersionUrl?: string;
+  /** 只接受这个端口上的回环调试地址。缺省 9222。 */
+  browserDebugPort?: number;
+  /** 缺省以 bot 身份给 Chromium 主进程发 SIGTERM，由 supervisord 重新拉起。 */
+  restartBrowser?: () => Promise<void>;
 }
 
 export function buildServer(options: MachinedOptions): FastifyInstance {
@@ -145,6 +152,8 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     await filesystem().writeFile(path, data);
     return reply.send({ path });
   });
+
+  attachBrowser(app, options);
 
   app.setErrorHandler((error, _request, reply) => {
     const known = error instanceof Error ? error : new Error(String(error));
@@ -314,7 +323,6 @@ function kilobytes(meminfo: string, key: string): number {
 
 async function diskUsage(path: string): Promise<{ used: number }> {
   try {
-    const { statfs } = await import("node:fs/promises");
     const info = await statfs(path);
     const total = Number(info.blocks) * Number(info.bsize);
     const free = Number(info.bavail) * Number(info.bsize);

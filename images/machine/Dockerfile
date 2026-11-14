@@ -25,6 +25,16 @@ RUN npm install --global playwright-core@${PLAYWRIGHT_VERSION} \
     && playwright-core install --with-deps chromium \
     && rm -rf /root/.npm
 
+# 运行时不再依赖 node 解析 playwright-core，把浏览器路径写进镜像。
+# openbox、x11vnc 只安装，M1 不启动。
+RUN mkdir -p /opt/viate \
+    && node -e "process.stdout.write(require('/usr/local/lib/node_modules/playwright-core').chromium.executablePath())" > /opt/viate/chromium-bin \
+    && test -x "$(cat /opt/viate/chromium-bin)" \
+    && command -v runuser \
+    && command -v Xvfb \
+    && command -v x11vnc \
+    && command -v openbox
+
 # 官方镜像把 node 放在 /usr/local/bin。supervisord 和 machined 都按 /usr/bin/node 调用。
 RUN ln -sf /usr/local/bin/node /usr/bin/node
 
@@ -37,9 +47,11 @@ RUN usermod --login bot --home /home/bot --move-home node \
 COPY machined.mjs /opt/viate/machined.mjs
 COPY fs-worker.mjs /opt/viate/fs-worker.mjs
 COPY run-as-bot.mjs /opt/viate/run-as-bot.mjs
+COPY chromium.sh /opt/viate/chromium.sh
+COPY xvfb.sh /opt/viate/xvfb.sh
 COPY supervisord.conf /etc/supervisor/conf.d/viate.conf
-RUN chmod 755 /opt/viate/machined.mjs /opt/viate/fs-worker.mjs /opt/viate/run-as-bot.mjs \
-    && chown root:root /opt/viate/machined.mjs /opt/viate/fs-worker.mjs /opt/viate/run-as-bot.mjs
+RUN chmod 755 /opt/viate/machined.mjs /opt/viate/fs-worker.mjs /opt/viate/run-as-bot.mjs /opt/viate/chromium.sh /opt/viate/xvfb.sh \
+    && chown root:root /opt/viate/machined.mjs /opt/viate/fs-worker.mjs /opt/viate/run-as-bot.mjs /opt/viate/chromium.sh /opt/viate/xvfb.sh
 
 EXPOSE 7070
 
