@@ -74,4 +74,28 @@ describe("loadConfig", () => {
   it("rejects an unknown integration name", () => {
     expect(() => loadConfig({ VB_INTEGRATION: "other" })).toThrow(/VB_INTEGRATION/);
   });
+
+  it("defaults the model gateway and rejects bad values", () => {
+    const config = loadConfig({});
+    expect(config.modelApi).toBe("openai-completions");
+    expect(config.models).toEqual([]);
+    expect(config.modelMaxTokens).toBe(4096);
+    expect(config.taskTokenBudget).toBe(100_000);
+    expect(config.defaultMaxBots).toBe(5);
+    expect(config.defaultMaxConcurrentTasks).toBe(2);
+    const custom = loadConfig({
+      VB_MODEL_API: "openai-responses",
+      VB_MODELS: " a, b ",
+      VB_MODEL_MAX_TOKENS: "128",
+      VB_TASK_TOKEN_BUDGET: "10",
+      VB_DEFAULT_MAX_BOTS: "1",
+      VB_DEFAULT_MAX_CONCURRENT_TASKS: "1",
+    });
+    expect(custom.modelApi).toBe("openai-responses");
+    expect(custom.models).toEqual(["a", "b"]);
+    expect(custom.modelMaxTokens).toBe(128);
+    expect(custom.taskTokenBudget).toBe(10);
+    expect(() => loadConfig({ VB_MODEL_API: "anthropic" })).toThrow(/VB_MODEL_API/);
+    expect(() => loadConfig({ VB_MODEL_MAX_TOKENS: "0" })).toThrow(/VB_MODEL_MAX_TOKENS/);
+  });
 });

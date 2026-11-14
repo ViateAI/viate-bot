@@ -74,8 +74,9 @@ export function shouldAutoWake(input: WakeInput): boolean {
 }
 
 /**
- * 任务、屏幕和定时任务还没实现。对账循环通过这个接口询问，
- * 现在的实现恒定返回“空闲且无人观看、没有即将执行的定时任务”。
+ * 任务模块用真实的排队和运行状态实现 hasActiveTask。
+ * 屏幕和定时任务还没有，对应的两个方法仍然恒为 false。
+ * idleActivityProbe 只留给还不想接入任务的测试。
  */
 export interface ActivityProbe {
   hasActiveTask(userId: string): boolean;

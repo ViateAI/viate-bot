@@ -14,16 +14,38 @@ export interface CreateBotInput {
   policyRef?: string;
 }
 
+export class BotRejected extends Error {
+  constructor(
+    message: string,
+    readonly statusCode: number,
+  ) {
+    super(message);
+    this.name = "BotRejected";
+  }
+}
+
 export interface BotServiceDeps {
   db: AppDatabase;
   key: Buffer;
   credentials: CredentialProvider;
   providerId: string;
+  /** 缺省不限制。创建 bot 时先检查，避免先写入再拒绝。 */
+  allowModel?: (model: string) => boolean;
+  maxBots?: (scope: UserScope) => number;
+  /** 该用户还没有机器时创建一台停止的机器。失败则删掉刚创建的 bot。 */
+  ensureMachine?: (userId: string) => Promise<void>;
 }
 
 export async function createBot(deps: BotServiceDeps, scope: UserScope, input: CreateBotInput): Promise<BotRecord> {
   const bots = botRepository(deps.db);
   const credentials = credentialRepository(deps.db);
+  if (deps.allowModel && !deps.allowModel(input.model)) {
+    throw new BotRejected(`模型不在白名单内: ${input.model}`, 400);
+  }
+  const maxBots = deps.maxBots?.(scope);
+  if (maxBots !== undefined && bots.list(scope).length >= maxBots) {
+    throw new BotRejected("已达到 bot 数量上限", 403);
+  }
   const id = ulid();
   bots.insert(scope, {
     id,
@@ -61,6 +83,15 @@ export async function createBot(deps: BotServiceDeps, scope: UserScope, input: C
   } catch (error) {
     bots.remove(scope, id);
     throw error;
+  }
+  if (deps.ensureMachine) {
+    try {
+      await deps.ensureMachine(scope.userId);
+    } catch (error) {
+      bots.softDelete(scope, id);
+      const message = error instanceof Error ? error.message : "机器创建失败";
+      throw new BotRejected(message, 503);
+    }
   }
   const created = bots.findById(scope, id);
   if (!created) throw new Error("创建 bot 后读不回来");

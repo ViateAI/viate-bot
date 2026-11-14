@@ -39,6 +39,20 @@ export function credentialRepository(db: AppDatabase) {
         .get();
       return row ? toRecord(row) : undefined;
     },
+    /**
+     * 模型网关取密钥。共享凭据没有 user_id；其余必须属于这个用户。
+     * 不把密钥交到路由层。
+     */
+    takeForGateway(userId: string, credentialId: string): CredentialRecord | undefined {
+      const row = db.select().from(modelCredentials).where(eq(modelCredentials.id, credentialId)).get();
+      if (!row || row.revokedAt) return undefined;
+      if (row.userId === null) {
+        if (row.provider !== "shared" || row.botId !== null) return undefined;
+        return toRecord(row);
+      }
+      if (row.userId !== userId) return undefined;
+      return toRecord(row);
+    },
     findShared(): CredentialRecord | undefined {
       const row = db
         .select()

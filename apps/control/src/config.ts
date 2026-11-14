@@ -1,6 +1,7 @@
 import { join } from "node:path";
 
 export type IntegrationName = "none" | "viate";
+export type ModelApi = "openai-completions" | "openai-responses";
 
 /** 只在 VB_INTEGRATION=viate 时从环境变量读入。缺项留空，启动时不报错。 */
 export interface ServiceCredentials {
@@ -18,6 +19,18 @@ export interface ControlConfig {
   oidcTrustEmail: boolean;
   modelBaseUrl: string;
   modelApiKey: string;
+  /** 为空表示不限制。非空时，网关和创建 bot 都只接受列表里的模型。 */
+  models: string[];
+  modelApi: ModelApi;
+  modelMaxTokens: number;
+  modelContextTokens: number;
+  taskTokenBudget: number;
+  modelRateUserPerMin: number;
+  modelRateBotPerMin: number;
+  maxTaskSteps: number;
+  maxTaskDurationSec: number;
+  defaultMaxBots: number;
+  defaultMaxConcurrentTasks: number;
   integration: IntegrationName;
   serviceCredentials?: ServiceCredentials;
   adminEmails: string[];
@@ -43,6 +56,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig 
     oidcTrustEmail: flag(env, "VB_OIDC_TRUST_EMAIL", false),
     modelBaseUrl: optional(env, "VB_MODEL_BASE_URL", ""),
     modelApiKey: optional(env, "VB_MODEL_API_KEY", ""),
+    models: list(env, "VB_MODELS"),
+    modelApi: modelApiName(env),
+    modelMaxTokens: positive(env, "VB_MODEL_MAX_TOKENS", 4096),
+    modelContextTokens: positive(env, "VB_MODEL_CONTEXT_TOKENS", 128_000),
+    taskTokenBudget: positive(env, "VB_TASK_TOKEN_BUDGET", 100_000),
+    modelRateUserPerMin: positive(env, "VB_MODEL_RATE_USER", 30),
+    modelRateBotPerMin: positive(env, "VB_MODEL_RATE_BOT", 20),
+    maxTaskSteps: positive(env, "VB_MAX_TASK_STEPS", 16),
+    maxTaskDurationSec: positive(env, "VB_MAX_TASK_DURATION_SEC", 600),
+    defaultMaxBots: positive(env, "VB_DEFAULT_MAX_BOTS", 5),
+    defaultMaxConcurrentTasks: positive(env, "VB_DEFAULT_MAX_CONCURRENT_TASKS", 2),
     integration,
     adminEmails: (env.VB_ADMIN_EMAILS ?? "")
       .split(",")
@@ -129,6 +153,26 @@ function flag(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean 
   if (value === "true" || value === "1") return true;
   if (value === "false" || value === "0") return false;
   throw new Error(`${name} 必须是 true 或 false，收到 "${raw}"`);
+}
+
+function list(env: NodeJS.ProcessEnv, name: string): string[] {
+  return (env[name] ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function positive(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const value = integer(env, name, fallback);
+  if (value < 1) throw new Error(`${name} 必须是正整数，收到 "${value}"`);
+  return value;
+}
+
+function modelApiName(env: NodeJS.ProcessEnv): ModelApi {
+  const raw = env.VB_MODEL_API;
+  if (raw === undefined || raw.trim() === "" || raw.trim() === "openai-completions") return "openai-completions";
+  if (raw.trim() === "openai-responses") return "openai-responses";
+  throw new Error(`VB_MODEL_API 必须是 openai-completions 或 openai-responses，收到 "${raw}"`);
 }
 
 function integrationName(env: NodeJS.ProcessEnv): IntegrationName {

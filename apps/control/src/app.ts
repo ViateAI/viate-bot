@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import Fastify, { type FastifyInstance } from "fastify";
+import { createChatService, type ChatService } from "./agent/service.js";
 import { registerAuth } from "./auth.js";
 import { createRuntime } from "./compose.js";
 import { loadConfig, type ControlConfig } from "./config.js";
@@ -9,12 +10,17 @@ import { decrypt, loadOrCreateKey } from "./crypto.js";
 import { openDatabase, type AppDatabase } from "./db/index.js";
 import { machineRepository } from "./db/machines.js";
 import { ensureDevUser } from "./db/users.js";
+import { createGateway, type GatewayTask } from "./gateway/stream.js";
+import { taskActivityProbe } from "./machines/activity.js";
 import { DockerDriver } from "./machines/docker.js";
 import { reconcileOnce } from "./machines/loop.js";
-import { idleActivityProbe } from "./machines/reconcile.js";
+import { ensureUserMachine, prepareMachineEndpoint } from "./machines/ready.js";
 import type { AppRuntime } from "./providers.js";
+import { registerChatRoutes } from "./routes/chat.js";
 import { userScope } from "./scope.js";
 import { createDriver, devSpec, reconcileDeps } from "./runtime.js";
+import { registerWeb } from "./web-static.js";
+import { createHub, registerWebsocket } from "./ws.js";
 
 const migrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url));
 
@@ -29,9 +35,13 @@ export interface AppOptions {
   fetch?: typeof fetch;
   now?: () => Date;
   onDisconnect?: (userId: string) => void;
+  prepareEndpoint?: (userId: string, onPhase: (phase: "starting" | "ready") => void) => Promise<{ host: string; port: number; token: string }>;
+  ensureMachine?: (userId: string) => Promise<void>;
+  retryDelays?: number[];
 }
 
 const runtimes = new WeakMap<FastifyInstance, AppRuntime>();
+const chats = new WeakMap<FastifyInstance, ChatService>();
 
 export function openContext(config: ControlConfig = loadConfig()): ControlContext {
   mkdirSync(config.dataDir, { recursive: true });
@@ -43,9 +53,53 @@ export function openContext(config: ControlConfig = loadConfig()): ControlContex
 export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
   const app = Fastify({ logger: process.env.VITEST === "true" ? false : true });
   const { db, driver, config, key } = ctx;
-  const runtime = createRuntime(config, db, options);
+  const hub = createHub();
+  const now = options.now ?? (() => new Date());
+  const runtime = createRuntime(config, db, {
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    now,
+    onDisconnect: (userId) => {
+      hub.disconnect(userId);
+      options.onDisconnect?.(userId);
+    },
+  });
   runtimes.set(app, runtime);
-  registerAuth(app, { db, key, config, runtime, now: options.now ?? (() => new Date()) });
+  registerAuth(app, { db, key, config, runtime, now });
+  const tasks = new Map<string, GatewayTask>();
+  const chat = createChatService({
+    db,
+    config,
+    key,
+    hub,
+    tasks,
+    streamFn: createGateway({
+      db,
+      config,
+      tasks,
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+      now,
+      ...(options.retryDelays ? { retryDelays: options.retryDelays } : {}),
+    }),
+    prepareEndpoint:
+      options.prepareEndpoint ??
+      ((userId, onPhase) => prepareMachineEndpoint(ctx, userId, onPhase, options.fetch ?? fetch)),
+    now,
+  });
+  chats.set(app, chat);
+  registerChatRoutes(app, {
+    db,
+    config,
+    key,
+    chat,
+    credentials: runtime.credentials,
+    providerId: runtime.identity.id,
+    ensureMachine: options.ensureMachine ?? ((userId) => ensureUserMachine(ctx, userId)),
+  });
+  registerWebsocket(app, { db, key, config, runtime, hub, now });
+  registerWeb(app);
+  app.addHook("onClose", async () => {
+    chat.shutdown();
+  });
 
   app.get("/health", async () => ({ ok: true }));
 
@@ -103,7 +157,7 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
       };
     });
 
-    app.post("/dev/reconcile", async () => reconcileOnce(reconcileDeps(db, driver, idleActivityProbe)));
+    app.post("/dev/reconcile", async () => reconcileOnce(reconcileDeps(db, driver, taskActivityProbe(db))));
   }
 
   return app;
@@ -113,12 +167,19 @@ export function startIntegrationJobs(app: FastifyInstance): () => void {
   return runtimes.get(app)?.startJobs() ?? (() => {});
 }
 
+export function chatService(app: FastifyInstance): ChatService {
+  const service = chats.get(app);
+  if (!service) throw new Error("没有任务服务");
+  return service;
+}
+
 export function startReconcileLoop(ctx: ControlContext, intervalMs = 30_000): () => void {
   const timer = setInterval(() => {
-    reconcileOnce(reconcileDeps(ctx.db, ctx.driver, idleActivityProbe)).catch((error: unknown) => {
+    reconcileOnce(reconcileDeps(ctx.db, ctx.driver, taskActivityProbe(ctx.db))).catch((error: unknown) => {
       console.error("对账失败", error);
     });
   }, intervalMs);
+  timer.unref();
   return () => clearInterval(timer);
 }
 
