@@ -1,32 +1,32 @@
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-import { Type } from "@mariozechner/pi-ai";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { num, obj, opt, str } from "@earendil-works/pi-schema";
 import { MachinedClient } from "../machines/client.js";
 import { capHeadTail, FS_READ_LIMIT } from "./text.js";
 
-const shellSchema = Type.Object({
-  cmd: Type.String({ description: "要执行的命令" }),
-  cwd: Type.Optional(Type.String({ description: "工作目录，缺省是 /home/bot" })),
-  timeoutSec: Type.Optional(Type.Number({ description: "超时秒数，1 到 600，缺省 30" })),
+const shellSchema = obj({
+  cmd: str({ description: "要执行的命令" }),
+  cwd: opt(str({ description: "工作目录，缺省是 /home/bot" })),
+  timeoutSec: opt(num({ description: "超时秒数，1 到 600，缺省 30" })),
 });
 
-const readSchema = Type.Object({
-  path: Type.String({ description: "文件路径，只能在 /home/bot 或 /tmp 下" }),
-  maxBytes: Type.Optional(Type.Number({ description: "最多读取的字节数，上限 64KB" })),
+const readSchema = obj({
+  path: str({ description: "文件路径，只能在 /home/bot 或 /tmp 下" }),
+  maxBytes: opt(num({ description: "最多读取的字节数，上限 64KB" })),
 });
 
-const writeSchema = Type.Object({
-  path: Type.String({ description: "文件路径，只能在 /home/bot 或 /tmp 下" }),
-  content: Type.String({ description: "文件内容" }),
+const writeSchema = obj({
+  path: str({ description: "文件路径，只能在 /home/bot 或 /tmp 下" }),
+  content: str({ description: "文件内容" }),
 });
 
-const listSchema = Type.Object({
-  path: Type.String({ description: "目录路径，只能在 /home/bot 或 /tmp 下" }),
+const listSchema = obj({
+  path: str({ description: "目录路径，只能在 /home/bot 或 /tmp 下" }),
 });
 
-const searchSchema = Type.Object({
-  path: Type.String({ description: "搜索起点，只能在 /home/bot 或 /tmp 下" }),
-  pattern: Type.String({ description: "ripgrep 正则" }),
-  maxResults: Type.Optional(Type.Number({ description: "最多返回多少条，上限 100" })),
+const searchSchema = obj({
+  path: str({ description: "搜索起点，只能在 /home/bot 或 /tmp 下" }),
+  pattern: str({ description: "ripgrep 正则" }),
+  maxResults: opt(num({ description: "最多返回多少条，上限 100" })),
 });
 
 /**

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage } from "@mariozechner/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { fileURLToPath } from "node:url";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { afterEach, describe, expect, it } from "vitest";
@@ -18,7 +18,7 @@ import { createRuntime } from "../compose.js";
 import { ulid } from "../id.js";
 import { setToolHooks } from "./hooks.js";
 import { recoverInterruptedTasks } from "./service.js";
-import { storedContent } from "./view.js";
+import { loadTranscript, storedContent } from "./view.js";
 import { userScope } from "../scope.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -337,6 +337,55 @@ describe("task runner", () => {
     await service.send({ userId: "user-a", botId: bot.id, text: "跑一下", mode: "queue" });
     await service.idle();
     expect(execs).toBe(0);
+  });
+
+  it("continues a conversation stored as a 0.73.1 Pi message", async () => {
+    const legacyUser =
+      '{"pi":{"role":"user","content":"在机器上跑 uname","timestamp":1700000000000},"text":"在机器上跑 uname"}';
+    const legacyAssistant =
+      '{"pi":{"role":"assistant","content":[{"type":"toolCall","id":"call_legacy","name":"shell_exec","arguments":{"cmd":"uname -a"}}],"api":"openai-completions","provider":"viate-bot","model":"gpt-test","usage":{"input":3,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":5,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":1700000001000},"text":""}';
+    const legacyTool =
+      '{"pi":{"role":"toolResult","toolCallId":"call_legacy","toolName":"shell_exec","content":[{"type":"text","text":"legacy-ok"}],"isError":false,"timestamp":1700000002000},"text":"legacy-ok"}';
+    let sawLegacy = false;
+    const modelPort = await listen(async (_req, res, body) => {
+      sawLegacy = body.includes("legacy-ok") && body.includes("在机器上跑 uname");
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(textSse(sawLegacy ? "从旧记录继续" : "没读到旧记录"));
+    });
+    const { config, ctx } = await opened({ VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1` });
+    const runtime = createRuntime(config, ctx.db);
+    const scope = userScope("user-a");
+    const bot = await createBot(
+      { db: ctx.db, key: ctx.key, credentials: runtime.credentials, providerId: runtime.identity.id },
+      scope,
+      { name: "Ada", model: "gpt-test" },
+    );
+    const chat = chatRepository(ctx.db);
+    const conversation = chat.insertConversation(scope, { id: ulid(), botId: bot.id, title: "旧记录" });
+    if (!conversation) throw new Error("no conversation");
+    const legacyRows = [
+      ["user", legacyUser],
+      ["assistant", legacyAssistant],
+      ["toolResult", legacyTool],
+    ] as const;
+    for (const [index, [role, contentJson]] of legacyRows.entries()) {
+      chat.insertMessage(scope, {
+        id: ulid(1_700_000_000_000 + index),
+        conversationId: conversation.id,
+        role,
+        contentJson,
+        taskId: null,
+      });
+    }
+    const restored = loadTranscript(chat.listMessages(scope, conversation.id) ?? []);
+    expect(restored.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
+    expect(restored[2]).toMatchObject({ role: "toolResult", toolName: "shell_exec", isError: false });
+    const { service } = await appFor(ctx, config, { host: "127.0.0.1", port: 9, token: "machine" });
+    await service.send({ userId: "user-a", botId: bot.id, text: "继续", mode: "queue", conversationId: conversation.id });
+    await service.idle();
+    expect(sawLegacy).toBe(true);
+    const after = chat.listMessages(scope, conversation.id) ?? [];
+    expect(after.some((message) => message.contentJson.includes("从旧记录继续"))).toBe(true);
   });
 });
 

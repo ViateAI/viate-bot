@@ -3,7 +3,7 @@ import type {
   AfterToolCallResult,
   BeforeToolCallContext,
   BeforeToolCallResult,
-} from "@mariozechner/pi-agent-core";
+} from "@earendil-works/pi-agent-core";
 
 /**
  * 第 5 步的安全表单从这里接。

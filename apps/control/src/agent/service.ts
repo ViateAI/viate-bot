@@ -1,5 +1,5 @@
-import { Agent, type AgentEvent, type AgentMessage } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, ToolResultMessage, UserMessage } from "@mariozechner/pi-ai";
+import { Agent, type AgentEvent, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import type { ControlConfig } from "../config.js";
 import { decrypt } from "../crypto.js";
 import { botRepository, type BotRecord } from "../db/bots.js";
@@ -51,7 +51,7 @@ export interface ChatServiceDeps {
   config: ControlConfig;
   key: Buffer;
   hub: ChatHub;
-  streamFn: Agent["streamFn"];
+  streamFn: StreamFn;
   tasks: Map<string, GatewayTask>;
   prepareEndpoint: (userId: string, onPhase: (phase: "starting" | "ready") => void) => Promise<MachineEndpoint>;
   now?: () => Date;
@@ -349,8 +349,16 @@ export function createChatService(deps: ChatServiceDeps) {
           messages: transcript,
         },
         streamFn: deps.streamFn,
-        transformContext: async (messages) =>
-          compactMessages(messages, Math.floor(deps.config.modelContextTokens * 0.6)),
+        transformContext: async (messages) => {
+          // 1.5.2 把系统提示词和工具声明放进 transcript 的 system 消息。
+          // 压缩仍只丢掉对话消息；系统消息不占这 60% 的预算，也不做摘要。
+          const budget = Math.floor(deps.config.modelContextTokens * 0.6);
+          const conversational = messages.filter((message) => message.role !== "system");
+          const compacted = compactMessages(conversational, budget);
+          if (compacted === conversational) return messages;
+          const systems = messages.filter((message) => message.role === "system");
+          return [...systems, ...compacted];
+        },
         beforeToolCall: async (context, signal) => getToolHooks().beforeToolCall?.(context, signal),
         afterToolCall: async (context, signal) => getToolHooks().afterToolCall?.(context, signal),
         sessionId: live.id,
@@ -403,6 +411,8 @@ export function createChatService(deps: ChatServiceDeps) {
       return seq;
     }
     if (event.type === "message_end") {
+      // 系统消息是当次运行的提示词和工具声明，下次启动会按 bot 重新生成，不写入对话。
+      if (event.message.role === "system") return seq;
       if (saved.has(event.message)) return seq;
       saved.add(event.message);
       const text = textOf(event.message);

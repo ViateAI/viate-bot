@@ -1,14 +1,19 @@
-import type { StreamFn } from "@mariozechner/pi-agent-core";
-import type {
-  Api,
-  AssistantMessage,
-  AssistantMessageEvent,
-  AssistantMessageEventStream,
-  Message,
-  Model,
-  ToolCall,
-  Usage,
-} from "@mariozechner/pi-ai";
+import {
+  getCurrentSystemPrompt,
+  getCurrentTools,
+  type Api,
+  type AssistantMessage,
+  type AssistantMessageEvent,
+  type AssistantMessageEventStream,
+  type Context,
+  type JsonObject,
+  type Model,
+  type SimpleStreamOptions,
+  type ToolCall,
+  type ToolResultMessage,
+  type Usage,
+  type UserMessage,
+} from "@earendil-works/pi-ai";
 import type { ControlConfig } from "../config.js";
 import { eventRepository } from "../db/events.js";
 import type { AppDatabase } from "../db/index.js";
@@ -44,7 +49,11 @@ export interface GatewayDeps {
 
 const DEFAULT_DELAYS = [200, 800];
 
-export function createGateway(deps: GatewayDeps): StreamFn {
+export function createGateway(deps: GatewayDeps): (
+  model: Model<Api>,
+  context: Context,
+  options?: SimpleStreamOptions,
+) => AssistantMessageEventStream {
   const fetchImpl = deps.fetch ?? fetch;
   const now = deps.now ?? (() => new Date());
   const delays = deps.retryDelays ?? DEFAULT_DELAYS;
@@ -52,7 +61,8 @@ export function createGateway(deps: GatewayDeps): StreamFn {
   return (model, context, options) => {
     const stream = new ModelEventStream();
     const task = deps.tasks.get(options?.sessionId ?? "");
-    void run(stream, model, context.systemPrompt, context.messages, context.tools, options?.signal, task).catch((error: unknown) => {
+    const parts = requestParts(context);
+    void run(stream, model, parts.system, parts.messages, parts.tools, options?.signal, task).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : "模型请求失败";
       pushError(stream, model, redactSecret(message, task?.secret ?? ""));
     });
@@ -62,8 +72,8 @@ export function createGateway(deps: GatewayDeps): StreamFn {
       target: ModelEventStream,
       current: Model<Api>,
       system: string | undefined,
-      messages: Message[],
-      tools: Array<{ name: string; description: string; parameters: unknown }> | undefined,
+      messages: ConversationMessage[],
+      tools: ToolDeclaration[] | undefined,
       signal: AbortSignal | undefined,
       currentTask: GatewayTask | undefined,
     ): Promise<void> {
@@ -158,6 +168,22 @@ function limitReason(config: ControlConfig, task: GatewayTask, nowMs: number): s
   return undefined;
 }
 
+type ConversationMessage = UserMessage | AssistantMessage | ToolResultMessage;
+type ToolDeclaration = { name: string; description: string; parameters: unknown };
+
+/**
+ * 1.5.2 的 streamFn 收到的是 TranscriptContext：提示词和工具在 system 消息里。
+ * 测试和旧的 Context 仍可能把 systemPrompt / tools 放在字段上。两边都认，对话消息里不再重复发送 system。
+ */
+function requestParts(context: Context): { system: string; messages: ConversationMessage[]; tools: ToolDeclaration[] } {
+  const transcript = getCurrentSystemPrompt(context.messages);
+  const system = context.systemPrompt && context.systemPrompt.length > 0 ? context.systemPrompt : transcript;
+  const declared = getCurrentTools(context.messages);
+  const tools = context.tools && context.tools.length > 0 ? context.tools : declared;
+  const messages = context.messages.filter((message): message is ConversationMessage => message.role !== "system");
+  return { system, messages, tools };
+}
+
 function endpoint(config: ControlConfig, model: Model<Api>): string {
   const path = config.modelApi === "openai-responses" ? "responses" : "chat/completions";
   const base = model.baseUrl || config.modelBaseUrl;
@@ -169,8 +195,8 @@ function requestBody(
   config: ControlConfig,
   model: Model<Api>,
   systemPrompt: string,
-  messages: Message[],
-  tools: Array<{ name: string; description: string; parameters: unknown }> | undefined,
+  messages: ConversationMessage[],
+  tools: ToolDeclaration[] | undefined,
   maxTokens: number,
 ): unknown {
   if (config.modelApi === "openai-responses") {
@@ -209,7 +235,7 @@ function requestBody(
   };
 }
 
-function toChatMessages(system: string, messages: Message[]): unknown[] {
+function toChatMessages(system: string, messages: ConversationMessage[]): unknown[] {
   const out: unknown[] = [{ role: "system", content: system }];
   for (const message of messages) {
     if (message.role === "user") {
@@ -236,7 +262,7 @@ function toChatMessages(system: string, messages: Message[]): unknown[] {
   return out;
 }
 
-function toResponsesItem(message: Message): unknown {
+function toResponsesItem(message: ConversationMessage): unknown {
   if (message.role === "user") return { role: "user", content: textContent(message.content) };
   if (message.role === "assistant") {
     return {
@@ -582,11 +608,11 @@ function pushAborted(stream: ModelEventStream, model: Model<Api>): void {
   stream.push({ type: "error", reason: "aborted", error: snapshot(message) });
 }
 
-function parseArgs(raw: string): Record<string, unknown> {
+function parseArgs(raw: string): JsonObject {
   if (!raw) return {};
   try {
     const value = JSON.parse(raw) as unknown;
-    if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+    if (value && typeof value === "object" && !Array.isArray(value)) return value as JsonObject;
   } catch {
     return {};
   }

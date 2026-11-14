@@ -11,9 +11,10 @@
     "machine": "tsx src/dev-machine.ts"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-schema": "1.5.2",
     "@fastify/websocket": "^11.2.0",
-    "@mariozechner/pi-agent-core": "0.73.1",
-    "@mariozechner/pi-ai": "0.73.1",
     "@viate-bot/integration-viate": "workspace:*",
     "@viate-bot/protocol": "workspace:*",
     "better-sqlite3": "^12.4.1",

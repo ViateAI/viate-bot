@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AssistantMessage, AssistantMessageEventStream } from "@mariozechner/pi-ai";
+import type { AssistantMessage, AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../config.js";
