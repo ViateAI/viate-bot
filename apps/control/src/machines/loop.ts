@@ -1,7 +1,6 @@
 import { decrypt } from "../crypto.js";
 import type { MachineRecord, MachineStore } from "../db/machines.js";
-import { userScope, type AdminScope } from "../scope.js";
-import type { DockerDriver } from "./docker.js";
+import { userScope, type AdminScope, type UserScope } from "../scope.js";
 import {
   decideReconcile,
   type ActivityProbe,
@@ -10,8 +9,17 @@ import {
   type ReconcileAction,
 } from "./reconcile.js";
 
+export interface ReconcileDriver {
+  create(store: MachineStore, scope: UserScope, spec: MachineRecord["spec"]): Promise<MachineRecord>;
+  start(userId: string): Promise<void>;
+  stop(userId: string, timeoutSec?: number): Promise<void>;
+  delete(store: MachineStore, scope: UserScope): Promise<void>;
+  inspect(userId: string): Promise<{ NetworkSettings?: { Networks?: DockerNetworkMap } } | null>;
+  actualState(userId: string): Promise<ActualState>;
+}
+
 export interface ReconcileDeps {
-  driver: DockerDriver;
+  driver: ReconcileDriver;
   store: MachineStore;
   admin: AdminScope;
   probe: ActivityProbe;
@@ -20,13 +28,16 @@ export interface ReconcileDeps {
   now?: () => Date;
 }
 
+/** 容器刚启动时 machined 可能还没监听。这段时间内的心跳失败不触发重启。 */
+export const STARTUP_GRACE_MS = 60_000;
+
 interface MachineRuntime {
   heartbeatFailures: number;
   restartFailures: number;
   stopRequestedAt: Date | null;
   idleSince: Date | null;
-  /** 至少成功心跳过一次。启动后的第一次成功之前，不把失败计为需要重启。 */
-  seenHealthy: boolean;
+  /** 此时间之前不计心跳失败。null 表示还没观察到这次启动。 */
+  healthyAfter: Date | null;
 }
 
 const runtime = new Map<string, MachineRuntime>();
@@ -39,45 +50,63 @@ function runtimeOf(userId: string): MachineRuntime {
     restartFailures: 0,
     stopRequestedAt: null,
     idleSince: null,
-    seenHealthy: false,
+    healthyAfter: null,
   };
   runtime.set(userId, created);
   return created;
 }
 
+export type ReconcileOutcome = ReconcileAction["type"] | "failed";
+
 /** 跑一轮对账。返回每个用户实际执行的动作，方便开发和测试观察。 */
-export async function reconcileOnce(deps: ReconcileDeps): Promise<Record<string, ReconcileAction["type"]>> {
+export async function reconcileOnce(deps: ReconcileDeps): Promise<Record<string, ReconcileOutcome>> {
   const now = deps.now?.() ?? new Date();
-  const actions: Record<string, ReconcileAction["type"]> = {};
+  const actions: Record<string, ReconcileOutcome> = {};
   // 调度器只用 AdminScope 列出机器元数据。完整记录（含 token）改用该行自己的 UserScope 读取。
   for (const meta of deps.store.list(deps.admin)) {
     const record = deps.store.find(userScope(meta.userId));
     if (!record || record.id !== meta.id) continue;
-    actions[record.userId] = await reconcileUser(deps, record, now);
+    try {
+      actions[record.userId] = await reconcileUser(deps, record, now);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`对账 ${record.userId} 失败：${message}`);
+      actions[record.userId] = "failed";
+    }
   }
   return actions;
+}
+
+/** 运行时计数放在进程内存里。测试在用例之间清掉，避免互相影响。 */
+export function resetReconcileRuntime(): void {
+  runtime.clear();
 }
 
 async function reconcileUser(deps: ReconcileDeps, record: MachineRecord, now: Date): Promise<ReconcileAction["type"]> {
   const state = runtimeOf(record.userId);
   const desired = nextDesired(deps, record, state, now);
   const actual = await deps.driver.actualState(record.userId);
-  if (actual === "running") await observeHeartbeat(deps, record, state);
-  else {
+  if (actual === "running") {
+    const healthyAfter = state.healthyAfter ?? new Date(now.getTime() + STARTUP_GRACE_MS);
+    state.healthyAfter = healthyAfter;
+    if (now < healthyAfter) state.heartbeatFailures = 0;
+    else await observeHeartbeat(deps, record, state);
+  } else {
     state.heartbeatFailures = 0;
-    state.seenHealthy = false;
+    state.healthyAfter = null;
   }
 
+  const stopWaitedSec = state.stopRequestedAt ? (now.getTime() - state.stopRequestedAt.getTime()) / 1000 : 0;
   const action = decideReconcile({
     desired,
     actual,
-    heartbeatFailures: state.seenHealthy ? state.heartbeatFailures : 0,
+    heartbeatFailures: state.heartbeatFailures,
     restartFailures: state.restartFailures,
-    stopWaitedSec: state.stopRequestedAt ? (now.getTime() - state.stopRequestedAt.getTime()) / 1000 : 60,
+    stopWaitedSec,
   });
   if (action.type === "wait-stop") state.stopRequestedAt ??= now;
   else state.stopRequestedAt = null;
-  await apply(deps, record, actual, action);
+  await apply(deps, record, actual, action, now);
   return action.type;
 }
 
@@ -89,7 +118,9 @@ function nextDesired(
 ): DesiredState {
   if (record.state !== "running") {
     state.idleSince = null;
-    return record.state === "deleted" ? "deleted" : "stopped";
+    if (record.state === "deleted") return "deleted";
+    // error 只表示对账无法自行恢复。容器仍按 stopped 收敛，但数据库状态留给 apply 保留。
+    return "stopped";
   }
   const busy =
     deps.probe.hasActiveTask(record.userId) ||
@@ -111,7 +142,6 @@ async function observeHeartbeat(deps: ReconcileDeps, record: MachineRecord, stat
   if (healthy) {
     state.heartbeatFailures = 0;
     state.restartFailures = 0;
-    state.seenHealthy = true;
     return;
   }
   state.heartbeatFailures += 1;
@@ -119,7 +149,7 @@ async function observeHeartbeat(deps: ReconcileDeps, record: MachineRecord, stat
 
 async function ping(deps: ReconcileDeps, record: MachineRecord): Promise<boolean> {
   const info = await deps.driver.inspect(record.userId);
-  const address = info ? firstAddress(info.NetworkSettings.Networks) : undefined;
+  const address = info ? firstAddress(info.NetworkSettings?.Networks) : undefined;
   if (!address) return false;
   try {
     const response = await fetch(`http://${address}:7070/health`, {
@@ -139,6 +169,7 @@ async function apply(
   record: MachineRecord,
   actual: ActualState,
   action: ReconcileAction,
+  now: Date,
 ): Promise<void> {
   const state = runtimeOf(record.userId);
   const scope = userScope(record.userId);
@@ -146,28 +177,34 @@ async function apply(
     await deps.driver.create(deps.store, scope, record.spec);
     await deps.driver.start(record.userId);
     deps.store.update(scope, { state: "running" });
+    state.healthyAfter = new Date(now.getTime() + STARTUP_GRACE_MS);
   } else if (action.type === "start") {
     await deps.driver.start(record.userId);
     deps.store.update(scope, { state: "running" });
+    state.healthyAfter = new Date(now.getTime() + STARTUP_GRACE_MS);
   } else if (action.type === "restart") {
     await deps.driver.stop(record.userId);
     try {
       await deps.driver.start(record.userId);
-      state.restartFailures += 1;
-      state.heartbeatFailures = 0;
-      state.seenHealthy = false;
+      noteRestart(state, now);
     } catch (error) {
-      state.restartFailures += 1;
+      noteRestart(state, now);
       throw error;
     }
   } else if (action.type === "stop") {
     await deps.driver.stop(record.userId);
-    deps.store.update(scope, { state: "stopped" });
+    if (record.state !== "error") deps.store.update(scope, { state: "stopped" });
   } else if (action.type === "mark-error") {
     deps.store.update(scope, { state: "error" });
   } else if (action.type === "delete" && actual !== "missing") {
     await deps.driver.delete(deps.store, scope);
   }
+}
+
+function noteRestart(state: MachineRuntime, now: Date): void {
+  state.restartFailures += 1;
+  state.heartbeatFailures = 0;
+  state.healthyAfter = new Date(now.getTime() + STARTUP_GRACE_MS);
 }
 
 function firstAddress(networks: DockerNetworkMap | undefined): string | undefined {

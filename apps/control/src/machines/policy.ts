@@ -1,6 +1,12 @@
 import type { ContainerCreateOptions, VolumeCreateOptions } from "dockerode";
 
-const ALLOWED_CAPS = new Set(["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER"]);
+const ALLOWED_CAPS: Record<string, true> = {
+  CHOWN: true,
+  SETUID: true,
+  SETGID: true,
+  DAC_OVERRIDE: true,
+  FOWNER: true,
+};
 
 export interface MachineSpec {
   cpu: number;
@@ -69,7 +75,7 @@ export function assertMachinePolicy(userId: string, options: ContainerCreateOpti
   const dropped = stringList(host.CapDrop, "CapDrop");
   if (!dropped.includes("ALL")) throw new MachinePolicyError("CapDrop 必须包含 ALL");
   for (const cap of stringList(host.CapAdd, "CapAdd")) {
-    if (!ALLOWED_CAPS.has(cap)) throw new MachinePolicyError(`不允许的 CapAdd：${cap}`);
+    if (ALLOWED_CAPS[cap] !== true) throw new MachinePolicyError(`不允许的 CapAdd：${cap}`);
   }
 
   assertEmpty(host.Devices, "Devices");

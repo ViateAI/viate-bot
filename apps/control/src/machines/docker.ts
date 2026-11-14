@@ -37,7 +37,8 @@ export class DockerDriver {
   async create(store: MachineStore, scope: UserScope, spec: MachineSpec): Promise<MachineRecord> {
     const userId = scope.userId;
     const existing = store.find(scope);
-    if (existing && existing.state !== "deleted" && existing.containerId) {
+    // 数据库里留下的 containerId 可能指向已经消失的容器。容器还在才拒绝，消失了就原地重建。
+    if (existing && existing.state !== "deleted" && (await this.actualState(userId)) !== "missing") {
       throw new Error(`用户 ${userId} 已经有一台机器`);
     }
     const machineId = existing?.id ?? randomBytes(16).toString("hex");
