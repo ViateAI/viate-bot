@@ -203,7 +203,7 @@ function requestBody(
     return {
       model: model.id,
       instructions: systemPrompt,
-      input: messages.map(toResponsesItem),
+      input: messages.map((message) => toResponsesItem(message, model)),
       stream: true,
       max_output_tokens: maxTokens,
       ...(tools && tools.length > 0
@@ -220,7 +220,7 @@ function requestBody(
   }
   return {
     model: model.id,
-    messages: toChatMessages(systemPrompt, messages),
+    messages: toChatMessages(systemPrompt, messages, model),
     stream: true,
     stream_options: { include_usage: true },
     max_tokens: maxTokens,
@@ -235,8 +235,9 @@ function requestBody(
   };
 }
 
-function toChatMessages(system: string, messages: ConversationMessage[]): unknown[] {
+function toChatMessages(system: string, messages: ConversationMessage[], model: Model<Api>): unknown[] {
   const out: unknown[] = [{ role: "system", content: system }];
+  const vision = model.input.includes("image");
   for (const message of messages) {
     if (message.role === "user") {
       out.push({ role: "user", content: textContent(message.content) });
@@ -257,12 +258,19 @@ function toChatMessages(system: string, messages: ConversationMessage[]): unknow
       out.push(item);
     } else {
       out.push({ role: "tool", tool_call_id: message.toolCallId, content: textContent(message.content) });
+      const images = vision ? imageParts(message.content) : [];
+      if (images.length > 0) {
+        out.push({
+          role: "user",
+          content: [{ type: "text", text: "工具返回的图片：" }, ...images],
+        });
+      }
     }
   }
   return out;
 }
 
-function toResponsesItem(message: ConversationMessage): unknown {
+function toResponsesItem(message: ConversationMessage, model: Model<Api>): unknown {
   if (message.role === "user") return { role: "user", content: textContent(message.content) };
   if (message.role === "assistant") {
     return {
@@ -273,7 +281,24 @@ function toResponsesItem(message: ConversationMessage): unknown {
         .join(""),
     };
   }
-  return { role: "user", content: textContent(message.content) };
+  const images = model.input.includes("image") ? imageParts(message.content) : [];
+  if (images.length === 0) return { role: "user", content: textContent(message.content) };
+  return {
+    role: "user",
+    content: [
+      { type: "input_text", text: textContent(message.content) || "截图" },
+      ...images.map((image) => ({ type: "input_image", detail: "auto", image_url: image.image_url.url })),
+    ],
+  };
+}
+
+function imageParts(content: ToolResultMessage["content"]): Array<{ type: "image_url"; image_url: { url: string } }> {
+  const parts: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+  for (const block of content) {
+    if (block.type !== "image") continue;
+    parts.push({ type: "image_url", image_url: { url: `data:${block.mimeType};base64,${block.data}` } });
+  }
+  return parts;
 }
 
 function textContent(content: string | Array<{ type: string; text?: string }>): string {
@@ -711,7 +736,7 @@ export function buildModel(config: ControlConfig, modelId: string): Model<Api> {
     provider: "viate-bot",
     baseUrl: config.modelBaseUrl,
     reasoning: false,
-    input: ["text"],
+    input: config.visionModels.includes(modelId) ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: config.modelContextTokens,
     maxTokens: config.modelMaxTokens,

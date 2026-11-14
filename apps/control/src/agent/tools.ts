@@ -1,5 +1,5 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { num, obj, opt, str } from "@earendil-works/pi-schema";
+import { map, num, obj, opt, str } from "@earendil-works/pi-schema";
 import { MachinedClient } from "../machines/client.js";
 import { capHeadTail, FS_READ_LIMIT } from "./text.js";
 
@@ -7,6 +7,7 @@ const shellSchema = obj({
   cmd: str({ description: "要执行的命令" }),
   cwd: opt(str({ description: "工作目录，缺省是 /home/bot" })),
   timeoutSec: opt(num({ description: "超时秒数，1 到 600，缺省 30" })),
+  env: opt(map(str({ description: "环境变量的值，可以写 {{secret:NAME}}" }))),
 });
 
 const readSchema = obj({
@@ -49,6 +50,7 @@ export function machineTools(client: MachinedClient): AgentTool[] {
         cmd: params.cmd,
         timeoutSec,
         ...(params.cwd !== undefined ? { cwd: params.cwd } : {}),
+        ...(params.env !== undefined ? { env: params.env } : {}),
         ...(signal ? { signal } : {}),
       });
       const stdout = capHeadTail(result.stdout);

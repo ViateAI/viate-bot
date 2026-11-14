@@ -3,6 +3,17 @@ import type { Socket } from "node:net";
 import { TLSSocket } from "node:tls";
 import WebSocket, { type RawData } from "ws";
 import { UserBrowserLock } from "./lock.js";
+import {
+  captureJpeg,
+  clickNode,
+  quadCenter,
+  readAxTree,
+  scrollPage,
+  selectOption,
+  typeInto,
+  waitForPage,
+  type CdpSend,
+} from "./page.js";
 
 const CDP_TIMEOUT_MS = 30_000;
 
@@ -11,10 +22,18 @@ const CDP_TIMEOUT_MS = 30_000;
  * 调用方传入 WebSocket 地址（machined 的 /browser/cdp 或本机 9222），本模块不读 machined 的进程状态。
  * 每个 bot 只操作自己 openWindow 记录的 target。
  */
+interface WindowRecord extends BotWindow {
+  activeTargetId: string;
+}
+
 export class BrowserClient {
-  private readonly windows = new Map<string, BotWindow>();
+  private readonly windows = new Map<string, WindowRecord>();
   private readonly opening = new Set<string>();
   private readonly owner = new AsyncLocalStorage<true>();
+  private readonly refs = new Map<string, Map<string, number>>();
+  private readonly attached = new Map<string, string>();
+  private refSerial = 1;
+  private readonly send: CdpSend = (method, params, sessionId) => this.cdp.send(method, params, sessionId);
 
   private constructor(
     private readonly cdp: CdpConnection,
@@ -59,14 +78,16 @@ export class BrowserClient {
       const win = await this.cdp.send<{ windowId: number }>("Browser.getWindowForTarget", { targetId });
       await this.cdp.send("Page.enable", {}, attached.sessionId);
       await this.cdp.send("Runtime.enable", {}, attached.sessionId);
-      const record: BotWindow = {
+      const record: WindowRecord = {
         botId,
         targetId,
         windowId: win.windowId,
         sessionId: attached.sessionId,
+        activeTargetId: targetId,
       };
+      this.attached.set(targetId, attached.sessionId);
       this.windows.set(botId, record);
-      await this.waitUntilReady(record.sessionId);
+      await this.waitUntilReady(record.sessionId, url);
       return { ...record };
     } catch (error) {
       this.windows.delete(botId);
@@ -85,6 +106,8 @@ export class BrowserClient {
       try {
         await this.cdp.send("Target.closeTarget", { targetId: window.targetId });
       } finally {
+        this.dropRefs(botId);
+        this.attached.delete(window.targetId);
         this.windows.delete(botId);
       }
     });
@@ -92,10 +115,26 @@ export class BrowserClient {
 
   async navigate(botId: string, url: string): Promise<void> {
     return this.use(async () => {
+      this.dropRefs(botId);
       const window = this.requireWindow(botId);
       const result = await this.cdp.send<{ errorText?: string }>("Page.navigate", { url }, window.sessionId);
       if (result.errorText) throw new Error(result.errorText);
-      await this.waitUntilReady(window.sessionId);
+      await this.waitUntilReady(window.sessionId, url);
+    });
+  }
+
+  /** 没有窗口就新建，已有窗口就在当前标签页打开。导航会使旧 ref 失效。 */
+  async open(botId: string, url: string): Promise<BotWindow> {
+    return this.use(async () => {
+      this.dropRefs(botId);
+      if (this.windows.has(botId)) {
+        const window = this.requireWindow(botId);
+        const result = await this.cdp.send<{ errorText?: string }>("Page.navigate", { url }, window.sessionId);
+        if (result.errorText) throw new Error(result.errorText);
+        await this.waitUntilReady(window.sessionId, url);
+        return { ...window };
+      }
+      return this.openWindowNow(botId, url);
     });
   }
 
@@ -159,15 +198,186 @@ export class BrowserClient {
     });
   }
 
+  get connected(): boolean {
+    return this.cdp.isOpen();
+  }
+
+  async snapshot(botId: string): Promise<string> {
+    return this.use(async () => {
+      const window = this.requireWindow(botId);
+      const href = await this.evaluateOnSession<string>(window.sessionId, "location.href").catch(() => "");
+      const tree = await readAxTree(this.send, window.sessionId, () => this.issueRef());
+      this.refs.set(botId, tree.refs);
+      const url = href ? `url: ${href}\n` : "";
+      return `${url}${tree.text || "（页面上没有可操作的节点）"}`;
+    });
+  }
+
+  async click(botId: string, ref: string): Promise<{ x: number; y: number }> {
+    return this.use(async () => {
+      const window = this.requireWindow(botId);
+      const backendNodeId = this.resolveRef(botId, ref);
+      return clickNode(this.send, window.sessionId, backendNodeId);
+    });
+  }
+
+  async typeText(
+    botId: string,
+    ref: string,
+    text: string,
+    options: { clear?: boolean; submit?: boolean } = {},
+  ): Promise<string> {
+    return this.use(async () => {
+      const window = this.requireWindow(botId);
+      const backendNodeId = this.resolveRef(botId, ref);
+      if (options.submit) await this.activateWindow(window);
+      return typeInto(this.send, window.sessionId, backendNodeId, text, options);
+    });
+  }
+
+  async select(botId: string, ref: string, value: string): Promise<string> {
+    return this.use(async () => {
+      const window = this.requireWindow(botId);
+      return selectOption(this.send, window.sessionId, this.resolveRef(botId, ref), value);
+    });
+  }
+
+  async scroll(botId: string, deltaX: number, deltaY: number, ref?: string): Promise<void> {
+    return this.use(async () => {
+      const window = this.requireWindow(botId);
+      let point: { x: number; y: number } | undefined;
+      if (ref !== undefined) {
+        const backendNodeId = this.resolveRef(botId, ref);
+        await this.send("DOM.scrollIntoViewIfNeeded", { backendNodeId }, window.sessionId);
+        const box = await this.send<{ model?: { content?: number[] } }>("DOM.getBoxModel", { backendNodeId }, window.sessionId);
+        const quad = box.model?.content;
+        if (quad && quad.length >= 8) point = quadCenter(quad);
+      }
+      await scrollPage(this.send, window.sessionId, deltaX, deltaY, point);
+    });
+  }
+
+  async waitFor(
+    botId: string,
+    options: { text?: string; selector?: string; ms?: number; timeoutMs?: number },
+  ): Promise<string> {
+    return this.use(async () => {
+      const window = this.requireWindow(botId);
+      return waitForPage(this.send, window.sessionId, options);
+    });
+  }
+
+  async listTabs(botId: string): Promise<Array<{ index: number; url: string; title: string; active: boolean }>> {
+    return this.use(async () => {
+      const window = this.requireWindow(botId);
+      const tabs = await this.tabsInWindow(window);
+      return tabs.map((tab, index) => ({
+        index,
+        url: tab.url,
+        title: tab.title,
+        active: tab.targetId === window.activeTargetId,
+      }));
+    });
+  }
+
+  async switchTab(botId: string, index: number): Promise<string> {
+    return this.use(async () => {
+      const window = this.requireWindow(botId);
+      const tabs = await this.tabsInWindow(window);
+      const tab = tabs[index];
+      if (!tab) throw new Error("没有这个标签页");
+      this.dropRefs(botId);
+      const sessionId = await this.attachSession(tab.targetId);
+      window.sessionId = sessionId;
+      window.activeTargetId = tab.targetId;
+      await this.cdp.send("Target.activateTarget", { targetId: tab.targetId });
+      await this.cdp.send("Page.bringToFront", {}, sessionId);
+      return tab.url;
+    });
+  }
+
+  async closeTab(botId: string, index: number): Promise<void> {
+    return this.use(async () => {
+      const window = this.requireWindow(botId);
+      const tabs = await this.tabsInWindow(window);
+      const tab = tabs[index];
+      if (!tab) throw new Error("没有这个标签页");
+      this.dropRefs(botId);
+      await this.cdp.send("Target.closeTarget", { targetId: tab.targetId });
+      this.attached.delete(tab.targetId);
+      const rest = tabs.filter((item) => item.targetId !== tab.targetId);
+      if (rest.length === 0) {
+        this.windows.delete(botId);
+        return;
+      }
+      if (tab.targetId === window.activeTargetId) {
+        const next = rest[0];
+        if (!next) return;
+        const sessionId = await this.attachSession(next.targetId);
+        window.sessionId = sessionId;
+        window.activeTargetId = next.targetId;
+      }
+    });
+  }
+
+  async screenshotJpeg(botId: string): Promise<{ data: Buffer; width: number; height: number }> {
+    return this.use(async () => {
+      const window = this.requireWindow(botId);
+      return captureJpeg(this.send, window.sessionId);
+    });
+  }
+
   async close(): Promise<void> {
     this.windows.clear();
+    this.refs.clear();
+    this.attached.clear();
     await this.cdp.close();
   }
 
-  private requireWindow(botId: string): BotWindow {
+  private requireWindow(botId: string): WindowRecord {
     const window = this.windows.get(botId);
     if (!window) throw new Error(`bot ${botId} 没有窗口`);
     return window;
+  }
+
+  private issueRef(): string {
+    const ref = `e${this.refSerial}`;
+    this.refSerial += 1;
+    return ref;
+  }
+
+  private dropRefs(botId: string): void {
+    this.refs.delete(botId);
+  }
+
+  private resolveRef(botId: string, ref: string): number {
+    const backend = this.refs.get(botId)?.get(ref);
+    if (backend === undefined) throw new Error(`ref ${ref} 已过期或未知，请重新调用 browser_snapshot`);
+    return backend;
+  }
+
+  private async attachSession(targetId: string): Promise<string> {
+    const known = this.attached.get(targetId);
+    if (known) return known;
+    const attached = await this.cdp.send<{ sessionId: string }>("Target.attachToTarget", { targetId, flatten: true });
+    await this.cdp.send("Page.enable", {}, attached.sessionId);
+    await this.cdp.send("Runtime.enable", {}, attached.sessionId);
+    this.attached.set(targetId, attached.sessionId);
+    return attached.sessionId;
+  }
+
+  private async tabsInWindow(window: WindowRecord): Promise<Array<{ targetId: string; url: string; title: string }>> {
+    const listed = await this.cdp.send<{ targetInfos?: Array<{ targetId?: string; type?: string; url?: string; title?: string }> }>("Target.getTargets");
+    const pages = (listed.targetInfos ?? []).filter((target) => target.type === "page" && target.targetId);
+    const mine: Array<{ targetId: string; url: string; title: string }> = [];
+    for (const target of pages) {
+      const targetId = target.targetId;
+      if (!targetId) continue;
+      const owner = await this.cdp.send<{ windowId?: number }>("Browser.getWindowForTarget", { targetId });
+      if (owner.windowId !== window.windowId) continue;
+      mine.push({ targetId, url: target.url ?? "", title: target.title ?? "" });
+    }
+    return mine;
   }
 
   private async evaluateOnSession<T>(sessionId: string, expression: string): Promise<T> {
@@ -201,15 +411,26 @@ export class BrowserClient {
     throw new Error(last);
   }
 
-  private async waitUntilReady(sessionId: string): Promise<void> {
+  /** createTarget 一开始停在 about:blank，readyState 已经是 complete。要等到离开空白页，失败页直接报错。 */
+  private async waitUntilReady(sessionId: string, url?: string): Promise<void> {
+    const expectsNavigation = url !== undefined && url !== "about:blank";
     const deadline = Date.now() + CDP_TIMEOUT_MS;
     let last = "页面未就绪";
     while (Date.now() < deadline) {
       try {
         const state = await this.evaluateOnSession<string>(sessionId, "document.readyState");
-        if (state === "complete" || state === "interactive") return;
-        last = `readyState=${state}`;
+        if (state !== "complete" && state !== "interactive") {
+          last = `readyState=${state}`;
+        } else if (!expectsNavigation) {
+          return;
+        } else {
+          const href = await this.evaluateOnSession<string>(sessionId, "location.href");
+          if (typeof href === "string" && href.startsWith("chrome-error:")) throw new Error(`页面没有打开：${href}`);
+          if (typeof href === "string" && href.length > 0 && !href.startsWith("about:")) return;
+          last = `href=${String(href)} readyState=${state}`;
+        }
       } catch (error) {
+        if (error instanceof Error && error.message.startsWith("页面没有打开")) throw error;
         last = error instanceof Error ? error.message : String(error);
       }
       await delay(50);
@@ -312,6 +533,10 @@ class CdpConnection {
       throw error;
     }
     return connection;
+  }
+
+  isOpen(): boolean {
+    return this.ws.readyState === WebSocket.OPEN;
   }
 
   send<T>(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<T> {

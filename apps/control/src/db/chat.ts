@@ -3,7 +3,7 @@ import type { UserScope } from "../scope.js";
 import type { AppDatabase } from "./index.js";
 import { bots, conversations, messages, taskSteps, tasks } from "./schema.js";
 
-const ACTIVE_STATES = ["queued", "running", "waiting_approval", "waiting_takeover"];
+const ACTIVE_STATES = ["queued", "running", "waiting_approval", "waiting_takeover", "waiting_input"];
 
 export interface ConversationRecord {
   id: string;
@@ -165,7 +165,7 @@ export function chatRepository(db: AppDatabase) {
         .all()
         .map(toTask);
     },
-    findActiveByBot(scope: UserScope, botId: string, state: "running" | "queued"): TaskRecord | undefined {
+    findActiveByBot(scope: UserScope, botId: string, state: "running" | "queued" | "waiting_input"): TaskRecord | undefined {
       if (!ownsBot(db, scope, botId)) return undefined;
       const row = db
         .select()
@@ -285,6 +285,31 @@ export function chatRepository(db: AppDatabase) {
         .innerJoin(bots, eq(bots.id, tasks.botId))
         .where(inArray(tasks.state, states))
         .all();
+    },
+    /** 控制面重启后，把仍在等输入的任务装回来。不带密钥值。 */
+    systemWaiting(): Array<TaskMeta & { waitStartedAt: string | null }> {
+      const rows = db
+        .select({
+          id: tasks.id,
+          botId: tasks.botId,
+          userId: bots.userId,
+          conversationId: tasks.conversationId,
+          state: tasks.state,
+          waitStartedAt: taskSteps.startedAt,
+        })
+        .from(tasks)
+        .innerJoin(bots, eq(bots.id, tasks.botId))
+        .leftJoin(taskSteps, and(eq(taskSteps.taskId, tasks.id), eq(taskSteps.kind, "tool"), eq(taskSteps.status, "running")))
+        .where(and(eq(tasks.state, "waiting_input"), isNull(bots.deletedAt)))
+        .all();
+      const byId = new Map<string, TaskMeta & { waitStartedAt: string | null }>();
+      for (const row of rows) {
+        const current = byId.get(row.id);
+        if (!current || (row.waitStartedAt && (!current.waitStartedAt || row.waitStartedAt > current.waitStartedAt))) {
+          byId.set(row.id, row);
+        }
+      }
+      return [...byId.values()];
     },
   };
 }

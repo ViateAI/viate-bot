@@ -19,9 +19,10 @@ export function buildSystemPrompt(platform: string, instructions: string, status
   return [platform.trim(), instructions.trim(), status.trim()].filter((part) => part.length > 0).join("\n\n");
 }
 
-export function statusBlock(now: Date, machine: string): string {
+export function statusBlock(now: Date, machine: string, secretNames: string[] = []): string {
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  return `当前时间：${now.toISOString()}（${zone}）\n机器状态：${machine}`;
+  const names = secretNames.length > 0 ? secretNames.join("、") : "（无）";
+  return `当前时间：${now.toISOString()}（${zone}）\n机器状态：${machine}\n已保存的密钥（只有名字，用 {{secret:NAME}} 引用）：${names}`;
 }
 
 export function estimateTokens(messages: AgentMessage[]): number {

@@ -30,7 +30,7 @@ export function ChatPage({ botId }: { botId: string }) {
     queryFn: () => api<{ tasks: Task[] }>(`/api/conversations/${conversationId}/tasks`),
     refetchInterval: (query) => {
       const latest = query.state.data?.tasks[0];
-      return latest && (latest.state === "queued" || latest.state === "running") ? 1000 : false;
+      return latest && (latest.state === "queued" || latest.state === "running" || latest.state === "waiting_input") ? 1000 : false;
     },
   });
   const task = tasks.data?.tasks[0];
@@ -38,9 +38,11 @@ export function ChatPage({ botId }: { botId: string }) {
     queryKey: ["steps", task?.id],
     enabled: Boolean(task?.id),
     queryFn: () => api<{ steps: Step[] }>(`/api/tasks/${task?.id}/steps`),
-    refetchInterval: task && (task.state === "queued" || task.state === "running") ? 1000 : false,
+    refetchInterval: task && (task.state === "queued" || task.state === "running" || task.state === "waiting_input") ? 1000 : false,
   });
   const active = task?.state === "queued" || task?.state === "running";
+  const stoppable = active || task?.state === "waiting_input";
+  const secret = task?.state === "waiting_input" ? pendingSecret(steps.data?.steps ?? []) : undefined;
 
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -128,15 +130,17 @@ export function ChatPage({ botId }: { botId: string }) {
             </li>
           ) : null}
         </ol>
+        {secret && task ? (
+          <SecretForm key={`${task.id}:${secret.name}`} taskId={task.id} request={secret} onDone={() => void queryClient.invalidateQueries({ queryKey: ["tasks", conversationId] })} />
+        ) : null}
         <ol data-testid="step-list" className="space-y-2">
           {(steps.data?.steps ?? []).map((step) => (
             <li key={step.id}>
               <details className="rounded border border-neutral-800 px-3 py-2 text-sm">
                 <summary>
-                  {step.kind === "tool" ? "工具" : "模型"} · {step.status}
+                  {step.kind === "tool" ? toolTitle(step) : "模型"} · {step.status}
                 </summary>
-                <pre className="mt-2 overflow-auto text-xs text-neutral-300">{JSON.stringify(step.request, null, 2)}</pre>
-                <pre className="mt-2 overflow-auto text-xs text-neutral-400">{JSON.stringify(step.response, null, 2)}</pre>
+                <pre className="mt-2 overflow-auto whitespace-pre-wrap text-xs text-neutral-300">{stepBody(step)}</pre>
               </details>
             </li>
           ))}
@@ -174,7 +178,7 @@ export function ChatPage({ botId }: { botId: string }) {
             data-testid="stop-task"
             className="rounded border border-neutral-600 px-3 py-2 text-sm disabled:opacity-40"
             type="button"
-            disabled={!active || stop.isPending}
+            disabled={!stoppable || stop.isPending}
             onClick={() => stop.mutate()}
           >
             停止
@@ -183,4 +187,104 @@ export function ChatPage({ botId }: { botId: string }) {
       </form>
     </section>
   );
+}
+
+interface SecretRequestView {
+  name: string;
+  label: string;
+  kind: "password" | "otp" | "text";
+  reason: string;
+}
+
+function SecretForm({ taskId, request, onDone }: { taskId: string; request: SecretRequestView; onDone: () => void }) {
+  const [value, setValue] = useState("");
+  const [save, setSave] = useState(request.kind === "password");
+  const [error, setError] = useState("");
+  const submit = useMutation({
+    mutationFn: (decision: "provide" | "reject") =>
+      api(`/api/tasks/${taskId}/secrets`, {
+        method: "POST",
+        body: JSON.stringify({
+          decision,
+          name: request.name,
+          ...(decision === "provide" ? { value, ...(request.kind === "otp" ? {} : { save }) } : {}),
+        }),
+      }),
+    onSuccess: () => {
+      setValue("");
+      setError("");
+      onDone();
+    },
+    onError: (caught: Error) => setError(caught.message),
+  });
+
+  return (
+    <form
+      data-testid="secret-form"
+      className="grid gap-2 rounded border border-amber-700/60 bg-neutral-900 p-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        submit.mutate("provide");
+      }}
+    >
+      <p className="text-sm font-medium">{request.label}</p>
+      <p className="text-sm text-neutral-400">{request.reason}</p>
+      <input
+        data-testid="secret-value"
+        className="rounded border border-neutral-700 bg-neutral-950 px-3 py-2"
+        type={request.kind === "text" ? "text" : "password"}
+        autoComplete={request.kind === "otp" ? "one-time-code" : request.kind === "password" ? "current-password" : "off"}
+        inputMode={request.kind === "otp" ? "numeric" : undefined}
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+      />
+      {request.kind === "otp" ? null : (
+        <label className="flex items-center gap-2 text-sm text-neutral-300">
+          <input data-testid="secret-save" type="checkbox" checked={save} onChange={(event) => setSave(event.target.checked)} />
+          保存以便下次使用
+        </label>
+      )}
+      {error ? <p className="text-sm text-red-300">{error}</p> : null}
+      <div className="flex gap-2">
+        <button data-testid="secret-submit" className="rounded bg-white px-3 py-2 text-sm font-medium text-neutral-950" type="submit" disabled={submit.isPending || value.length === 0}>
+          提交
+        </button>
+        <button data-testid="secret-reject" className="rounded border border-neutral-600 px-3 py-2 text-sm" type="button" disabled={submit.isPending} onClick={() => submit.mutate("reject")}>
+          拒绝
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function pendingSecret(steps: Step[]): SecretRequestView | undefined {
+  const step = [...steps].reverse().find((item) => item.kind === "tool" && item.status === "running");
+  const request = step?.request;
+  if (!request || typeof request !== "object") return undefined;
+  const record = request as { name?: string; args?: { name?: string; label?: string; kind?: string; reason?: string } };
+  if (record.name !== "request_secret" || !record.args) return undefined;
+  const kind = record.args.kind;
+  if (kind !== "password" && kind !== "otp" && kind !== "text") return undefined;
+  if (!record.args.name || !record.args.label || !record.args.reason) return undefined;
+  return { name: record.args.name, label: record.args.label, kind, reason: record.args.reason };
+}
+
+function toolTitle(step: Step): string {
+  const request = step.request as { name?: string } | null;
+  return request?.name ? `工具 ${request.name}` : "工具";
+}
+
+function stepBody(step: Step): string {
+  const request = step.request as { name?: string; args?: unknown } | null;
+  const response = step.response as { text?: string } | null;
+  if (request?.name === "browser_screenshot") return response?.text ?? "截图";
+  if (request?.name === "browser_snapshot") return clip(response?.text ?? "");
+  const args = JSON.stringify(request?.args ?? request, null, 2);
+  const result = response?.text ? `\n\n${clip(response.text)}` : "";
+  return `${args}${result}`;
+}
+
+function clip(text: string): string {
+  if (text.length <= 2000) return text;
+  return `${text.slice(0, 2000)}\n…[已截断]…`;
 }

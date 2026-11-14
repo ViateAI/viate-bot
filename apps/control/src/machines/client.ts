@@ -19,6 +19,7 @@ export interface ExecInput {
   cmd: string;
   cwd?: string;
   timeoutSec?: number;
+  env?: Record<string, string>;
   signal?: AbortSignal;
 }
 
@@ -34,6 +35,7 @@ export class MachinedClient {
       cmd: input.cmd,
       ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
       ...(input.timeoutSec !== undefined ? { timeoutSec: input.timeoutSec } : {}),
+      ...(input.env !== undefined ? { env: input.env } : {}),
     }, input.signal);
     if (!response.ok) throw new Error(await readError(response));
     if (!response.body) throw new Error("exec 没有返回内容");

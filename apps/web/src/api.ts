@@ -88,6 +88,8 @@ export function taskLabel(state: string, machine: "starting" | "ready" | "idle")
       return "等待批准";
     case "waiting_takeover":
       return "等待接管";
+    case "waiting_input":
+      return "等待输入";
     case "succeeded":
       return "已完成";
     case "failed":

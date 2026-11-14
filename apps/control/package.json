@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "tsx src/main.ts",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "pnpm --filter @viate-bot/protocol build && pnpm --filter @viate-bot/integration-viate build && tsc -p tsconfig.json --noEmit",
-    "test": "pnpm --filter @viate-bot/protocol build && pnpm --filter @viate-bot/integration-viate build && vitest run",
+    "typecheck": "pnpm --filter @viate-bot/protocol build && pnpm --filter @viate-bot/integration-viate build && pnpm --filter @viate-bot/browser build && tsc -p tsconfig.json --noEmit",
+    "test": "pnpm --filter @viate-bot/protocol build && pnpm --filter @viate-bot/integration-viate build && pnpm --filter @viate-bot/browser build && vitest run",
     "machine": "tsx src/dev-machine.ts"
   },
   "dependencies": {
@@ -15,6 +15,7 @@
     "@earendil-works/pi-ai": "1.5.2",
     "@earendil-works/pi-schema": "1.5.2",
     "@fastify/websocket": "^11.2.0",
+    "@viate-bot/browser": "workspace:*",
     "@viate-bot/integration-viate": "workspace:*",
     "@viate-bot/protocol": "workspace:*",
     "better-sqlite3": "^12.4.1",
@@ -25,12 +26,14 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
+    "@types/ws": "^8.18.1",
     "@types/dockerode": "^4.0.0",
     "@types/node": "^24.10.1",
     "drizzle-kit": "^0.31.5",
     "oidc-provider": "^9.14.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "ws": "^8.18.3"
   }
 }

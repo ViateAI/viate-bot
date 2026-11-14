@@ -38,6 +38,10 @@ export interface ControlConfig {
   machineImage: string;
   idleStopMinutes: number;
   maxRunningTasks: number;
+  /** 支持把截图当图片读的模型。为空时不注册 browser_screenshot。 */
+  visionModels: string[];
+  /** request_secret 等待用户的毫秒数。超时后任务失败。 */
+  secretWaitMs: number;
   port: number;
   dev: boolean;
   databasePath: string;
@@ -76,6 +80,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig 
     machineImage: optional(env, "VB_MACHINE_IMAGE", "viate-bot/machine:dev"),
     idleStopMinutes: integer(env, "VB_IDLE_STOP_MINUTES", 120),
     maxRunningTasks: integer(env, "VB_MAX_RUNNING_TASKS", 20),
+    visionModels: list(env, "VB_VISION_MODELS"),
+    secretWaitMs: positive(env, "VB_SECRET_WAIT_MS", 30 * 60 * 1000),
     port: integer(env, "VB_CONTROL_PORT", 3000),
     dev: env.VB_DEV === "1",
     databasePath: join(dataDir, "viate-bot.sqlite"),

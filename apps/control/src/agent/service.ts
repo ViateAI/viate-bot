@@ -11,11 +11,24 @@ import { settingsRepository } from "../db/settings.js";
 import { ulid } from "../id.js";
 import { MachinedClient } from "../machines/client.js";
 import type { MachineEndpoint } from "@viate-bot/protocol";
+import { BrowserPool } from "./browser-session.js";
+import { browserScreenshotTool, browserTools } from "./browser-tools.js";
 import { buildSystemPrompt, compactMessages, statusBlock } from "./prompt.js";
 import type { ChatHub } from "./events.js";
 import { getToolHooks } from "./hooks.js";
+import {
+  bindSecrets,
+  createSecretBroker,
+  createSecretTool,
+  maskToolContent,
+  parseSecretRequest,
+  SecretError,
+  type SecretRequest,
+  type SecretSubmission,
+} from "./secrets.js";
+import { maskDeep, maskSecrets } from "./text.js";
 import { machineTools } from "./tools.js";
-import { assistantText, loadTranscript, messageView, stepView, storedContent, taskView } from "./view.js";
+import { assistantText, loadTranscript, messageView, stepView, storedContent, taskView, withoutImages } from "./view.js";
 import { buildModel, type GatewayTask } from "../gateway/stream.js";
 import { userScope, type UserScope } from "../scope.js";
 
@@ -70,6 +83,9 @@ interface Live extends QueuedTask {
   stopRequested: boolean;
   loaded: boolean;
   done: Promise<void>;
+  waitingInput: boolean;
+  preserveWait: boolean;
+  failReason?: string;
 }
 
 export function recoverInterruptedTasks(db: AppDatabase, now = new Date()): number {
@@ -128,6 +144,17 @@ export function createChatService(deps: ChatServiceDeps) {
   const liveByBot = new Map<string, Live>();
   const tails = new Map<string, Promise<void>>();
   const saved = new WeakSet<object>();
+  const browsers = new BrowserPool();
+  const broker = createSecretBroker({
+    db: deps.db,
+    key: deps.key,
+    waitMs: deps.config.secretWaitMs,
+    now,
+    onWaiting: markWaiting,
+    onRunning: markRunning,
+    onResume: resumeWaiting,
+    onFail: failWaiting,
+  });
   let lastStarted: string | undefined;
   let pumping = false;
   let pumpAgain = false;
@@ -143,6 +170,7 @@ export function createChatService(deps: ChatServiceDeps) {
     });
     remember(meta.userId);
   }
+  broker.arm(chat.systemWaiting());
   pump();
 
   return {
@@ -155,7 +183,12 @@ export function createChatService(deps: ChatServiceDeps) {
       const live = running.get(taskId);
       if (live) {
         live.stopRequested = true;
-        live.agent?.abort();
+        if (live.waitingInput) broker.settle(taskId, "stopped");
+        else live.agent?.abort();
+        return true;
+      }
+      if (task.state === "waiting_input") {
+        cancelWaiting(scope, task);
         return true;
       }
       if (task.state !== "queued") return false;
@@ -169,12 +202,13 @@ export function createChatService(deps: ChatServiceDeps) {
     async cancelBot(scope: UserScope, botId: string): Promise<void> {
       const live = liveByBot.get(botId);
       if (live && live.userId === scope.userId) {
-        live.stopRequested = true;
-        live.agent?.abort();
+        this.stop(scope, live.id);
         await live.done;
       }
       const queued = chat.findActiveByBot(scope, botId, "queued");
       if (queued) this.stop(scope, queued.id);
+      const waiting = chat.findActiveByBot(scope, botId, "waiting_input");
+      if (waiting) this.stop(scope, waiting.id);
     },
     /** 等正在跑的任务结束。排队但因名额开不了工的会留下。 */
     async idle(): Promise<void> {
@@ -182,8 +216,29 @@ export function createChatService(deps: ChatServiceDeps) {
         await Promise.race([...running.values()].map((live) => live.done));
       }
     },
+    submitSecret(scope: UserScope, taskId: string, body: SecretSubmission): void {
+      const task = chat.findTask(scope, taskId);
+      if (!task || task.state !== "waiting_input") throw new ChatError("找不到任务", 404);
+      const request = pendingRequest(scope, taskId);
+      if (!request) throw new ChatError("找不到任务", 404);
+      try {
+        broker.submit(scope, taskId, request, body);
+      } catch (error) {
+        if (error instanceof SecretError) throw new ChatError(error.message, error.statusCode);
+        throw error;
+      }
+    },
     shutdown(): void {
-      for (const live of running.values()) live.agent?.abort();
+      for (const live of running.values()) {
+        if (live.waitingInput) {
+          live.preserveWait = true;
+          broker.settle(live.id, "detached");
+        } else {
+          live.agent?.abort();
+        }
+      }
+      broker.close();
+      void browsers.close();
     },
   };
 
@@ -222,6 +277,8 @@ export function createChatService(deps: ChatServiceDeps) {
       saved.add(message);
       return { conversationId: conversation.id, taskId: pending.id, messageId: row.id };
     }
+    const waiting = chat.findActiveByBot(scope, bot.id, "waiting_input");
+    if (waiting) throw new ChatError("正在等待输入", 409);
     const task = chat.insertTask(scope, { id: ulid(), botId: bot.id, conversationId: conversation.id });
     if (!task) throw new ChatError("找不到 bot", 404);
     const row = persistUser(scope, conversation.id, message, task.id);
@@ -302,7 +359,14 @@ export function createChatService(deps: ChatServiceDeps) {
   }
 
   function begin(task: QueuedTask): void {
-    const live: Live = { ...task, stopRequested: false, loaded: false, done: Promise.resolve() };
+    const live: Live = {
+      ...task,
+      stopRequested: false,
+      loaded: false,
+      done: Promise.resolve(),
+      waitingInput: false,
+      preserveWait: false,
+    };
     running.set(task.id, live);
     liveByBot.set(task.botId, live);
     live.done = execute(live);
@@ -341,11 +405,28 @@ export function createChatService(deps: ChatServiceDeps) {
       deps.tasks.set(live.id, gatewayTask);
       const platform = settingsRepository(deps.db).platformPrompt().text;
       const transcript = loadTranscript(chat.listMessages(scope, live.conversationId) ?? []);
+      const bound = browsers.bind(live.userId, live.botId, endpoint);
+      const secretTool = createSecretTool(async (request) => {
+        live.waitingInput = true;
+        try {
+          const outcome = await broker.wait(live.userId, live.id, request);
+          if (outcome === "timeout") live.failReason = "等待用户输入超时";
+          return outcome;
+        } finally {
+          live.waitingInput = false;
+        }
+      });
+      const rawTools = [
+        ...machineTools(new MachinedClient(endpoint, deps.fetch ?? fetch)),
+        ...browserTools(bound),
+        ...(deps.config.visionModels.includes(bot.model) ? [browserScreenshotTool(bound)] : []),
+        secretTool,
+      ];
       const agent = new Agent({
         initialState: {
-          systemPrompt: buildSystemPrompt(platform, bot.instructions, statusBlock(now(), "运行中")),
+          systemPrompt: buildSystemPrompt(platform, bot.instructions, statusBlock(now(), "运行中", broker.names(live.userId))),
           model: buildModel(deps.config, bot.model),
-          tools: machineTools(new MachinedClient(endpoint, deps.fetch ?? fetch)),
+          tools: bindSecrets(rawTools, (name) => broker.lookup(live.userId, live.id, name)),
           messages: transcript,
         },
         streamFn: deps.streamFn,
@@ -360,7 +441,18 @@ export function createChatService(deps: ChatServiceDeps) {
           return [...systems, ...compacted];
         },
         beforeToolCall: async (context, signal) => getToolHooks().beforeToolCall?.(context, signal),
-        afterToolCall: async (context, signal) => getToolHooks().afterToolCall?.(context, signal),
+        afterToolCall: async (context, signal) => {
+          const hooked = await getToolHooks().afterToolCall?.(context, signal);
+          const content = hooked?.content ?? context.result.content;
+          const details = hooked?.details !== undefined ? hooked.details : context.result.details;
+          const secrets = broker.known(live.userId, live.id);
+          return {
+            content: maskToolContent(content, secrets),
+            details: maskDetails(details, secrets),
+            ...(hooked?.isError !== undefined ? { isError: hooked.isError } : {}),
+            ...(hooked?.terminate !== undefined ? { terminate: hooked.terminate } : context.result.terminate ? { terminate: true } : {}),
+          };
+        },
         sessionId: live.id,
         toolExecution: "sequential",
         steeringMode: "all",
@@ -380,7 +472,9 @@ export function createChatService(deps: ChatServiceDeps) {
       await pending;
       const last = [...agent.state.messages].reverse().find((message) => message.role === "assistant");
       const usage = usageJson(gatewayTask);
-      if (live.stopRequested || (last && last.stopReason === "aborted")) {
+      if (live.failReason) {
+        finish(scope, live, "failed", live.failReason, seq, usage);
+      } else if (live.stopRequested || (last && last.stopReason === "aborted")) {
         finish(scope, live, "cancelled", null, seq, usage);
       } else if (last && last.stopReason === "error") {
         finish(scope, live, "failed", last.errorMessage ?? "模型请求失败", seq, usage);
@@ -389,11 +483,12 @@ export function createChatService(deps: ChatServiceDeps) {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "任务失败";
-      finish(scope, live, "failed", message, seq);
+      finish(scope, live, "failed", live.failReason ?? message, seq);
     } finally {
       deps.tasks.delete(live.id);
       running.delete(live.id);
       if (liveByBot.get(live.botId) === live) liveByBot.delete(live.botId);
+      if (!live.preserveWait) broker.drop(live.id);
       publishTask(live.userId, live.conversationId, live.id);
       forgetIfIdle(live.userId);
       pump();
@@ -401,12 +496,15 @@ export function createChatService(deps: ChatServiceDeps) {
   }
 
   function onAgentEvent(live: Live, scope: UserScope, event: AgentEvent, seq: number, openSteps: Map<string, string>): number {
+    if (live.preserveWait) return seq;
+    const veil = (text: string) => maskSecrets(text, broker.known(live.userId, live.id));
+    const json = (value: unknown) => JSON.stringify(maskDeep(value, broker.known(live.userId, live.id)));
     if (event.type === "message_update" && event.message.role === "assistant") {
       deps.hub.publish(live.conversationId, {
         type: "delta",
         conversationId: live.conversationId,
         taskId: live.id,
-        text: assistantText(event.message),
+        text: veil(assistantText(event.message)),
       });
       return seq;
     }
@@ -415,12 +513,13 @@ export function createChatService(deps: ChatServiceDeps) {
       if (event.message.role === "system") return seq;
       if (saved.has(event.message)) return seq;
       saved.add(event.message);
-      const text = textOf(event.message);
+      const source = event.message.role === "toolResult" ? withoutImages(event.message) : event.message;
+      const text = veil(textOf(source));
       const row = chat.insertMessage(scope, {
         id: ulid(),
         conversationId: live.conversationId,
-        role: event.message.role,
-        contentJson: storedContent(event.message as UserMessage | AssistantMessage | ToolResultMessage, text),
+        role: source.role,
+        contentJson: storedContent(maskDeep(source, broker.known(live.userId, live.id)), text),
         taskId: live.id,
       });
       if (row) publishMessage(live.conversationId, row.id, scope);
@@ -432,7 +531,7 @@ export function createChatService(deps: ChatServiceDeps) {
           seq,
           kind: "model",
           status: event.message.stopReason === "error" ? "failed" : "succeeded",
-          requestJson: JSON.stringify({
+          requestJson: json({
             text,
             toolCalls: event.message.content.filter((block) => block.type === "toolCall").map((block) => ({
               id: block.id,
@@ -442,8 +541,9 @@ export function createChatService(deps: ChatServiceDeps) {
         });
         if (step) {
           const status = step.status;
-          chat.finishStep(scope, step.id, { status, responseJson: JSON.stringify({ text }) });
-          publishStep(live.conversationId, { ...step, status, responseJson: JSON.stringify({ text }), endedAt: now().toISOString() });
+          const responseJson = json({ text });
+          chat.finishStep(scope, step.id, { status, responseJson });
+          publishStep(live.conversationId, { ...step, status, responseJson, endedAt: now().toISOString() });
         }
       }
       return seq;
@@ -456,7 +556,7 @@ export function createChatService(deps: ChatServiceDeps) {
         seq,
         kind: "tool",
         status: "running",
-        requestJson: JSON.stringify({ name: event.toolName, args: event.args, toolCallId: event.toolCallId }),
+        requestJson: json({ name: event.toolName, args: event.args, toolCallId: event.toolCallId }),
       });
       if (step) {
         openSteps.set(event.toolCallId, step.id);
@@ -467,9 +567,9 @@ export function createChatService(deps: ChatServiceDeps) {
     if (event.type === "tool_execution_end") {
       const stepId = openSteps.get(event.toolCallId);
       if (!stepId) return seq;
-      const text = toolText(event.result);
+      const text = veil(toolText(event.result));
       const status = event.isError ? "failed" : "succeeded";
-      const responseJson = JSON.stringify({ text, isError: event.isError });
+      const responseJson = json({ text, isError: event.isError });
       chat.finishStep(scope, stepId, { status, responseJson });
       const current = chat.listSteps(scope, live.id)?.find((step) => step.id === stepId);
       if (current) publishStep(live.conversationId, current);
@@ -485,6 +585,7 @@ export function createChatService(deps: ChatServiceDeps) {
     stepCount: number,
     usage?: string,
   ): void {
+    if (live.preserveWait) return;
     chat.updateTask(scope, live.id, {
       state,
       error,
@@ -492,6 +593,89 @@ export function createChatService(deps: ChatServiceDeps) {
       stepCount,
       ...(usage !== undefined ? { usageJson: usage } : {}),
     });
+  }
+
+  function markWaiting(userId: string, taskId: string): void {
+    chat.updateTask(userScope(userId), taskId, { state: "waiting_input", error: null });
+    const task = chat.findTask(userScope(userId), taskId);
+    if (task?.conversationId) publishTask(userId, task.conversationId, taskId);
+  }
+
+  function markRunning(userId: string, taskId: string): void {
+    chat.updateTask(userScope(userId), taskId, { state: "running", error: null });
+    const task = chat.findTask(userScope(userId), taskId);
+    if (task?.conversationId) publishTask(userId, task.conversationId, taskId);
+  }
+
+  function resumeWaiting(userId: string, taskId: string, text: string, isError: boolean): void {
+    const scope = userScope(userId);
+    const task = chat.findTask(scope, taskId);
+    if (!task || task.state !== "waiting_input" || !task.conversationId) return;
+    appendSecretResult(scope, task.conversationId, taskId, text, isError);
+    chat.updateTask(scope, taskId, { state: "queued", error: null, endedAt: null });
+    queue.push({ id: taskId, botId: task.botId, userId, conversationId: task.conversationId });
+    remember(userId);
+    publishTask(userId, task.conversationId, taskId);
+    pump();
+  }
+
+  function failWaiting(userId: string, taskId: string, error: string): void {
+    const scope = userScope(userId);
+    const task = chat.findTask(scope, taskId);
+    if (!task || task.state !== "waiting_input" || !task.conversationId) return;
+    appendSecretResult(scope, task.conversationId, taskId, error, true);
+    chat.updateTask(scope, taskId, { state: "failed", error, endedAt: now().toISOString() });
+    publishTask(userId, task.conversationId, taskId);
+  }
+
+  function cancelWaiting(scope: UserScope, task: { id: string; conversationId: string | null }): void {
+    if (task.conversationId) appendSecretResult(scope, task.conversationId, task.id, "用户停止了任务", true);
+    chat.updateTask(scope, task.id, { state: "cancelled", error: null, endedAt: now().toISOString() });
+    if (task.conversationId) publishTask(scope.userId, task.conversationId, task.id);
+  }
+
+  function appendSecretResult(scope: UserScope, conversationId: string, taskId: string, text: string, isError: boolean): void {
+    const steps = chat.listSteps(scope, taskId) ?? [];
+    const step = [...steps].reverse().find((item) => item.kind === "tool" && item.status === "running");
+    const request = step ? parseJson(step.requestJson) : undefined;
+    const toolCallId = request?.toolCallId ?? "call_secret";
+    const veiled = maskSecrets(text, broker.known(scope.userId, taskId));
+    const toolResult: ToolResultMessage = {
+      role: "toolResult",
+      toolCallId,
+      toolName: "request_secret",
+      content: [{ type: "text", text: veiled }],
+      isError,
+      timestamp: now().getTime(),
+    };
+    chat.insertMessage(scope, {
+      id: ulid(),
+      conversationId,
+      role: "toolResult",
+      contentJson: storedContent(toolResult, veiled),
+      taskId,
+    });
+    if (step) {
+      chat.finishStep(scope, step.id, {
+        status: isError ? "failed" : "succeeded",
+        responseJson: JSON.stringify({ text: veiled, isError }),
+      });
+    }
+    publishTask(scope.userId, conversationId, taskId);
+  }
+
+  function pendingRequest(scope: UserScope, taskId: string): SecretRequest | undefined {
+    const live = broker.pending(taskId);
+    if (live && running.get(taskId)?.userId === scope.userId) return live;
+    const steps = chat.listSteps(scope, taskId) ?? [];
+    const step = [...steps].reverse().find((item) => item.kind === "tool" && item.status === "running");
+    const request = step ? parseJson(step.requestJson) : undefined;
+    if (!request || request.name !== "request_secret" || !request.args) return undefined;
+    try {
+      return parseSecretRequest(request.args);
+    } catch {
+      return undefined;
+    }
   }
 
   function secretFor(bot: BotRecord): string {
@@ -570,6 +754,19 @@ function toolText(result: unknown): string {
   const content = result.content;
   if (!Array.isArray(content)) return "";
   return content.map((block) => (block && typeof block === "object" && "text" in block && typeof block.text === "string" ? block.text : "")).join("");
+}
+
+function parseJson(json: string): { name?: string; toolCallId?: string; args?: { name?: string; label?: string; kind?: string; reason?: string } } | undefined {
+  try {
+    const value = JSON.parse(json) as { name?: string; toolCallId?: string; args?: { name?: string; label?: string; kind?: string; reason?: string } };
+    return value && typeof value === "object" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function maskDetails(details: unknown, secrets: Array<{ name: string; value: string }>): unknown {
+  return maskDeep(details, secrets);
 }
 
 function usageJson(task: GatewayTask): string {

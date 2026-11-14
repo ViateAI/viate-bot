@@ -163,6 +163,28 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     }
   });
 
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/secrets", async (request, reply) => {
+    const scope = scopeOf(request, reply);
+    if (!scope) return;
+    const body = record(request.body);
+    const decision = body.decision === "provide" || body.decision === "reject" ? body.decision : undefined;
+    if (!decision) return reply.code(400).send({ error: "decision 只能是 provide 或 reject" });
+    const name = typeof body.name === "string" ? body.name : "";
+    const value = typeof body.value === "string" ? body.value : undefined;
+    const save = typeof body.save === "boolean" ? body.save : undefined;
+    try {
+      deps.chat.submitSecret(scope, request.params.id, {
+        decision,
+        name,
+        ...(value !== undefined ? { value } : {}),
+        ...(save !== undefined ? { save } : {}),
+      });
+      return { ok: true };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
   app.post<{ Params: { id: string } }>("/api/tasks/:id/stop", async (request, reply) => {
     const scope = scopeOf(request, reply);
     if (!scope) return;

@@ -96,6 +96,10 @@ export function loadTranscript(rows: MessageRecord[]): AgentMessage[] {
   return transcript;
 }
 
+export function withoutImages(message: ToolResultMessage): ToolResultMessage {
+  return { ...message, content: message.content.filter((block) => block.type !== "image") };
+}
+
 export function storedContent(message: UserMessage | AssistantMessage | ToolResultMessage, text: string): string {
   return JSON.stringify({ pi: message, text });
 }
