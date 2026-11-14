@@ -6,6 +6,7 @@ import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { afterEach, describe, expect, it } from "vitest";
 import { adminScope, userScope } from "../scope.js";
 import { botRepository } from "./bots.js";
+import { credentialRepository } from "./credentials.js";
 import { openDatabase } from "./index.js";
 import { machineRepository, type MachineRecord } from "./machines.js";
 import { ensureDevUser } from "./users.js";
@@ -71,6 +72,21 @@ describe("scoped machine and bot access", () => {
     expect(machines.updateOwned(admin, "user-a", "machine-b", { state: "error" })).toBe(false);
     expect(machines.findById(scopeB, "machine-b")?.state).toBe("stopped");
     expect(machines.list(admin).map((item) => item.id).sort()).toEqual(["machine-a", "machine-b"]);
+
+    const credentials = credentialRepository(db);
+    credentials.insertOwned(scopeA, {
+      id: "cred-a",
+      botId: "bot-a",
+      provider: "test",
+      externalId: "ext-a",
+      secretEnc: "enc-a",
+      policyRef: null,
+    });
+    expect(credentials.findById(scopeB, "cred-a")).toBeUndefined();
+    expect(credentials.markRevoked(scopeB, "cred-a", new Date().toISOString())).toBe(false);
+    expect(credentials.findById(scopeA, "cred-a")?.revokedAt).toBeNull();
+    expect(bots.remove(scopeB, "bot-a")).toBe(false);
+    expect(bots.findById(scopeA, "bot-a")?.id).toBe("bot-a");
     db.$client.close();
   });
 });

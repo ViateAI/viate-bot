@@ -36,17 +36,28 @@ export const identities = sqliteTable(
   (table) => [primaryKey({ columns: [table.provider, table.subject] })],
 );
 
-export const sessions = sqliteTable("sessions", {
-  id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => users.id),
-  csrf: text("csrf").notNull(),
-  idpRefreshTokenEnc: text("idp_refresh_token_enc").notNull(),
-  expiresAt: text("expires_at").notNull(),
-  lastSeenAt: text("last_seen_at").notNull(),
-  createdAt: text("created_at").notNull(),
-});
+export const sessions = sqliteTable(
+  "sessions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id),
+    /** Cookie 里的会话 token 只存哈希，明文不入库。 */
+    tokenHash: text("token_hash").notNull().default(""),
+    csrf: text("csrf").notNull(),
+    idpRefreshTokenEnc: text("idp_refresh_token_enc").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    lastSeenAt: text("last_seen_at").notNull(),
+    /**
+     * 上次向身份提供方校验的时间。不能复用 last_seen_at：
+     * 后者每次请求都滑动，活跃用户会永远跨不过 5 分钟的刷新窗口。
+     */
+    lastValidatedAt: text("last_validated_at").notNull().default(""),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [uniqueIndex("sessions_token_hash_unique").on(table.tokenHash)],
+);
 
 export const machines = sqliteTable(
   "machines",

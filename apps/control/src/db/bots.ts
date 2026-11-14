@@ -17,6 +17,7 @@ export interface BotDraft {
   name: string;
   model: string;
   instructions?: string;
+  modelCredentialId?: string | null;
 }
 
 export interface BotPatch {
@@ -30,6 +31,12 @@ export interface BotStore {
   findById(scope: UserScope, id: string): BotRecord | undefined;
   insert(scope: UserScope, draft: BotDraft): BotRecord;
   update(scope: UserScope, id: string, patch: BotPatch): boolean;
+  setCredential(scope: UserScope, id: string, credentialId: string): boolean;
+  softDelete(scope: UserScope, id: string): boolean;
+  /** 签发凭据失败时删掉刚插入、还没有凭据的 bot。 */
+  remove(scope: UserScope, id: string): boolean;
+  /** 对账用：按 bot id 判断是否还存在，不返回其他用户的数据。 */
+  isActive(id: string): boolean;
 }
 
 export function botRepository(db: AppDatabase): BotStore {
@@ -59,6 +66,7 @@ export function botRepository(db: AppDatabase): BotStore {
           name: draft.name,
           model: draft.model,
           instructions: draft.instructions ?? "",
+          modelCredentialId: draft.modelCredentialId ?? null,
           createdAt: now,
           updatedAt: now,
         })
@@ -83,6 +91,39 @@ export function botRepository(db: AppDatabase): BotStore {
         .where(and(eq(bots.id, id), eq(bots.userId, scope.userId), isNull(bots.deletedAt)))
         .run();
       return result.changes > 0;
+    },
+    setCredential(scope, id, credentialId) {
+      const result = db
+        .update(bots)
+        .set({ modelCredentialId: credentialId, updatedAt: new Date().toISOString() })
+        .where(and(eq(bots.id, id), eq(bots.userId, scope.userId), isNull(bots.deletedAt)))
+        .run();
+      return result.changes > 0;
+    },
+    softDelete(scope, id) {
+      const now = new Date().toISOString();
+      const result = db
+        .update(bots)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(and(eq(bots.id, id), eq(bots.userId, scope.userId), isNull(bots.deletedAt)))
+        .run();
+      return result.changes > 0;
+    },
+    remove(scope, id) {
+      const result = db
+        .delete(bots)
+        .where(and(eq(bots.id, id), eq(bots.userId, scope.userId), isNull(bots.deletedAt)))
+        .run();
+      return result.changes > 0;
+    },
+    isActive(id) {
+      return (
+        db
+          .select({ id: bots.id })
+          .from(bots)
+          .where(and(eq(bots.id, id), isNull(bots.deletedAt)))
+          .get() !== undefined
+      );
     },
   };
 }
