@@ -13,6 +13,7 @@ describe("loadConfig", () => {
     expect(config.dev).toBe(false);
     expect(config.integration).toBe("none");
     expect(config.allowSignup).toBe(false);
+    expect(config.oidcTrustEmail).toBe(false);
     expect(config.oidcIssuer).toBe("");
     expect(config.modelBaseUrl).toBe("");
     expect(config.serviceCredentials).toBeUndefined();
@@ -54,6 +55,7 @@ describe("loadConfig", () => {
       VB_OIDC_CLIENT_SECRET: "secret",
       VB_MODEL_API_KEY: "key",
       VB_ALLOW_SIGNUP: "true",
+      VB_OIDC_TRUST_EMAIL: "true",
     });
     expect(requireOidc(ready)).toEqual({
       issuer: "https://idp.example",
@@ -62,6 +64,11 @@ describe("loadConfig", () => {
     });
     expect(requireSharedModelKey(ready)).toBe("key");
     expect(ready.allowSignup).toBe(true);
+    expect(ready.oidcTrustEmail).toBe(true);
+  });
+
+  it("rejects an invalid email trust flag", () => {
+    expect(() => loadConfig({ VB_OIDC_TRUST_EMAIL: "yes" })).toThrow(/VB_OIDC_TRUST_EMAIL/);
   });
 
   it("rejects an unknown integration name", () => {

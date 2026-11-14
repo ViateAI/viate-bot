@@ -15,6 +15,7 @@ export interface ControlConfig {
   oidcClientId: string;
   oidcClientSecret: string;
   allowSignup: boolean;
+  oidcTrustEmail: boolean;
   modelBaseUrl: string;
   modelApiKey: string;
   integration: IntegrationName;
@@ -39,6 +40,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig 
     oidcClientId: optional(env, "VB_OIDC_CLIENT_ID", ""),
     oidcClientSecret: optional(env, "VB_OIDC_CLIENT_SECRET", ""),
     allowSignup: flag(env, "VB_ALLOW_SIGNUP", false),
+    oidcTrustEmail: flag(env, "VB_OIDC_TRUST_EMAIL", false),
     modelBaseUrl: optional(env, "VB_MODEL_BASE_URL", ""),
     modelApiKey: optional(env, "VB_MODEL_API_KEY", ""),
     integration,

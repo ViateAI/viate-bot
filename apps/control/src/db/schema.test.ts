@@ -1,7 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase, type AppDatabase } from "./index.js";
@@ -73,7 +74,9 @@ describe("schema migration", () => {
       "usage_hourly",
       "users",
     ].sort());
-    expect(columnNames(db, "sessions")).toContain("idp_refresh_token_enc");
+    expect(columnNames(db, "sessions")).toEqual(
+      expect.arrayContaining(["idp_refresh_token_enc", "token_hash", "last_validated_at"]),
+    );
     expect(columnNames(db, "bots")).toContain("model_credential_id");
     expect(primaryKey(db, "identities")).toEqual(["provider", "subject"]);
     expect(primaryKey(db, "usage_hourly")).toEqual(["bot_id", "user_id", "model", "hour"]);
@@ -99,4 +102,45 @@ describe("schema migration", () => {
     expect(() => insert.run("machine-2", "user-1", now, now)).toThrow(/UNIQUE/);
     db.$client.close();
   });
+
+  it("drops legacy sessions before the token hash unique index", () => {
+    const sqlite = new Database(":memory:");
+    sqlite.pragma("foreign_keys = ON");
+    applyMigration(sqlite, "0000_init.sql");
+    const now = new Date().toISOString();
+    sqlite
+      .prepare("insert into users (id, email, name, status, created_at) values (?, ?, ?, ?, ?)")
+      .run("user-1", "a@example.com", "A", "active", now);
+    const insertSession = sqlite.prepare(
+      `insert into sessions (id, user_id, csrf, idp_refresh_token_enc, expires_at, last_seen_at, created_at)
+       values (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    insertSession.run("s1", "user-1", "csrf-1", "enc", now, now, now);
+    insertSession.run("s2", "user-1", "csrf-2", "enc", now, now, now);
+    applyMigration(sqlite, "0001_session_validation.sql");
+    expect(sqlite.prepare("select count(*) from sessions").pluck().get()).toBe(0);
+    expect(
+      sqlite
+        .prepare("select name from sqlite_master where type = 'index' and name = 'sessions_token_hash_unique'")
+        .pluck()
+        .get(),
+    ).toBe("sessions_token_hash_unique");
+    const insertHashed = sqlite.prepare(
+      `insert into sessions (
+        id, user_id, token_hash, csrf, idp_refresh_token_enc, expires_at, last_seen_at, last_validated_at, created_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    insertHashed.run("s3", "user-1", "hash-a", "c", "enc", now, now, now, now);
+    insertHashed.run("s4", "user-1", "hash-b", "c", "enc", now, now, now, now);
+    expect(() => insertHashed.run("s5", "user-1", "hash-a", "c", "enc", now, now, now, now)).toThrow(/UNIQUE/);
+    sqlite.close();
+  });
 });
+
+function applyMigration(sqlite: Database.Database, name: string): void {
+  const sql = readFileSync(fileURLToPath(new URL(`../../drizzle/${name}`, import.meta.url)), "utf8");
+  for (const statement of sql.split("--> statement-breakpoint")) {
+    const trimmed = statement.trim();
+    if (trimmed.length > 0) sqlite.exec(trimmed);
+  }
+}

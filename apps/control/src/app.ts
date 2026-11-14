@@ -1,7 +1,9 @@
 import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
-import Fastify from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
+import { registerAuth } from "./auth.js";
+import { createRuntime } from "./compose.js";
 import { loadConfig, type ControlConfig } from "./config.js";
 import { decrypt, loadOrCreateKey } from "./crypto.js";
 import { openDatabase, type AppDatabase } from "./db/index.js";
@@ -10,6 +12,7 @@ import { ensureDevUser } from "./db/users.js";
 import { DockerDriver } from "./machines/docker.js";
 import { reconcileOnce } from "./machines/loop.js";
 import { idleActivityProbe } from "./machines/reconcile.js";
+import type { AppRuntime } from "./providers.js";
 import { userScope } from "./scope.js";
 import { createDriver, devSpec, reconcileDeps } from "./runtime.js";
 
@@ -22,6 +25,14 @@ export interface ControlContext {
   key: Buffer;
 }
 
+export interface AppOptions {
+  fetch?: typeof fetch;
+  now?: () => Date;
+  onDisconnect?: (userId: string) => void;
+}
+
+const runtimes = new WeakMap<FastifyInstance, AppRuntime>();
+
 export function openContext(config: ControlConfig = loadConfig()): ControlContext {
   mkdirSync(config.dataDir, { recursive: true });
   const db = openDatabase(config.databasePath);
@@ -29,9 +40,12 @@ export function openContext(config: ControlConfig = loadConfig()): ControlContex
   return { db, driver: createDriver(), config, key: loadOrCreateKey(config.secretKeyPath) };
 }
 
-export function buildApp(ctx: ControlContext) {
-  const app = Fastify({ logger: true });
+export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
+  const app = Fastify({ logger: process.env.VITEST === "true" ? false : true });
   const { db, driver, config, key } = ctx;
+  const runtime = createRuntime(config, db, options);
+  runtimes.set(app, runtime);
+  registerAuth(app, { db, key, config, runtime, now: options.now ?? (() => new Date()) });
 
   app.get("/health", async () => ({ ok: true }));
 
@@ -93,6 +107,10 @@ export function buildApp(ctx: ControlContext) {
   }
 
   return app;
+}
+
+export function startIntegrationJobs(app: FastifyInstance): () => void {
+  return runtimes.get(app)?.startJobs() ?? (() => {});
 }
 
 export function startReconcileLoop(ctx: ControlContext, intervalMs = 30_000): () => void {
