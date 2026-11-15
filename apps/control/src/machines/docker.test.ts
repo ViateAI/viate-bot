@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { MachineRecord, MachineStore } from "../db/machines.js";
 import { userScope } from "../scope.js";
 import { DockerDriver } from "./docker.js";
+import { bridgeName } from "./policy.js";
 
 const spec = { cpu: 1, memMb: 1024, diskGb: 10 };
 
@@ -71,7 +72,15 @@ function missing(): Error {
   return Object.assign(new Error("not found"), { statusCode: 404 });
 }
 
-function fakeDocker(present: Set<string>, created: string[]): Docker {
+function fakeDocker(present: Set<string>, created: string[], network: {
+  Driver: string;
+  Options: Record<string, string>;
+  Containers: Record<string, unknown>;
+} = {
+  Driver: "bridge",
+  Options: { "com.docker.network.bridge.name": bridgeName("user-1") },
+  Containers: {},
+}, removed: string[] = []): Docker {
   const docker = {
     getContainer(name: string) {
       return {
@@ -88,7 +97,11 @@ function fakeDocker(present: Set<string>, created: string[]): Docker {
       };
     },
     getNetwork(name: string) {
-      return { id: name, inspect: async () => ({ Id: name }) };
+      return {
+        id: name,
+        inspect: async () => ({ Id: name, ...network }),
+        remove: async () => { removed.push(name); },
+      };
     },
     getVolume(name: string) {
       return {
@@ -106,13 +119,80 @@ function fakeDocker(present: Set<string>, created: string[]): Docker {
       created.push("c-new");
       return { id: "c-new" };
     },
-    createNetwork: async (options: { Name: string }) => ({ id: options.Name }),
+    createNetwork: async (options: { Name: string }) => ({ id: `${options.Name}-new` }),
     createVolume: async () => {},
   };
   return Object.assign(new Docker({ socketPath: "/var/run/docker.sock" }), docker);
 }
 
 describe("docker create recovery", () => {
+  it("replaces an empty legacy network before creating the machine", async () => {
+    const created: string[] = [];
+    const removed: string[] = [];
+    const driver = new DockerDriver({
+      docker: fakeDocker(new Set(), created, { Driver: "bridge", Options: {}, Containers: {} }, removed),
+      image: "viate-bot/machine:dev",
+      key: randomBytes(32),
+    });
+    const row = machine(null);
+    await driver.create(memory(row), userScope("user-1"), spec);
+    expect(row.networkId).toBe("vb-net-user-1-new");
+    expect(removed).toEqual(["vb-net-user-1"]);
+  });
+
+  it("refuses an occupied legacy network without removing it or creating a machine", async () => {
+    const created: string[] = [];
+    const removed: string[] = [];
+    const driver = new DockerDriver({
+      docker: fakeDocker(new Set(), created, {
+        Driver: "bridge", Options: {}, Containers: { control: {} },
+      }, removed),
+      image: "viate-bot/machine:dev",
+      key: randomBytes(32),
+    });
+    await expect(driver.create(memory(machine(null)), userScope("user-1"), spec))
+      .rejects.toThrow(/vb-net-user-1.*防火墙.*容器/);
+    expect(removed).toEqual([]);
+    expect(created).toEqual([]);
+  });
+
+  it("refuses to start a machine on an occupied legacy network", async () => {
+    const driver = new DockerDriver({
+      docker: fakeDocker(new Set(["vb-machine-user-1"]), [], {
+        Driver: "bridge", Options: {}, Containers: { machine: {} },
+      }),
+      image: "viate-bot/machine:dev",
+      key: randomBytes(32),
+    });
+    await expect(driver.start("user-1")).rejects.toThrow(/防火墙/);
+  });
+
+  it("requires rebuild when a stopped legacy machine has no live network endpoints", async () => {
+    const removed: string[] = [];
+    const driver = new DockerDriver({
+      docker: fakeDocker(new Set(["vb-machine-user-1"]), [], {
+        Driver: "bridge", Options: {}, Containers: {},
+      }, removed),
+      image: "viate-bot/machine:dev",
+      key: randomBytes(32),
+    });
+    await expect(driver.start("user-1")).rejects.toThrow(/重建机器/);
+    expect(removed).toEqual([]);
+  });
+
+  it("stops a running legacy machine rather than reporting it healthy during reconciliation", async () => {
+    const docker = fakeDocker(new Set(["vb-machine-user-1"]), [], {
+      Driver: "bridge", Options: {}, Containers: { machine: {} },
+    });
+    let stopped = false;
+    const container = docker.getContainer("vb-machine-user-1");
+    container.stop = async () => { stopped = true; };
+    docker.getContainer = () => container;
+    const driver = new DockerDriver({ docker, image: "viate-bot/machine:dev", key: randomBytes(32) });
+    await expect(driver.actualState("user-1")).rejects.toThrow(/防火墙/);
+    expect(stopped).toBe(true);
+  });
+
   it("refuses to create while the named container still exists", async () => {
     const created: string[] = [];
     const driver = new DockerDriver({

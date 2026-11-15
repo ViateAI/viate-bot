@@ -1,4 +1,5 @@
-import type { ContainerCreateOptions, VolumeCreateOptions } from "dockerode";
+import { createHash } from "node:crypto";
+import type { ContainerCreateOptions, NetworkCreateOptions, VolumeCreateOptions } from "dockerode";
 
 const ALLOWED_CAPS: Record<string, true> = {
   CHOWN: true,
@@ -31,6 +32,57 @@ export class MachinePolicyError extends Error {
 
 export function networkName(userId: string): string {
   return `vb-net-${userId}`;
+}
+
+/**
+ * Linux 接口名最多 15 字符，而 userId 是 ULID（26 字符），网络名放不进接口名。
+ * 用 userId 的 sha256 前 12 个十六进制字符，得到固定的 `vb` + 12 = 14 字符网桥名。
+ * 防火墙按 `vb+` 前缀匹配；Docker 默认的 `br-<id>` 匹配不到。
+ */
+export function bridgeName(userId: string): string {
+  const digest = createHash("sha256").update(userId).digest("hex").slice(0, 12);
+  return `vb${digest}`;
+}
+
+/** 创建用户网络时使用。com.docker.network.bridge.name 让网桥名稳定，供防火墙按前缀匹配。 */
+export function buildNetworkOptions(userId: string): NetworkCreateOptions {
+  return {
+    Name: networkName(userId),
+    Driver: "bridge",
+    Options: { "com.docker.network.bridge.name": bridgeName(userId) },
+    Labels: { "vb.user": userId },
+  };
+}
+
+/**
+ * 只允许收紧：驱动必须是 bridge，网桥名必须是该用户的固定短名，其余选项不能改。
+ * 不接受 IPAM、Internal、EnableIPv6 等会改变隔离边界的字段。
+ */
+export function assertNetworkPolicy(userId: string, options: NetworkCreateOptions): void {
+  if (options.Name !== networkName(userId)) {
+    throw new MachinePolicyError(`网络名必须是 ${networkName(userId)}`);
+  }
+  if (options.Driver !== undefined && options.Driver !== "bridge") {
+    throw new MachinePolicyError("用户网络驱动必须是 bridge");
+  }
+  if (options.Internal === true) throw new MachinePolicyError("禁止 Internal 网络");
+  if (options.EnableIPv6 === true) throw new MachinePolicyError("禁止 EnableIPv6");
+  if (options.Attachable === true) throw new MachinePolicyError("禁止 Attachable");
+  if (options.Ingress === true) throw new MachinePolicyError("禁止 Ingress");
+  if (options.ConfigOnly === true) throw new MachinePolicyError("禁止 ConfigOnly");
+  if (options.IPAM !== undefined) throw new MachinePolicyError("禁止自定义 IPAM");
+  if (options.ConfigFrom !== undefined) throw new MachinePolicyError("禁止 ConfigFrom");
+  const expected = bridgeName(userId);
+  const bridge = options.Options?.["com.docker.network.bridge.name"];
+  if (bridge !== expected) {
+    throw new MachinePolicyError(`网桥名必须是 ${expected}`);
+  }
+  const optionsRecord = options.Options ?? {};
+  for (const key of Object.keys(optionsRecord)) {
+    if (key !== "com.docker.network.bridge.name") {
+      throw new MachinePolicyError(`不允许的网络选项：${key}`);
+    }
+  }
 }
 
 export function volumeName(userId: string): string {

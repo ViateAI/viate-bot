@@ -6,8 +6,10 @@ import type { MachineRecord, MachineStore } from "../db/machines.js";
 import type { UserScope } from "../scope.js";
 import {
   assertMachinePolicy,
+  assertNetworkPolicy,
   assertVolumePolicy,
   buildCreateOptions,
+  buildNetworkOptions,
   containerName,
   networkName,
   volumeName,
@@ -77,6 +79,7 @@ export class DockerDriver {
   }
 
   async start(userId: string): Promise<void> {
+    await this.ensureNetwork(userId, false);
     await this.container(userId).start();
   }
 
@@ -127,6 +130,14 @@ export class DockerDriver {
   async actualState(userId: string): Promise<"missing" | "stopped" | "running"> {
     const info = await this.inspect(userId);
     if (!info) return "missing";
+    if (info.State.Running) {
+      try {
+        await this.ensureNetwork(userId, false);
+      } catch (error) {
+        if (error instanceof MachinePolicyError) await this.stop(userId, 0);
+        throw error;
+      }
+    }
     return info.State.Running ? "running" : "stopped";
   }
 
@@ -140,20 +151,40 @@ export class DockerDriver {
     return record;
   }
 
-  private async ensureNetwork(userId: string): Promise<Network> {
+  private async ensureNetwork(userId: string, replaceUnsafe = true): Promise<Network> {
     const name = networkName(userId);
     const existing = this.docker.getNetwork(name);
     try {
-      await existing.inspect();
-      return existing;
+      const info = await existing.inspect();
+      try {
+        // inspect 的 IPAM 是 Docker 自动分配结果，不是调用者传入的自定义配置。
+        assertNetworkPolicy(userId, {
+          Name: name,
+          Driver: info.Driver,
+          Options: info.Options,
+          Internal: info.Internal,
+          EnableIPv6: info.EnableIPv6,
+        });
+        return existing;
+      } catch (error) {
+        if (!(error instanceof MachinePolicyError)) throw error;
+        // 停机容器虽没有活动端点，仍保存 NetworkID；只能在重建容器后更换网络。
+        if (!replaceUnsafe) {
+          throw new MachinePolicyError(`网络 ${name} 不符合防火墙策略；已有容器仍可能引用旧网络 ID，请重建机器`);
+        }
+        if (Object.keys(info.Containers ?? {}).length !== 0) {
+          throw new MachinePolicyError(`网络 ${name} 不符合防火墙策略，仍有容器连接；请先停止并断开容器，再重建网络`);
+        }
+        // Docker 在 remove 时也会拒绝新增端点；不强制断开任何现存容器。
+        await existing.remove();
+      }
     } catch (error) {
       if (!isMissing(error)) throw error;
     }
-    return this.docker.createNetwork({
-      Name: name,
-      Driver: "bridge",
-      Labels: { "vb.user": userId },
-    });
+    if (!replaceUnsafe) throw new MachinePolicyError(`网络 ${name} 不存在，请重建机器`);
+    const options = buildNetworkOptions(userId);
+    assertNetworkPolicy(userId, options);
+    return this.docker.createNetwork(options);
   }
 
   private async ensureVolume(userId: string): Promise<void> {

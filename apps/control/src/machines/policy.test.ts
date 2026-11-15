@@ -1,6 +1,14 @@
-import type { ContainerCreateOptions } from "dockerode";
+import type { ContainerCreateOptions, NetworkCreateOptions } from "dockerode";
 import { describe, expect, it } from "vitest";
-import { assertMachinePolicy, assertVolumePolicy, buildCreateOptions, MachinePolicyError } from "./policy.js";
+import {
+  assertMachinePolicy,
+  assertNetworkPolicy,
+  assertVolumePolicy,
+  bridgeName,
+  buildCreateOptions,
+  buildNetworkOptions,
+  MachinePolicyError,
+} from "./policy.js";
 
 const input = {
   userId: "user-1",
@@ -135,6 +143,57 @@ describe("machine create policy", () => {
     }],
   ])("rejects %s", (_name, change) => {
     expect(() => assertMachinePolicy(input.userId, patched(change))).toThrow(MachinePolicyError);
+  });
+});
+
+describe("user network policy", () => {
+  it("pins a 14-character bridge name derived from the user id", () => {
+    const options = buildNetworkOptions(input.userId);
+    const bridge = bridgeName(input.userId);
+    expect(bridge).toMatch(/^vb[0-9a-f]{12}$/);
+    expect(bridge.length).toBeLessThanOrEqual(15);
+    expect(options).toEqual({
+      Name: "vb-net-user-1",
+      Driver: "bridge",
+      Options: { "com.docker.network.bridge.name": bridge },
+      Labels: { "vb.user": "user-1" },
+    });
+    expect(() => assertNetworkPolicy(input.userId, options)).not.toThrow();
+  });
+
+  it("uses a different bridge for a different user", () => {
+    expect(bridgeName("user-1")).not.toBe(bridgeName("user-2"));
+  });
+
+  it.each([
+    ["icc disabled", (options: NetworkCreateOptions) => {
+      options.Options = { ...options.Options, "com.docker.network.bridge.enable_icc": "true" };
+    }],
+    ["masquerade disabled", (options: NetworkCreateOptions) => {
+      options.Options = { ...options.Options, "com.docker.network.bridge.enable_ip_masquerade": "false" };
+    }],
+    ["renamed bridge", (options: NetworkCreateOptions) => {
+      options.Options = { "com.docker.network.bridge.name": "br-other" };
+    }],
+    ["missing bridge name", (options: NetworkCreateOptions) => {
+      options.Options = {};
+    }],
+    ["host driver", (options: NetworkCreateOptions) => {
+      options.Driver = "host";
+    }],
+    ["custom ipam", (options: NetworkCreateOptions) => {
+      options.IPAM = { Config: [{ Subnet: "10.1.0.0/16", Gateway: "10.1.0.1" }] };
+    }],
+    ["internal", (options: NetworkCreateOptions) => {
+      options.Internal = true;
+    }],
+    ["ipv6", (options: NetworkCreateOptions) => {
+      options.EnableIPv6 = true;
+    }],
+  ])("rejects %s", (_name, change) => {
+    const options = buildNetworkOptions(input.userId);
+    change(options);
+    expect(() => assertNetworkPolicy(input.userId, options)).toThrow(MachinePolicyError);
   });
 });
 

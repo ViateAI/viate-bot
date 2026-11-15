@@ -1,0 +1,272 @@
+#!/bin/sh
+# Rancher Desktop/Alpine provisioning；只拥有 VB-* 链和 vb<12hex> 网桥的 tc。
+set -eu
+
+VB_RATE_MBIT=${VB_RATE_MBIT:-50}
+VB_HASHLIMIT=${VB_HASHLIMIT:-50}
+VB_HASHLIMIT_BURST=${VB_HASHLIMIT_BURST:-50}
+VB_CONNLIMIT=${VB_CONNLIMIT:-512}
+export VB_RATE_MBIT VB_HASHLIMIT VB_HASHLIMIT_BURST VB_CONNLIMIT
+STATE=/run/vb-firewall
+LOG=/var/log/vb-firewall.log
+SCRIPT=$(readlink -f "$0")
+case "${1:-}" in
+  --*)
+    if [ -r "$STATE/config" ]; then
+      read -r VB_RATE_MBIT VB_HASHLIMIT VB_HASHLIMIT_BURST VB_CONNLIMIT <"$STATE/config"
+    fi ;;
+esac
+BRIDGES='^vb[0-9a-f]{12}$'
+PRIVATE='10.0.0.0/8 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10'
+
+log() { printf '%s %s\n' "$(date -Iseconds)" "$*"; }
+die() { log "FAIL $*" >&2; exit 1; }
+bounded() {
+  case "$1" in ''|*[!0-9]*) die "阈值必须是正整数" ;; esac
+  [ "$1" -ge 1 ] && [ "$1" -le "$2" ] || die "阈值只能收紧至 1..$2"
+}
+bounded "$VB_RATE_MBIT" 50
+bounded "$VB_HASHLIMIT" 50
+bounded "$VB_HASHLIMIT_BURST" 50
+bounded "$VB_CONNLIMIT" 512
+[ "$(id -u)" = 0 ] || die '需要 root'
+for tool in ip iptables iptables-restore ip6tables ip6tables-restore tc flock; do
+  command -v "$tool" >/dev/null || die "缺少 $tool；停止用户机器并安装依赖后重新下发"
+done
+
+# 选择已挂入 Docker FORWARD 的后端，而非猜测 alternatives。混用两套拒绝启动。
+select_backend() {
+  IPT=
+  for candidate in iptables iptables-legacy iptables-nft; do
+  command -v "$candidate" >/dev/null || continue
+  if "$candidate" -w 5 -C FORWARD -j DOCKER-USER 2>/dev/null; then
+    if [ -n "$IPT" ] && [ "$("$IPT" --version)" != "$("$candidate" --version)" ]; then
+      die 'Docker 同时使用 legacy/nft；先统一后端'
+    fi
+    IPT=$candidate
+  fi
+  done
+  [ -n "$IPT" ] || return 1
+  case "$IPT" in
+  iptables-legacy) IP6T=ip6tables-legacy ;;
+  iptables-nft) IP6T=ip6tables-nft ;;
+  *) IP6T=ip6tables ;;
+  esac
+  command -v "$IP6T" >/dev/null || die "缺少 $IP6T"
+}
+
+bridges() { ip -o link show type bridge | awk -F ': ' '{print $2}' | cut -d@ -f1 | grep -E "$BRIDGES" || true; }
+
+# 一次 filter 表事务替换全部自有链。--noflush 保留 Docker 和其它应用的链。
+# 不再先造临时链逐条追加：任何模块/语法失败都会保留完整旧策略并返回失败。
+rules4() {
+  printf '*filter\n:VB-GUARD - [0:0]\n:VB-EGRESS - [0:0]\n:VB-INPUT - [0:0]\n'
+  for chain in VB-GUARD VB-EGRESS; do
+    printf '%s\n' "-A $chain -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN"
+    printf '%s\n' "-A $chain -m conntrack --ctstate INVALID,UNTRACKED -j DROP"
+    printf '%s\n' "-A $chain -p tcp --dport 25 -j DROP"
+    for cidr in $PRIVATE; do printf '%s\n' "-A $chain -d $cidr -j DROP"; done
+    if [ "$chain" = VB-GUARD ]; then printf '%s\n' '-A VB-GUARD -j RETURN'; fi
+  done
+  # 同名 hashlimit 表会复用旧内核参数；参数变化必须换名字，同参数则保留桶状态。
+  printf '%s\n' "-A VB-EGRESS -m conntrack --ctstate NEW -m hashlimit --hashlimit-above $VB_HASHLIMIT/sec --hashlimit-burst $VB_HASHLIMIT_BURST --hashlimit-mode srcip --hashlimit-name vb-new-$VB_HASHLIMIT-$VB_HASHLIMIT_BURST -j DROP"
+  printf '%s\n' "-A VB-EGRESS -p tcp -m conntrack --ctstate NEW -m connlimit --connlimit-above $VB_CONNLIMIT --connlimit-mask 32 -j DROP"
+  printf '%s\n' '-A VB-EGRESS -j RETURN'
+  printf '%s\n' '-A VB-INPUT -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN'
+  printf '%s\n' '-A VB-INPUT -j DROP' COMMIT
+}
+rules6() { printf '%s\n' '*filter' ':VB-EGRESS - [0:0]' '-A VB-EGRESS -j DROP' COMMIT; }
+
+jump() {
+  bin=$1 parent=$2 chain=$3
+  "$bin" -w 5 -C "$parent" -i vb+ -j "$chain" 2>/dev/null ||
+    "$bin" -w 5 -I "$parent" 1 -i vb+ -j "$chain"
+}
+
+check_rules() {
+  # -C 使用内核解析器，避免 grep 一个 DROP 就把空洞策略报告为 PASS。
+  rules4 | while IFS= read -r rule; do
+    case "$rule" in
+      '-A '*)
+        # 此处单词拆分有意为之；生成器只有固定 token 和已验证的整数。
+        # shellcheck disable=SC2086
+        "$IPT" -w 5 -C ${rule#-A } >/dev/null 2>&1 || exit 1 ;;
+    esac
+  done || return 1
+  [ "$("$IPT" -S VB-EGRESS | grep -c '^-A ')" = "$(rules4 | grep -c '^-A VB-EGRESS ')" ] || return 1
+  [ "$("$IPT" -S VB-INPUT | grep -c '^-A ')" = 2 ] || return 1
+  [ "$("$IPT" -S VB-GUARD | grep -c '^-A ')" = "$(rules4 | grep -c '^-A VB-GUARD ')" ] || return 1
+  [ "$("$IPT" -S VB-GUARD | tail -1)" = '-A VB-GUARD -j RETURN' ] || return 1
+  [ "$("$IPT" -S VB-EGRESS | tail -1)" = '-A VB-EGRESS -j RETURN' ] || return 1
+  [ "$("$IPT" -S VB-INPUT | tail -1)" = '-A VB-INPUT -j DROP' ] || return 1
+  "$IPT" -w 5 -C DOCKER-USER -i vb+ -j VB-EGRESS || return 1
+  "$IPT" -w 5 -C FORWARD -i vb+ -j VB-GUARD || return 1
+  "$IPT" -w 5 -C INPUT -i vb+ -j VB-INPUT || return 1
+  [ "$("$IP6T" -S VB-EGRESS | tail -1)" = '-A VB-EGRESS -j DROP' ] || return 1
+  [ "$("$IP6T" -S VB-EGRESS | grep -c '^-A ')" = 1 ] || return 1
+  "$IP6T" -w 5 -C FORWARD -i vb+ -j VB-EGRESS || return 1
+  "$IP6T" -w 5 -C INPUT -i vb+ -j VB-EGRESS || return 1
+  [ "$(cat /proc/sys/net/bridge/bridge-nf-call-iptables)" = 1 ] || return 1
+  [ "$(cat /proc/sys/net/bridge/bridge-nf-call-ip6tables)" = 1 ]
+}
+
+apply_rules() (
+  flock -x 8 || exit 1
+  rules4 | "$IPT-restore" -w 5 --noflush || exit 1
+  rules6 | "$IP6T-restore" -w 5 --noflush || exit 1
+  # FORWARD 入口兜底 Docker 删除/重建 DOCKER-USER 的间隙；只匹配自有网桥。
+  jump "$IPT" FORWARD VB-GUARD || exit 1
+  jump "$IPT" DOCKER-USER VB-EGRESS || exit 1
+  jump "$IPT" INPUT VB-INPUT || exit 1
+  jump "$IP6T" FORWARD VB-EGRESS || exit 1
+  jump "$IP6T" INPUT VB-EGRESS || exit 1
+  while "$IPT" -w 5 -C FORWARD -i vb+ -j VB-EGRESS 2>/dev/null; do
+    "$IPT" -w 5 -D FORWARD -i vb+ -j VB-EGRESS || exit 1
+  done
+  # 旧版 INPUT 跳转没有 -i 限定，套用新 DROP 策略会误伤其它宿主流量。
+  while "$IPT" -w 5 -C INPUT -j VB-INPUT 2>/dev/null; do
+    "$IPT" -w 5 -D INPUT -j VB-INPUT || exit 1
+  done
+  while "$IPT" -w 5 -t nat -C PREROUTING -i vb+ -d 127.0.0.11 -j VB-DNS 2>/dev/null; do
+    "$IPT" -w 5 -t nat -D PREROUTING -i vb+ -d 127.0.0.11 -j VB-DNS || exit 1
+  done
+  if "$IPT" -t nat -S VB-DNS >/dev/null 2>&1; then
+    "$IPT" -w 5 -t nat -F VB-DNS || exit 1
+    "$IPT" -w 5 -t nat -X VB-DNS || exit 1
+  fi
+) 8>"$STATE/apply.flock"
+
+ports() { ip -o link show master "$1" type veth | awk -F ': ' '{print $2}' | cut -d@ -f1; }
+ifb_for() { printf 'vbi%s\n' "${1#vb}"; }
+owned_ifb() {
+  [ "$(cat "/sys/class/net/$1/ifalias" 2>/dev/null)" = "viate-bot:$2" ] &&
+    ip -d link show dev "$1" type ifb | grep -q 'ifb '
+}
+has_tbf() { tc qdisc show dev "$1" | grep -q "tbf.*rate ${VB_RATE_MBIT}Mbit.*burst 128Kb"; }
+has_redirect() {
+  tc filter show dev "$1" parent ffff: | grep -q "Egress Redirect to device $2)" &&
+    tc filter show dev "$1" parent ffff: | grep -q 'match 00000000/00000000 at 0'
+}
+check_shape() (
+  bridge=$1
+  ifb=$(ifb_for "$bridge")
+  has_tbf "$bridge" && owned_ifb "$ifb" "$bridge" && has_tbf "$ifb" || exit 1
+  # 禁止把已经经过 bridge prerouting 的包重注入 IFB。
+  if tc qdisc show dev "$bridge" | grep -q ingress; then exit 1; fi
+  for port in $(ports "$bridge"); do has_redirect "$port" "$ifb" || exit 1; done
+)
+
+shape() (
+  flock -x 7 || exit 1
+  for bridge in $(bridges); do
+    ifb=$(ifb_for "$bridge")
+    if ip link show dev "$ifb" >/dev/null 2>&1; then
+      owned_ifb "$ifb" "$bridge" || die "$ifb 名称冲突，拒绝改动非自有设备"
+    else
+      ip link add "$ifb" type ifb || exit 1
+      ip link set "$ifb" alias "viate-bot:$bridge" || exit 1
+    fi
+    ip link set "$ifb" up || exit 1
+    has_tbf "$bridge" || tc qdisc replace dev "$bridge" root tbf rate "${VB_RATE_MBIT}mbit" burst 128kb latency 50ms || exit 1
+    has_tbf "$ifb" || tc qdisc replace dev "$ifb" root tbf rate "${VB_RATE_MBIT}mbit" burst 128kb latency 50ms || exit 1
+    tc qdisc del dev "$bridge" ingress 2>/dev/null || true
+    for port in $(ports "$bridge"); do
+      has_redirect "$port" "$ifb" 2>/dev/null && continue
+      tc qdisc replace dev "$port" handle ffff: ingress || exit 1
+      # 在宿主 veth ingress、进入 bridge-nf 前重定向，避免丢失桥接 conntrack 元数据。
+      tc filter replace dev "$port" parent ffff: protocol all pref 1 handle 800::1 u32 \
+        match u32 0 0 action mirred egress redirect dev "$ifb" || exit 1
+      log "OK tc $port → $ifb (${VB_RATE_MBIT}Mbit)"
+    done
+  done
+  # 仅按自有 alias 和精确名称清理；绝不删除旧版无所有权标记的 i<hash> 设备。
+  for ifb in $(ip -o link show type ifb | awk -F ': ' '{print $2}' | cut -d@ -f1); do
+    alias=$(cat "/sys/class/net/$ifb/ifalias")
+    case "$alias" in
+      viate-bot:vb*)
+        bridge=${alias#viate-bot:}
+        printf '%s\n' "$bridge" | grep -Eq "$BRIDGES" || continue
+        [ "$ifb" = "$(ifb_for "$bridge")" ] || continue
+        if ! ip link show dev "$bridge" >/dev/null 2>&1; then ip link del "$ifb" || exit 1; fi ;;
+    esac
+  done
+) 7>"$STATE/tc.lock"
+
+process_is() {
+  file=$1 mode=$2
+  [ -r "$file" ] || return 1
+  read -r pid started <"$file"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -r "/proc/$pid/stat" ] || return 1
+  [ "$(awk '{print $22}' "/proc/$pid/stat")" = "$started" ] || return 1
+  case "$(awk '{print $3}' "/proc/$pid/stat")" in R|S|D) ;; *) return 1 ;; esac
+  tr '\000' '\n' <"/proc/$pid/cmdline" | grep -Fxq -- "$SCRIPT" || return 1
+  tr '\000' '\n' <"/proc/$pid/cmdline" | grep -Fxq -- "$mode"
+}
+record_pid() { printf '%s %s\n' "$$" "$(awk '{print $22}' "/proc/$$/stat")" >"$1"; }
+enable_bridge_filter() {
+  [ -w /proc/sys/net/bridge/bridge-nf-call-iptables ] || die '缺少 br_netfilter'
+  printf '1\n' >/proc/sys/net/bridge/bridge-nf-call-iptables || return 1
+  printf '1\n' >/proc/sys/net/bridge/bridge-nf-call-ip6tables || return 1
+}
+
+case "${1:-}" in
+  --check)
+    select_backend || die '未发现 Docker iptables 后端'
+    check_rules || die '规则、跳转或 bridge-nf 缺失/不完整'
+    process_is "$STATE/supervisor.pid" --supervise || die '监督进程缺失或 pid 已复用'
+    process_is "$STATE/monitor.pid" --monitor || die '监视器缺失或 pid 已复用'
+    updated=$(cat "$STATE/last-success" 2>/dev/null) || die '没有成功监视周期'
+    case "$updated" in ''|*[!0-9]*) die '监视时间戳无效' ;; esac
+    age=$(( $(date +%s) - updated ))
+    [ "$age" -ge 0 ] && [ "$age" -le 15 ] || die '监视周期已停滞超过15秒'
+    for bridge in $(bridges); do check_shape "$bridge" || die "$bridge tc 不完整"; log "OK tc $bridge"; done
+    log "PASS ($IPT)；仅结构自检，仍须 README 行为验收"
+    exit 0 ;;
+  --monitor)
+    exec 5>"$STATE/monitor.lock"
+    flock -n 5 || exit 0
+    record_pid "$STATE/monitor.pid"
+    while :; do
+      # 每轮新进程读取当前脚本和已验证配置；重复 provisioning 可立即换策略。
+      sh "$SCRIPT" --sync 5>&- || exit 1
+      sleep 5 5>&-
+    done ;;
+  --sync)
+    select_backend || die '等待 moby FORWARD→DOCKER-USER（不支持原生 nftables 后端）'
+    if ! check_rules 2>/dev/null; then enable_bridge_filter; apply_rules; fi
+    shape
+    check_rules || die '同步后防火墙条件仍不满足'
+    for bridge in $(bridges); do check_shape "$bridge" || die "同步后 $bridge tc 仍不完整"; done
+    date +%s >"$STATE/last-success"
+    exit 0 ;;
+  --supervise)
+    exec 9>"$STATE/daemon.lock"
+    flock -n 9 || exit 0
+    record_pid "$STATE/supervisor.pid"
+    while :; do
+      # daemon 锁只由监督进程持有；monitor 的独立锁防止监督重启后双监视器。
+      sh "$SCRIPT" --monitor 9>&- || log 'WARN monitor exited; restarting in 5s'
+      sleep 5 9>&-
+    done ;;
+  '') ;;
+  *) die '用法：sh vb-firewall.start [--check]' ;;
+esac
+
+mkdir -p "$STATE"
+exec 6>"$STATE/provision.flock"
+flock -x 6
+printf '%s %s %s %s\n' "$VB_RATE_MBIT" "$VB_HASHLIMIT" "$VB_HASHLIMIT_BURST" "$VB_CONNLIMIT" >"$STATE/config.new"
+mv "$STATE/config.new" "$STATE/config"
+command -v modprobe >/dev/null && modprobe br_netfilter 2>/dev/null || true
+enable_bridge_filter
+if select_backend; then
+  apply_rules
+  shape
+else
+  log 'WARN moby 尚未就绪；监督进程每 5 秒重试，在自检 PASS 前不得启动用户机器'
+fi
+# 不按 pid 文件杀进程；flock 决定唯一监督进程，pid/starttime/cmdline 仅用于只读自检。
+exec 6>&-
+nohup sh "$SCRIPT" --supervise >>"$LOG" 2>&1 </dev/null &
+log "OK provisioning 已启动；监督进程按锁保持唯一，日志 $LOG"
