@@ -37,6 +37,18 @@ export interface MachineMeta {
   state: string;
 }
 
+/** 机器页面用的元数据。仍然没有 token。 */
+export interface MachineAdminRecord {
+  id: string;
+  userId: string;
+  state: string;
+  spec: MachineSpec;
+  imageVersion: string;
+  createdAt: string;
+  updatedAt: string;
+  lastHeartbeatAt: string | null;
+}
+
 export interface MachineStore {
   find(scope: UserScope): MachineRecord | undefined;
   findById(scope: UserScope, id: string): MachineRecord | undefined;
@@ -44,6 +56,8 @@ export interface MachineStore {
   update(scope: UserScope, patch: MachinePatch): boolean;
   updateById(scope: UserScope, id: string, patch: MachinePatch): boolean;
   list(scope: AdminScope): MachineMeta[];
+  listAdmin(scope: AdminScope): MachineAdminRecord[];
+  findAdmin(scope: AdminScope, id: string): MachineAdminRecord | undefined;
   /** 管理端按 id 和 user_id 核对机器是否存在。不返回 token。 */
   findOwned(scope: AdminScope, userId: string, id: string): MachineMeta | undefined;
   updateOwned(scope: AdminScope, userId: string, id: string, patch: MachineAdminPatch): boolean;
@@ -104,6 +118,39 @@ export function machineRepository(db: AppDatabase): MachineStore {
         .from(machines)
         .all();
     },
+    listAdmin(_scope) {
+      return db
+        .select({
+          id: machines.id,
+          userId: machines.userId,
+          state: machines.state,
+          specJson: machines.specJson,
+          imageVersion: machines.imageVersion,
+          createdAt: machines.createdAt,
+          updatedAt: machines.updatedAt,
+          lastHeartbeatAt: machines.lastHeartbeatAt,
+        })
+        .from(machines)
+        .all()
+        .map(toAdmin);
+    },
+    findAdmin(_scope, id) {
+      const row = db
+        .select({
+          id: machines.id,
+          userId: machines.userId,
+          state: machines.state,
+          specJson: machines.specJson,
+          imageVersion: machines.imageVersion,
+          createdAt: machines.createdAt,
+          updatedAt: machines.updatedAt,
+          lastHeartbeatAt: machines.lastHeartbeatAt,
+        })
+        .from(machines)
+        .where(eq(machines.id, id))
+        .get();
+      return row ? toAdmin(row) : undefined;
+    },
     findOwned(_scope, userId, id) {
       const row = db
         .select({ id: machines.id, userId: machines.userId, state: machines.state })
@@ -120,6 +167,28 @@ export function machineRepository(db: AppDatabase): MachineStore {
         .run();
       return result.changes > 0;
     },
+  };
+}
+
+function toAdmin(row: {
+  id: string;
+  userId: string;
+  state: string;
+  specJson: string;
+  imageVersion: string;
+  createdAt: string;
+  updatedAt: string;
+  lastHeartbeatAt: string | null;
+}): MachineAdminRecord {
+  return {
+    id: row.id,
+    userId: row.userId,
+    state: row.state,
+    spec: readSpec(row.specJson),
+    imageVersion: row.imageVersion,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    lastHeartbeatAt: row.lastHeartbeatAt,
   };
 }
 

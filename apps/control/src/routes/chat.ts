@@ -8,6 +8,7 @@ import type { ControlConfig } from "../config.js";
 import { botRepository } from "../db/bots.js";
 import { chatRepository } from "../db/chat.js";
 import type { AppDatabase } from "../db/index.js";
+import { memoryRepository } from "../db/memories.js";
 import { quotaRepository } from "../db/quotas.js";
 import type { CredentialProvider } from "../providers.js";
 import { userScope } from "../scope.js";
@@ -25,6 +26,18 @@ export interface ChatRouteDeps {
 export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): void {
   const bots = botRepository(deps.db);
   const chat = chatRepository(deps.db);
+
+  app.addHook("preHandler", async (request, reply) => {
+    const path = request.routeOptions.url ?? "";
+    if (path !== "/api/bots" && !path.startsWith("/api/bots/")) return;
+    const resolved = authenticated.get(request);
+    if (!resolved || quotaRepository(deps.db).find(userScope(resolved.user.id))) return;
+    if (request.method === "GET" || request.method === "HEAD") {
+      if (path === "/api/bots") return reply.send({ bots: [] });
+      return reply.code(404).send({ error: "找不到 bot" });
+    }
+    return reply.code(403).send({ error: "尚未开通，请联系管理员" });
+  });
 
   app.get("/api/bots", async (request, reply) => {
     const scope = scopeOf(request, reply);
@@ -48,7 +61,11 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
           credentials: deps.credentials,
           providerId: deps.providerId,
           allowModel: (candidate) => deps.config.models.length === 0 || deps.config.models.includes(candidate),
-          maxBots: (current) => quotaRepository(deps.db).find(current)?.maxBots ?? deps.config.defaultMaxBots,
+          maxBots: (current) => {
+            const quota = quotaRepository(deps.db).find(current);
+            if (!quota) throw new BotRejected("尚未开通，请联系管理员", 403);
+            return quota.maxBots;
+          },
           ensureMachine: deps.ensureMachine,
         },
         scope,
@@ -83,6 +100,22 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     } catch (error) {
       return sendError(reply, error);
     }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/bots/:id/memories", async (request, reply) => {
+    const scope = scopeOf(request, reply);
+    if (!scope) return;
+    const rows = memoryRepository(deps.db).list(scope, request.params.id);
+    if (!rows) return reply.code(404).send({ error: "找不到 bot" });
+    return { memories: rows.map((row) => ({ id: row.id, content: row.content, updatedAt: row.updatedAt })) };
+  });
+
+  app.delete<{ Params: { id: string; memoryId: string } }>("/api/bots/:id/memories/:memoryId", async (request, reply) => {
+    const scope = scopeOf(request, reply);
+    if (!scope) return;
+    const removed = memoryRepository(deps.db).remove(scope, request.params.id, request.params.memoryId);
+    if (removed === undefined || removed === false) return reply.code(404).send({ error: "找不到记忆" });
+    return { ok: true };
   });
 
   app.get<{ Params: { id: string } }>("/api/bots/:id/conversations", async (request, reply) => {

@@ -12,6 +12,8 @@ import { decrypt, loadOrCreateKey } from "./crypto.js";
 import { credentialRepository } from "./db/credentials.js";
 import { identityRepository } from "./db/identities.js";
 import { openDatabase } from "./db/index.js";
+import { machineRepository, type MachineRecord } from "./db/machines.js";
+import { settingsRepository } from "./db/settings.js";
 import { ensureDevUser, userRepository } from "./db/users.js";
 import type { CredentialProvider, IssuedCredential } from "./providers.js";
 import { sharedCredentialProvider } from "./shared-key.js";
@@ -35,6 +37,24 @@ function database() {
 }
 
 describe("bot credentials", () => {
+  it("uses the configured default channel for later bots but preserves an explicit override", async () => {
+    const { db, key } = database();
+    settingsRepository(db).setDefaultChannel("default-channel");
+    const credentials: CredentialProvider = {
+      async issue(bot, policyRef) {
+        return { provider: "viate", externalId: `ext-${bot.id}`, secret: "s", policyRef: policyRef ?? "first-upstream-channel", shared: false };
+      },
+      async revoke() {},
+    };
+    const scope = userScope("user-a");
+    const deps = { db, key, credentials, providerId: "viate" };
+    const defaultBot = await createBot(deps, scope, { name: "Default", model: "m" });
+    const overrideBot = await createBot(deps, scope, { name: "Override", model: "m", policyRef: "override-channel" });
+    expect(credentialRepository(db).findById(scope, defaultBot.modelCredentialId!)?.policyRef).toBe("default-channel");
+    expect(credentialRepository(db).findById(scope, overrideBot.modelCredentialId!)?.policyRef).toBe("override-channel");
+    db.$client.close();
+  });
+
   it("shares one encrypted key and does not revoke it when a bot is deleted", async () => {
     const { db, key } = database();
     const config = loadConfig({ VB_MODEL_API_KEY: "shared-secret" });
@@ -155,6 +175,60 @@ describe("bot credentials", () => {
     expect(await pullViateUsage(db, viate, outside)).toBe(0);
     expect(queried.at(-1)).toEqual([]);
     expect(db.$client.prepare("select count(*) as count from usage_hourly").get()).toEqual({ count: 1 });
+    db.$client.close();
+  });
+
+  it("leaves the machine in place when the last bot is deleted", async () => {
+    const { db, key } = database();
+    const scope = userScope("user-a");
+    const record: MachineRecord = {
+      id: "machine-a",
+      userId: "user-a",
+      state: "stopped",
+      containerId: "c",
+      networkId: "n",
+      volumeName: "vb-home-user-a",
+      imageVersion: "viate-bot/machine:dev",
+      spec: { cpu: 1, memMb: 1024, diskGb: 10 },
+      tokenEnc: "enc",
+    };
+    machineRepository(db).insert(scope, record);
+    const deps = { db, key, credentials: sharedCredentialProvider(loadConfig({ VB_MODEL_API_KEY: "shared-secret" })), providerId: "oidc" };
+    const bot = await createBot(deps, scope, { name: "Only", model: "m" });
+    expect(await deleteBot(deps, scope, bot.id)).toBe(true);
+    expect(machineRepository(db).find(scope)?.id).toBe("machine-a");
+    expect(machineRepository(db).find(scope)?.volumeName).toBe("vb-home-user-a");
+    db.$client.close();
+  });
+
+  it("revokes an issued key when machine creation fails", async () => {
+    const { db, key } = database();
+    const revoked: string[] = [];
+    const credentials: CredentialProvider = {
+      async issue(bot) {
+        return { provider: "viate", externalId: `ext-${bot.id}`, secret: "s", policyRef: null, shared: false };
+      },
+      async revoke(credential) {
+        if (credential.externalId) revoked.push(credential.externalId);
+      },
+    };
+    await expect(
+      createBot(
+        {
+          db,
+          key,
+          credentials,
+          providerId: "oidc",
+          ensureMachine: async () => {
+            throw new Error("机器创建失败");
+          },
+        },
+        userScope("user-a"),
+        { name: "Only", model: "m" },
+      ),
+    ).rejects.toThrow(/机器创建失败/);
+    expect(revoked).toHaveLength(1);
+    expect(revoked[0]).toMatch(/^ext-/);
     db.$client.close();
   });
 });

@@ -5,6 +5,7 @@ import { machineRepository } from "../db/machines.js";
 import { quotaRepository } from "../db/quotas.js";
 import { userScope } from "../scope.js";
 import type { DockerDriver } from "./docker.js";
+import type { MachineSpec } from "./policy.js";
 import { devSpec } from "../runtime.js";
 
 const MACHINED_PORT = 7070;
@@ -17,12 +18,12 @@ export interface MachineHost {
 }
 
 /** 该用户第一台机器在创建 bot 时建好，先停着。之后的 bot 直接复用。 */
-export async function ensureUserMachine(ctx: MachineHost, userId: string): Promise<void> {
+export async function ensureUserMachine(ctx: MachineHost, userId: string, requestedSpec?: MachineSpec): Promise<void> {
   const store = machineRepository(ctx.db);
   const scope = userScope(userId);
   const existing = store.find(scope);
   if (existing && existing.state !== "deleted") return;
-  const spec = quotaRepository(ctx.db).find(scope)?.spec ?? devSpec;
+  const spec = requestedSpec ?? quotaRepository(ctx.db).find(scope)?.spec ?? devSpec;
   await ctx.driver.create(store, scope, spec);
 }
 

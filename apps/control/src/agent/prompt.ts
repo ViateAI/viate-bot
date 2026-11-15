@@ -11,12 +11,44 @@ export function withPlatformPrompt(platform: string, system: string | undefined)
   return rest.length > 0 ? `${prefix}\n\n${rest}` : prefix;
 }
 
+export const MEMORY_SECTION_LIMIT = 4000;
+
+/** 平台提示词、bot 指令、记忆、机器状态。空段省略。 */
+export function buildSystemPrompt(platform: string, instructions: string, memory: string, status: string): string {
+  return [platform.trim(), instructions.trim(), memory.trim(), status.trim()].filter((part) => part.length > 0).join("\n\n");
+}
+
 /**
- * 记忆和已启用 Skill 是第 6 步和 M2 的空位，这里不注入。
- * 机器状态和时间放在 bot instructions 后面。
+ * 最近更新的 10 条在前，本次检索命中的最多 5 条在后，按 id 去重。
+ * 整节按字符（码点）截断，避免把整库记忆塞进提示词。
  */
-export function buildSystemPrompt(platform: string, instructions: string, status: string): string {
-  return [platform.trim(), instructions.trim(), status.trim()].filter((part) => part.length > 0).join("\n\n");
+export function formatMemorySection(
+  recent: Array<{ id: string; content: string }>,
+  matched: Array<{ id: string; content: string }>,
+  limit = MEMORY_SECTION_LIMIT,
+): string {
+  const seen = new Set<string>();
+  const lines = ["记忆（每条带 id。memory_save 保存，memory_search 检索，memory_delete 按 id 删除）："];
+  const push = (item: { id: string; content: string }) => {
+    if (seen.has(item.id)) return;
+    seen.add(item.id);
+    lines.push(`- ${item.id}: ${item.content}`);
+  };
+  for (const item of recent.slice(0, 10)) push(item);
+  for (const item of matched.slice(0, 5)) push(item);
+  if (seen.size === 0) return "";
+  const text = lines.join("\n");
+  const chars = [...text];
+  if (chars.length <= limit) return text;
+  return chars.slice(0, limit).join("");
+}
+
+export function latestUserText(messages: Array<{ role: string; content: unknown }>): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "user" && typeof message.content === "string") return message.content;
+  }
+  return "";
 }
 
 export function statusBlock(now: Date, machine: string, secretNames: string[] = []): string {

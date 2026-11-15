@@ -59,6 +59,12 @@ function memory(rows: MachineRecord[]): MachineStore {
     list() {
       return rows.map((row) => ({ id: row.id, userId: row.userId, state: row.state }));
     },
+    listAdmin() {
+      return [];
+    },
+    findAdmin() {
+      return undefined;
+    },
     findOwned() {
       return undefined;
     },

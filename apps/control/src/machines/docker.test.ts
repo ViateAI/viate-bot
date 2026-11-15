@@ -52,6 +52,12 @@ function memory(row: MachineRecord): MachineStore {
     list() {
       return [];
     },
+    listAdmin() {
+      return [];
+    },
+    findAdmin() {
+      return undefined;
+    },
     findOwned() {
       return undefined;
     },

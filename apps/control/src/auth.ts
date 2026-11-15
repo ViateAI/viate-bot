@@ -13,10 +13,12 @@ import {
 } from "./cookies.js";
 import { decrypt, encrypt } from "./crypto.js";
 import type { AppDatabase } from "./db/index.js";
+import { quotaRepository } from "./db/quotas.js";
 import { sessionRepository } from "./db/sessions.js";
 import { LoginRejected, acceptIdentity } from "./login.js";
 import { newTransaction } from "./oidc.js";
 import type { AppRuntime } from "./providers.js";
+import { userScope } from "./scope.js";
 import {
   clearSessionCookie,
   createSession,
@@ -55,6 +57,10 @@ export function registerAuth(app: FastifyInstance, deps: AuthDeps): void {
       return reply.code(503).send({ error: "暂时无法确认登录状态" });
     }
     if (lookup.kind === "none") return reply.code(401).send({ error: "未登录" });
+    const rawPath = request.url.split("?")[0] ?? "";
+    if ((path.startsWith("/api/admin") || rawPath.toLowerCase().startsWith("/api/admin")) && !lookup.resolved.user.isAdmin) {
+      return reply.code(404).send({ error: "找不到" });
+    }
     if (mutating(request.method)) {
       const header = request.headers["x-vb-csrf"];
       const csrf = Array.isArray(header) ? header[0] : header;
@@ -140,6 +146,7 @@ export function registerAuth(app: FastifyInstance, deps: AuthDeps): void {
       name: user.name,
       status: user.status,
       isAdmin: user.isAdmin,
+      provisioned: quotaRepository(deps.db).find(userScope(user.id)) !== undefined,
       csrf: resolved.session.csrf,
     };
   });

@@ -63,8 +63,14 @@ async function boot(env: Record<string, string>, endpoint: { host: string; port:
     ...env,
   });
   const ctx = contextFor(config);
-  ensureDevUser(ctx.db, "user-a");
-  ensureDevUser(ctx.db, "user-b");
+  ensureDevUser(ctx.db, "user-a", {
+    maxBots: config.defaultMaxBots,
+    maxConcurrentTasks: config.defaultMaxConcurrentTasks,
+  });
+  ensureDevUser(ctx.db, "user-b", {
+    maxBots: config.defaultMaxBots,
+    maxConcurrentTasks: config.defaultMaxConcurrentTasks,
+  });
   const prepared: string[] = [];
   const app = buildApp(ctx, {
     retryDelays: [0, 0],

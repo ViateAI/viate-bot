@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
-import { api, taskLabel, type ChatMessage, type Conversation, type Step, type Task } from "./api.js";
+import { api, taskLabel, type ChatMessage, type Conversation, type MemoryItem, type Step, type Task } from "./api.js";
 
 export function ChatPage({ botId }: { botId: string }) {
   const queryClient = useQueryClient();
@@ -10,6 +10,18 @@ export function ChatPage({ botId }: { botId: string }) {
   const [stream, setStream] = useState("");
   const [machine, setMachine] = useState<"starting" | "ready" | "idle">("idle");
   const [error, setError] = useState("");
+  const memories = useQuery({
+    queryKey: ["memories", botId],
+    queryFn: () => api<{ memories: MemoryItem[] }>(`/api/bots/${botId}/memories`),
+  });
+  const removeMemory = useMutation({
+    mutationFn: (id: string) => api(`/api/bots/${botId}/memories/${id}`, { method: "DELETE" }),
+    onSuccess: async () => {
+      setError("");
+      await queryClient.invalidateQueries({ queryKey: ["memories", botId] });
+    },
+    onError: (caught: Error) => setError(caught.message),
+  });
   const bot = useQuery({
     queryKey: ["bot", botId],
     queryFn: () => api<{ bot: { id: string; name: string; model: string } }>(`/api/bots/${botId}`),
@@ -34,6 +46,11 @@ export function ChatPage({ botId }: { botId: string }) {
     },
   });
   const task = tasks.data?.tasks[0];
+  useEffect(() => {
+    if (task?.state === "succeeded" || task?.state === "failed" || task?.state === "cancelled") {
+      void queryClient.invalidateQueries({ queryKey: ["memories", botId] });
+    }
+  }, [botId, queryClient, task?.id, task?.state]);
   const steps = useQuery({
     queryKey: ["steps", task?.id],
     enabled: Boolean(task?.id),
@@ -147,6 +164,25 @@ export function ChatPage({ botId }: { botId: string }) {
         </ol>
         {task?.error ? <pre className="overflow-auto rounded bg-red-950 p-3 text-sm text-red-100">{task.error}</pre> : null}
         {error ? <p className="text-sm text-red-300">{error}</p> : null}
+      </div>
+      <div data-testid="memory-list" className="mt-6 rounded border border-neutral-800 p-3">
+        <h2 className="text-sm font-medium">记忆</h2>
+        <ul className="mt-2 space-y-2">
+          {(memories.data?.memories ?? []).map((item) => (
+            <li key={item.id} data-testid="memory-item" className="flex items-start justify-between gap-3 text-sm">
+              <span className="whitespace-pre-wrap">{item.content}</span>
+              <button
+                data-testid={`delete-memory-${item.id}`}
+                className="shrink-0 text-neutral-400"
+                type="button"
+                onClick={() => removeMemory.mutate(item.id)}
+              >
+                删除
+              </button>
+            </li>
+          ))}
+          {(memories.data?.memories.length ?? 0) === 0 ? <li className="text-sm text-neutral-500">还没有记忆</li> : null}
+        </ul>
       </div>
       <form className="mt-4 grid gap-2" onSubmit={onSubmit}>
         <textarea

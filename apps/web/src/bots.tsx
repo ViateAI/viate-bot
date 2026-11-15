@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
-import { api, type Bot } from "./api.js";
+import { api, type Bot, type Me } from "./api.js";
 
 export function BotList() {
   const queryClient = useQueryClient();
+  const me = useQuery({ queryKey: ["me"], queryFn: () => api<Me>("/api/me") });
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<{ bots: Bot[] }>("/api/bots") });
   const models = useQuery({
     queryKey: ["models"],
@@ -33,6 +34,17 @@ export function BotList() {
   function onSubmit(event: FormEvent) {
     event.preventDefault();
     create.mutate();
+  }
+
+  if (me.data && !me.data.provisioned) {
+    return (
+      <section className="mx-auto grid max-w-3xl gap-4 px-6 py-10">
+        <h1 className="text-2xl font-semibold">我的 bot</h1>
+        <p data-testid="not-provisioned" className="rounded border border-neutral-800 px-4 py-6 text-neutral-300">
+          尚未开通，请联系管理员
+        </p>
+      </section>
+    );
   }
 
   return (

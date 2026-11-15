@@ -44,7 +44,8 @@ describe("schema migration", () => {
     for (const row of rows) {
       if (row && typeof row === "object" && "name" in row && typeof row.name === "string") names.push(row.name);
     }
-    expect(names.filter((name) => name !== "__drizzle_migrations").sort()).toEqual([
+    expect(names).toContain("memories_fts");
+    expect(names.filter((name) => name !== "__drizzle_migrations" && !name.startsWith("memories_fts")).sort()).toEqual([
       "app_installs",
       "app_versions",
       "app_visibility",

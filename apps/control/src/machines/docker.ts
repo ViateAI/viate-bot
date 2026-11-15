@@ -35,6 +35,10 @@ export class DockerDriver {
   }
 
   async create(store: MachineStore, scope: UserScope, spec: MachineSpec): Promise<MachineRecord> {
+    return this.insertMachine(store, scope, spec, this.image);
+  }
+
+  private async insertMachine(store: MachineStore, scope: UserScope, spec: MachineSpec, image: string): Promise<MachineRecord> {
     const userId = scope.userId;
     const existing = store.find(scope);
     // 数据库里留下的 containerId 可能指向已经消失的容器。容器还在才拒绝，消失了就原地重建。
@@ -48,7 +52,7 @@ export class DockerDriver {
     const input: MachineCreateInput = {
       userId,
       machineId,
-      image: this.image,
+      image,
       token,
       spec,
     };
@@ -63,7 +67,7 @@ export class DockerDriver {
       containerId: container.id,
       networkId: network.id,
       volumeName: volumeName(userId),
-      imageVersion: this.image,
+      imageVersion: image,
       spec,
       tokenEnc: encrypt(this.key, token),
     };
@@ -87,11 +91,11 @@ export class DockerDriver {
     }
   }
 
-  async rebuild(store: MachineStore, scope: UserScope, spec: MachineSpec): Promise<MachineRecord> {
+  async rebuild(store: MachineStore, scope: UserScope, spec: MachineSpec, image = this.image): Promise<MachineRecord> {
     const current = this.requireRecord(store, scope);
     await this.removeContainerIfPresent(containerName(scope.userId));
     store.update(scope, { containerId: null, state: current.state === "running" ? "running" : "stopped" });
-    const created = await this.create(store, scope, spec);
+    const created = await this.insertMachine(store, scope, spec, image);
     if (current.state === "running") await this.start(scope.userId);
     return store.find(scope) ?? created;
   }

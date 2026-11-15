@@ -6,6 +6,7 @@ import { botRepository, type BotRecord } from "../db/bots.js";
 import { chatRepository, type ConversationRecord, type StepRecord } from "../db/chat.js";
 import { credentialRepository } from "../db/credentials.js";
 import type { AppDatabase } from "../db/index.js";
+import { memoryRepository } from "../db/memories.js";
 import { quotaRepository } from "../db/quotas.js";
 import { settingsRepository } from "../db/settings.js";
 import { ulid } from "../id.js";
@@ -13,7 +14,8 @@ import { MachinedClient } from "../machines/client.js";
 import type { MachineEndpoint } from "@viate-bot/protocol";
 import { BrowserPool } from "./browser-session.js";
 import { browserScreenshotTool, browserTools } from "./browser-tools.js";
-import { buildSystemPrompt, compactMessages, statusBlock } from "./prompt.js";
+import { memoryTools } from "./memory-tools.js";
+import { buildSystemPrompt, compactMessages, formatMemorySection, latestUserText, statusBlock } from "./prompt.js";
 import type { ChatHub } from "./events.js";
 import { getToolHooks } from "./hooks.js";
 import {
@@ -249,6 +251,7 @@ export function createChatService(deps: ChatServiceDeps) {
     const scope = userScope(input.userId);
     const bot = botRepository(deps.db).findById(scope, input.botId);
     if (!bot) throw new ChatError("找不到 bot", 404);
+    if (!quotaRepository(deps.db).find(scope)) throw new ChatError("尚未开通，请联系管理员", 403);
     const conversation = resolveConversation(scope, bot, input.conversationId, text);
     const live = liveByBot.get(bot.id);
     if (live && live.conversationId !== conversation.id) {
@@ -405,6 +408,10 @@ export function createChatService(deps: ChatServiceDeps) {
       deps.tasks.set(live.id, gatewayTask);
       const platform = settingsRepository(deps.db).platformPrompt().text;
       const transcript = loadTranscript(chat.listMessages(scope, live.conversationId) ?? []);
+      const memoryStore = memoryRepository(deps.db);
+      const query = latestUserText(transcript);
+      const recent = memoryStore.recent(scope, bot.id, 10) ?? [];
+      const matched = query ? (memoryStore.search(scope, bot.id, query, 5) ?? []) : [];
       const bound = browsers.bind(live.userId, live.botId, endpoint);
       const secretTool = createSecretTool(async (request) => {
         live.waitingInput = true;
@@ -421,10 +428,21 @@ export function createChatService(deps: ChatServiceDeps) {
         ...browserTools(bound),
         ...(deps.config.visionModels.includes(bot.model) ? [browserScreenshotTool(bound)] : []),
         secretTool,
+        ...memoryTools({
+          knownSecrets: () => broker.known(live.userId, live.id),
+          save: (content) => memoryStore.save(scope, bot.id, { id: ulid(), content, sourceTaskId: live.id }),
+          search: (text) => memoryStore.search(scope, bot.id, text, 5) ?? [],
+          remove: (id) => memoryStore.remove(scope, bot.id, id) ?? false,
+        }),
       ];
       const agent = new Agent({
         initialState: {
-          systemPrompt: buildSystemPrompt(platform, bot.instructions, statusBlock(now(), "运行中", broker.names(live.userId))),
+          systemPrompt: buildSystemPrompt(
+            platform,
+            bot.instructions,
+            formatMemorySection(recent, matched),
+            statusBlock(now(), "运行中", broker.names(live.userId)),
+          ),
           model: buildModel(deps.config, bot.model),
           tools: bindSecrets(rawTools, (name) => broker.lookup(live.userId, live.id, name)),
           messages: transcript,
@@ -686,7 +704,7 @@ export function createChatService(deps: ChatServiceDeps) {
   }
 
   function userLimit(userId: string): number {
-    return quotaRepository(deps.db).find(userScope(userId))?.maxConcurrentTasks ?? deps.config.defaultMaxConcurrentTasks;
+    return quotaRepository(deps.db).find(userScope(userId))?.maxConcurrentTasks ?? 0;
   }
 
   function remember(userId: string): void {

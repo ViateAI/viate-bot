@@ -36,6 +36,7 @@ export function registerWeb(app: FastifyInstance): void {
 }
 
 function reserved(path: string): boolean {
+  path = path.toLowerCase();
   return (
     path === "/health" ||
     path.startsWith("/api/") ||

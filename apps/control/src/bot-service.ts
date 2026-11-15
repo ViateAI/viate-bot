@@ -3,8 +3,9 @@ import { botRepository, type BotRecord } from "./db/bots.js";
 import { credentialRepository } from "./db/credentials.js";
 import { identityRepository } from "./db/identities.js";
 import type { AppDatabase } from "./db/index.js";
+import { settingsRepository } from "./db/settings.js";
 import { ulid } from "./id.js";
-import type { CredentialProvider } from "./providers.js";
+import type { CredentialProvider, IssuedCredential } from "./providers.js";
 import type { UserScope } from "./scope.js";
 
 export interface CreateBotInput {
@@ -54,42 +55,56 @@ export async function createBot(deps: BotServiceDeps, scope: UserScope, input: C
     ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
   });
   const subject = identityRepository(deps.db).findByUser(scope.userId, deps.providerId)?.subject ?? null;
+  const policyRef = input.policyRef ?? settingsRepository(deps.db).defaultChannel() ?? undefined;
+  let issued: IssuedCredential | undefined;
   try {
-    const issued = await deps.credentials.issue(
+    const credential = await deps.credentials.issue(
       { id, name: input.name, userId: scope.userId, subject },
-      ...(input.policyRef !== undefined ? [input.policyRef] : []),
+      ...(policyRef !== undefined ? [policyRef] : []),
     );
-    if (issued.shared) {
-      const shared = deps.db.transaction(() => {
+    issued = credential;
+    deps.db.transaction(() => {
+      if (credential.shared) {
         const existing = credentials.findShared();
-        if (existing) {
-          credentials.updateSecret(existing.id, encrypt(deps.key, issued.secret));
-          return existing;
-        }
-        return credentials.insertShared(ulid(), encrypt(deps.key, issued.secret));
-      });
-      bots.setCredential(scope, id, shared.id);
-    } else {
-      const row = credentials.insertOwned(scope, {
-        id: ulid(),
-        botId: id,
-        provider: issued.provider,
-        externalId: issued.externalId,
-        secretEnc: encrypt(deps.key, issued.secret),
-        policyRef: issued.policyRef,
-      });
-      bots.setCredential(scope, id, row.id);
-    }
+        const shared = existing ?? credentials.insertShared(ulid(), encrypt(deps.key, credential.secret));
+        if (existing) credentials.updateSecret(existing.id, encrypt(deps.key, credential.secret));
+        bots.setCredential(scope, id, shared.id);
+      } else {
+        const row = credentials.insertOwned(scope, {
+          id: ulid(),
+          botId: id,
+          provider: credential.provider,
+          externalId: credential.externalId,
+          secretEnc: encrypt(deps.key, credential.secret),
+          policyRef: credential.policyRef,
+        });
+        bots.setCredential(scope, id, row.id);
+      }
+    });
   } catch (error) {
     bots.remove(scope, id);
+    if (issued && !issued.shared) {
+      try {
+        await deps.credentials.revoke({ provider: issued.provider, externalId: issued.externalId, shared: false });
+      } catch {
+        throw new BotRejected("凭据保存失败；回滚未完成：凭据吊销失败", 503);
+      }
+    }
     throw error;
   }
   if (deps.ensureMachine) {
     try {
       await deps.ensureMachine(scope.userId);
     } catch (error) {
-      bots.softDelete(scope, id);
       const message = error instanceof Error ? error.message : "机器创建失败";
+      try {
+        await revokeOwned(deps, scope, id);
+      } catch {
+        throw new BotRejected(`${message}；回滚未完成：凭据吊销失败`, 503);
+      } finally {
+        // 保留未吊销凭据供对账回收，但失败的 bot 不能继续接收任务。
+        bots.softDelete(scope, id);
+      }
       throw new BotRejected(message, 503);
     }
   }
@@ -100,19 +115,24 @@ export async function createBot(deps: BotServiceDeps, scope: UserScope, input: C
 
 export async function deleteBot(deps: BotServiceDeps, scope: UserScope, id: string): Promise<boolean> {
   const bots = botRepository(deps.db);
-  const credentials = credentialRepository(deps.db);
   const bot = bots.findById(scope, id);
   if (!bot) return false;
-  if (bot.modelCredentialId) {
-    const owned = credentials.findById(scope, bot.modelCredentialId);
-    if (owned) {
-      await deps.credentials.revoke({
-        provider: owned.provider,
-        externalId: owned.externalId,
-        shared: false,
-      });
-      credentials.markRevoked(scope, owned.id, new Date().toISOString());
-    }
-  }
+  await revokeOwned(deps, scope, id);
   return bots.softDelete(scope, id);
+}
+
+/** 只吊销这个用户名下的按 bot 签发的凭据。共享 key 的 user_id 为空，findById 读不到，不会被吊销。 */
+async function revokeOwned(deps: BotServiceDeps, scope: UserScope, id: string): Promise<void> {
+  const bots = botRepository(deps.db);
+  const credentials = credentialRepository(deps.db);
+  const bot = bots.findById(scope, id);
+  if (!bot?.modelCredentialId) return;
+  const owned = credentials.findById(scope, bot.modelCredentialId);
+  if (!owned) return;
+  await deps.credentials.revoke({
+    provider: owned.provider,
+    externalId: owned.externalId,
+    shared: false,
+  });
+  credentials.markRevoked(scope, owned.id, new Date().toISOString());
 }

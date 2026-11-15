@@ -34,7 +34,15 @@ export interface Me {
   id: string;
   email: string;
   name: string;
+  isAdmin: boolean;
+  provisioned: boolean;
   csrf: string;
+}
+
+export interface MemoryItem {
+  id: string;
+  content: string;
+  updatedAt: string;
 }
 
 export interface Bot {

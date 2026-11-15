@@ -2,7 +2,9 @@ import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import Fastify, { type FastifyInstance } from "fastify";
+import { deleteCreatedMachine, dockerMachineControl } from "./admin/docker-control.js";
 import { createChatService, type ChatService } from "./agent/service.js";
+import type { MachineControl } from "./admin/service.js";
 import { registerAuth } from "./auth.js";
 import { createRuntime } from "./compose.js";
 import { loadConfig, type ControlConfig } from "./config.js";
@@ -14,8 +16,10 @@ import { createGateway, type GatewayTask } from "./gateway/stream.js";
 import { taskActivityProbe } from "./machines/activity.js";
 import { DockerDriver } from "./machines/docker.js";
 import { reconcileOnce } from "./machines/loop.js";
+import type { MachineSpec } from "./machines/policy.js";
 import { ensureUserMachine, prepareMachineEndpoint } from "./machines/ready.js";
 import type { AppRuntime } from "./providers.js";
+import { registerAdminRoutes } from "./routes/admin.js";
 import { registerChatRoutes } from "./routes/chat.js";
 import { userScope } from "./scope.js";
 import { createDriver, devSpec, reconcileDeps } from "./runtime.js";
@@ -36,7 +40,10 @@ export interface AppOptions {
   now?: () => Date;
   onDisconnect?: (userId: string) => void;
   prepareEndpoint?: (userId: string, onPhase: (phase: "starting" | "ready") => void) => Promise<{ host: string; port: number; token: string }>;
-  ensureMachine?: (userId: string) => Promise<void>;
+  ensureMachine?: (userId: string, spec?: MachineSpec) => Promise<void>;
+  waitHealthy?: (userId: string) => Promise<void>;
+  deleteMachine?: (userId: string) => Promise<void>;
+  machineControl?: MachineControl;
   retryDelays?: number[];
 }
 
@@ -86,6 +93,7 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     now,
   });
   chats.set(app, chat);
+  const ensureMachine = options.ensureMachine ?? ((userId: string, spec?: MachineSpec) => ensureUserMachine(ctx, userId, spec));
   registerChatRoutes(app, {
     db,
     config,
@@ -93,7 +101,22 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     chat,
     credentials: runtime.credentials,
     providerId: runtime.identity.id,
-    ensureMachine: options.ensureMachine ?? ((userId) => ensureUserMachine(ctx, userId)),
+    ensureMachine,
+  });
+  registerAdminRoutes(app, {
+    db,
+    key,
+    config,
+    credentials: runtime.credentials,
+    directory: runtime.directory,
+    providerId: runtime.identity.id,
+    ensureMachine,
+    waitHealthy:
+      options.waitHealthy ??
+      ((userId) => prepareMachineEndpoint(ctx, userId, () => {}, options.fetch ?? fetch).then(() => undefined)),
+    deleteMachine: options.deleteMachine ?? ((userId) => deleteCreatedMachine(db, driver, userId)),
+    machineControl: options.machineControl ?? dockerMachineControl(db, driver),
+    now,
   });
   registerWebsocket(app, { db, key, config, runtime, hub, now });
   registerWeb(app);

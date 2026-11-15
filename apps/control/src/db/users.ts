@@ -1,5 +1,6 @@
 import { eq, sql } from "drizzle-orm";
 import type { AppDatabase } from "./index.js";
+import { quotaRepository, type QuotaDraft } from "./quotas.js";
 import { identities, users } from "./schema.js";
 
 export interface UserRecord {
@@ -19,8 +20,11 @@ export interface UserDraft {
 }
 
 /** 用户行是身份来源，本身不带 UserScope。开发脚本在创建机器前写入它。 */
-export function ensureDevUser(db: AppDatabase, userId: string): void {
-  if (db.select().from(users).where(eq(users.id, userId)).get()) return;
+export function ensureDevUser(db: AppDatabase, userId: string, quota?: Partial<QuotaDraft>): void {
+  if (db.select().from(users).where(eq(users.id, userId)).get()) {
+    quotaRepository(db).seed(userId, quota);
+    return;
+  }
   db.insert(users)
     .values({
       id: userId,
@@ -31,6 +35,7 @@ export function ensureDevUser(db: AppDatabase, userId: string): void {
       createdAt: new Date().toISOString(),
     })
     .run();
+  quotaRepository(db).seed(userId, quota);
 }
 
 export function userRepository(db: AppDatabase) {
@@ -39,15 +44,18 @@ export function userRepository(db: AppDatabase) {
       const row = db.select().from(users).where(eq(users.id, id)).get();
       return row ? toUser(row) : undefined;
     },
-    /** 邮箱相同、且还没有任何外部身份的本地用户。 */
-    findUnboundByEmail(email: string): UserRecord[] {
+    findByEmail(email: string): UserRecord[] {
       const normalized = email.trim().toLowerCase();
       const rows = db
         .select()
         .from(users)
         .where(sql`lower(${users.email}) = ${normalized}`)
         .all();
-      return rows.filter((row) => !hasIdentity(db, row.id)).map(toUser);
+      return rows.map(toUser);
+    },
+    /** 邮箱相同、且还没有任何外部身份的本地用户。 */
+    findUnboundByEmail(email: string): UserRecord[] {
+      return this.findByEmail(email).filter((row) => !hasIdentity(db, row.id));
     },
     insert(draft: UserDraft): UserRecord {
       const now = new Date().toISOString();
