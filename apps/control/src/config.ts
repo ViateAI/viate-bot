@@ -24,6 +24,8 @@ export interface ControlConfig {
   modelApi: ModelApi;
   modelMaxTokens: number;
   modelContextTokens: number;
+  /** 上下文摘要单次输出上限。摘要请求仍走模型网关。 */
+  summaryMaxTokens: number;
   taskTokenBudget: number;
   modelRateUserPerMin: number;
   modelRateBotPerMin: number;
@@ -64,6 +66,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig 
     modelApi: modelApiName(env),
     modelMaxTokens: positive(env, "VB_MODEL_MAX_TOKENS", 4096),
     modelContextTokens: positive(env, "VB_MODEL_CONTEXT_TOKENS", 128_000),
+    summaryMaxTokens: positive(env, "VB_SUMMARY_MAX_TOKENS", 2_000),
     taskTokenBudget: positive(env, "VB_TASK_TOKEN_BUDGET", 100_000),
     modelRateUserPerMin: positive(env, "VB_MODEL_RATE_USER", 30),
     modelRateBotPerMin: positive(env, "VB_MODEL_RATE_BOT", 20),

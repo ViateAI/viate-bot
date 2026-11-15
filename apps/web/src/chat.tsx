@@ -154,8 +154,9 @@ export function ChatPage({ botId }: { botId: string }) {
           {(steps.data?.steps ?? []).map((step) => (
             <li key={step.id}>
               <details className="rounded border border-neutral-800 px-3 py-2 text-sm">
-                <summary>
-                  {step.kind === "tool" ? toolTitle(step) : "模型"} · {step.status}
+                <summary className={step.kind === "compact" ? "text-neutral-500" : undefined}>
+                  {stepTitle(step)}
+                  {step.kind === "compact" ? "" : ` · ${step.status}`}
                 </summary>
                 <pre className="mt-2 overflow-auto whitespace-pre-wrap text-xs text-neutral-300">{stepBody(step)}</pre>
               </details>
@@ -305,12 +306,19 @@ function pendingSecret(steps: Step[]): SecretRequestView | undefined {
   return { name: record.args.name, label: record.args.label, kind, reason: record.args.reason };
 }
 
+function stepTitle(step: Step): string {
+  if (step.kind === "compact") return "已压缩较早的上下文";
+  if (step.kind === "tool") return toolTitle(step);
+  return "模型";
+}
+
 function toolTitle(step: Step): string {
   const request = step.request as { name?: string } | null;
   return request?.name ? `工具 ${request.name}` : "工具";
 }
 
 function stepBody(step: Step): string {
+  if (step.kind === "compact") return "较早的对话已收成摘要，原文仍留在记录里。";
   const request = step.request as { name?: string; args?: unknown } | null;
   const response = step.response as { text?: string } | null;
   if (request?.name === "browser_screenshot") return response?.text ?? "截图";

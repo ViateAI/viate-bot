@@ -80,6 +80,7 @@ describe("loadConfig", () => {
     expect(config.modelApi).toBe("openai-completions");
     expect(config.models).toEqual([]);
     expect(config.modelMaxTokens).toBe(4096);
+    expect(config.summaryMaxTokens).toBe(2_000);
     expect(config.taskTokenBudget).toBe(100_000);
     expect(config.defaultMaxBots).toBe(5);
     expect(config.defaultMaxConcurrentTasks).toBe(2);

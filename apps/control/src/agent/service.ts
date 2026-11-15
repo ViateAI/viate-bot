@@ -15,7 +15,8 @@ import type { MachineEndpoint } from "@viate-bot/protocol";
 import { BrowserPool } from "./browser-session.js";
 import { browserScreenshotTool, browserTools } from "./browser-tools.js";
 import { memoryTools } from "./memory-tools.js";
-import { buildSystemPrompt, compactMessages, formatMemorySection, latestUserText, statusBlock } from "./prompt.js";
+import { applyCompaction, COMPACT_STEP_LABEL, relayWithOverflowRetry } from "./compact.js";
+import { buildSystemPrompt, formatMemorySection, latestUserText, statusBlock } from "./prompt.js";
 import type { ChatHub } from "./events.js";
 import { getToolHooks } from "./hooks.js";
 import {
@@ -30,7 +31,7 @@ import {
 } from "./secrets.js";
 import { maskDeep, maskSecrets } from "./text.js";
 import { machineTools } from "./tools.js";
-import { assistantText, loadTranscript, messageView, stepView, storedContent, taskView, withoutImages } from "./view.js";
+import { assistantText, loadTranscript, loadTranscriptEntries, messageView, stepView, storedContent, taskView, withoutImages } from "./view.js";
 import { buildModel, type GatewayTask } from "../gateway/stream.js";
 import { userScope, type UserScope } from "../scope.js";
 
@@ -96,12 +97,12 @@ export function recoverInterruptedTasks(db: AppDatabase, now = new Date()): numb
   for (const meta of chat.systemTaskMeta(["running"])) {
     const scope = userScope(meta.userId);
     if (meta.conversationId) {
-      const rows = chat.listMessages(scope, meta.conversationId) ?? [];
-      const transcript = loadTranscript(rows);
+      const rows = chat.listContextMessages(scope, meta.conversationId) ?? [];
+      const transcript = loadTranscript(rows.filter((row) => row.taskId === meta.id));
       const answered = new Set(
         transcript.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
       );
-      const last = transcript[transcript.length - 1];
+      const last = transcript.findLast((message) => message.role === "assistant");
       if (last?.role === "assistant") {
         for (const block of last.content) {
           if (block.type !== "toolCall" || answered.has(block.id)) continue;
@@ -146,6 +147,7 @@ export function createChatService(deps: ChatServiceDeps) {
   const liveByBot = new Map<string, Live>();
   const tails = new Map<string, Promise<void>>();
   const saved = new WeakSet<object>();
+  const messageIds = new WeakMap<object, string>();
   const browsers = new BrowserPool();
   const broker = createSecretBroker({
     db: deps.db,
@@ -302,6 +304,7 @@ export function createChatService(deps: ChatServiceDeps) {
       taskId,
     });
     if (!row) throw new ChatError("找不到对话", 404);
+    messageIds.set(message, row.id);
     chat.touchConversation(scope, conversationId);
     publishMessage(conversationId, row.id, scope);
     return row;
@@ -407,7 +410,9 @@ export function createChatService(deps: ChatServiceDeps) {
       };
       deps.tasks.set(live.id, gatewayTask);
       const platform = settingsRepository(deps.db).platformPrompt().text;
-      const transcript = loadTranscript(chat.listMessages(scope, live.conversationId) ?? []);
+      const loaded = loadTranscriptEntries(chat.listContextMessages(scope, live.conversationId) ?? []);
+      for (const entry of loaded) messageIds.set(entry.message, entry.id);
+      const transcript = loaded.map((entry) => entry.message);
       const memoryStore = memoryRepository(deps.db);
       const query = latestUserText(transcript);
       const recent = memoryStore.recent(scope, bot.id, 10) ?? [];
@@ -435,6 +440,51 @@ export function createChatService(deps: ChatServiceDeps) {
           remove: (id) => memoryStore.remove(scope, bot.id, id) ?? false,
         }),
       ];
+      seq = chat.maxSeq(scope, live.id);
+      const model = buildModel(deps.config, bot.model);
+      const compactLive = (next: AgentMessage[], force: boolean, signal?: AbortSignal) =>
+        applyCompaction(
+          next,
+          {
+            contextTokens: deps.config.modelContextTokens,
+            summaryMaxTokens: deps.config.summaryMaxTokens,
+            sessionId: live.id,
+            model,
+            stream: deps.streamFn,
+            secrets: () => broker.known(live.userId, live.id),
+            readSummary: () => chat.readSummary(scope, live.conversationId),
+            saveSummary: (text, untilMessageId) => {
+              chat.saveSummary(scope, live.conversationId, text, untilMessageId);
+            },
+            idOf: (message) => messageIds.get(message),
+            canSummarize: (ids, untilId) => chat.canSummarize(scope, live.conversationId, ids, untilId),
+            onCompacted: () => {
+              seq += 1;
+              const step = chat.insertStep(scope, {
+                id: ulid(),
+                taskId: live.id,
+                seq,
+                kind: "compact",
+                status: "succeeded",
+                requestJson: JSON.stringify({ text: COMPACT_STEP_LABEL }),
+              });
+              if (!step) return;
+              chat.finishStep(scope, step.id, {
+                status: "succeeded",
+                responseJson: JSON.stringify({ text: COMPACT_STEP_LABEL }),
+              });
+              const current = chat.listSteps(scope, live.id)?.find((item) => item.id === step.id);
+              if (current) publishStep(live.conversationId, current);
+            },
+            beginSummary: () => {
+              gatewayTask.skipStep = true;
+            },
+            endSummary: () => {
+              gatewayTask.skipStep = false;
+            },
+          },
+          { force, ...(signal ? { signal } : {}) },
+        );
       const agent = new Agent({
         initialState: {
           systemPrompt: buildSystemPrompt(
@@ -443,21 +493,14 @@ export function createChatService(deps: ChatServiceDeps) {
             formatMemorySection(recent, matched),
             statusBlock(now(), "运行中", broker.names(live.userId)),
           ),
-          model: buildModel(deps.config, bot.model),
+          model,
           tools: bindSecrets(rawTools, (name) => broker.lookup(live.userId, live.id, name)),
           messages: transcript,
         },
-        streamFn: deps.streamFn,
-        transformContext: async (messages) => {
-          // 1.5.2 把系统提示词和工具声明放进 transcript 的 system 消息。
-          // 压缩仍只丢掉对话消息；系统消息不占这 60% 的预算，也不做摘要。
-          const budget = Math.floor(deps.config.modelContextTokens * 0.6);
-          const conversational = messages.filter((message) => message.role !== "system");
-          const compacted = compactMessages(conversational, budget);
-          if (compacted === conversational) return messages;
-          const systems = messages.filter((message) => message.role === "system");
-          return [...systems, ...compacted];
-        },
+        streamFn: relayWithOverflowRetry(deps.streamFn, deps.config.modelContextTokens, (next, overflowSignal) =>
+          compactLive(next, true, overflowSignal),
+        ),
+        transformContext: (next, signal) => compactLive(next, false, signal),
         beforeToolCall: async (context, signal) => getToolHooks().beforeToolCall?.(context, signal),
         afterToolCall: async (context, signal) => {
           const hooked = await getToolHooks().afterToolCall?.(context, signal);
@@ -476,7 +519,6 @@ export function createChatService(deps: ChatServiceDeps) {
         steeringMode: "all",
         followUpMode: "all",
       });
-      seq = chat.maxSeq(scope, live.id);
       agent.subscribe((event) => {
         try {
           seq = onAgentEvent(live, scope, event, seq, openSteps);
@@ -540,7 +582,11 @@ export function createChatService(deps: ChatServiceDeps) {
         contentJson: storedContent(maskDeep(source, broker.known(live.userId, live.id)), text),
         taskId: live.id,
       });
-      if (row) publishMessage(live.conversationId, row.id, scope);
+      if (row) {
+        messageIds.set(event.message, row.id);
+        if (source !== event.message) messageIds.set(source, row.id);
+        publishMessage(live.conversationId, row.id, scope);
+      }
       if (event.message.role === "assistant") {
         seq += 1;
         const step = chat.insertStep(scope, {

@@ -20,7 +20,7 @@ import { ensureDevUser } from "../db/users.js";
 import { createSession } from "../session.js";
 import { userScope } from "../scope.js";
 import { bindSecrets, substituteArgs } from "./secrets.js";
-import { maskDeep } from "./text.js";
+import { maskDeep, maskSecrets } from "./text.js";
 
 const PASSWORD = 'pw-ZEBRA"m15\\9917';
 const PASSWORD_JSON = JSON.stringify(PASSWORD).slice(1, -1);
@@ -93,6 +93,18 @@ describe("secret placeholders", () => {
       nested: [{ code: 1, text: "pin={{secret:pin}}" }],
       ok: true,
     });
+  });
+
+  it("keeps existing and newly generated placeholders intact when other secret values match their names", () => {
+    const secrets = [
+      { name: "site_password", value: "abc123456" },
+      { name: "otp_123456", value: "123456" },
+      { name: "site_text", value: "site" },
+    ];
+    const text = "{{secret:otp_123456}} abc123456 123456 site";
+    const expected = "{{secret:otp_123456}} {{secret:site_password}} {{secret:otp_123456}} {{secret:site_text}}";
+    expect(maskSecrets(text, secrets)).toBe(expected);
+    expect(maskSecrets(expected, secrets)).toBe(expected);
   });
 });
 

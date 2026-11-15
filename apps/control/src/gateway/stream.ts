@@ -36,6 +36,8 @@ export interface GatewayTask {
   cacheWriteTokens: number;
   modelCalls: number;
   startedAt: number;
+  /** 摘要调用记用量和 token 预算，不占 VB_MAX_TASK_STEPS。 */
+  skipStep?: boolean;
 }
 
 export interface GatewayDeps {
@@ -104,7 +106,7 @@ export function createGateway(deps: GatewayDeps): (
       const platform = settingsRepository(deps.db).platformPrompt().text;
       const systemPrompt = withPlatformPrompt(platform, system);
       const maxTokens = Math.min(options?.maxTokens ?? deps.config.modelMaxTokens, deps.config.modelMaxTokens);
-      currentTask.modelCalls += 1;
+      if (currentTask.skipStep !== true) currentTask.modelCalls += 1;
       const started = now();
       let attempts = 0;
       let lastError = "模型请求失败";

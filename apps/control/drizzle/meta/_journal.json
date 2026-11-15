@@ -22,6 +22,13 @@
       "when": 1794700800000,
       "tag": "0002_memories_fts",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1794747276616,
+      "tag": "0003_conversation_summary",
+      "breakpoints": true
     }
   ]
 }

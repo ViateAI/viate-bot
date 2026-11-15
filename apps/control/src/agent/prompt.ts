@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 
 const OMISSION = "（较早的对话已省略，以留在模型上下文的 60% 以内。）";
 
@@ -57,8 +58,9 @@ export function statusBlock(now: Date, machine: string, secretNames: string[] = 
   return `当前时间：${now.toISOString()}（${zone}）\n机器状态：${machine}\n已保存的密钥（只有名字，用 {{secret:NAME}} 引用）：${names}`;
 }
 
+/** 对话 token 估算。有助手消息上的 usage 时，Pi 会用它校准前缀。 */
 export function estimateTokens(messages: AgentMessage[]): number {
-  return Math.ceil(JSON.stringify(messages).length / 4);
+  return estimateContextTokens(messages as Message[]).tokens;
 }
 
 /**
@@ -75,7 +77,7 @@ export function compactMessages(messages: AgentMessage[], budgetTokens: number):
   return [note, ...kept];
 }
 
-function groupMessages(messages: AgentMessage[]): AgentMessage[][] {
+export function groupMessages(messages: AgentMessage[]): AgentMessage[][] {
   const groups: AgentMessage[][] = [];
   let index = 0;
   while (index < messages.length) {

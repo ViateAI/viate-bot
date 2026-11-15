@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lte } from "drizzle-orm";
 import type { UserScope } from "../scope.js";
 import type { AppDatabase } from "./index.js";
 import { bots, conversations, messages, taskSteps, tasks } from "./schema.js";
@@ -94,6 +94,36 @@ export function chatRepository(db: AppDatabase) {
         .run();
       return this.findConversation(scope, draft.id);
     },
+    readSummary(scope: UserScope, id: string): { text: string; untilMessageId: string } | undefined {
+      if (!this.findConversation(scope, id)) return undefined;
+      const row = db
+        .select({ text: conversations.summaryText, untilMessageId: conversations.summaryUntilMessageId })
+        .from(conversations)
+        .where(eq(conversations.id, id))
+        .get();
+      if (!row?.text || !row.untilMessageId) return undefined;
+      return { text: row.text, untilMessageId: row.untilMessageId };
+    },
+    saveSummary(scope: UserScope, id: string, text: string, untilMessageId: string): boolean {
+      if (!this.findConversation(scope, id)) return false;
+      const result = db
+        .update(conversations)
+        .set({ summaryText: text, summaryUntilMessageId: untilMessageId, updatedAt: new Date().toISOString() })
+        .where(eq(conversations.id, id))
+        .run();
+      return result.changes > 0;
+    },
+    canSummarize(scope: UserScope, id: string, messageIds: string[], untilMessageId: string): boolean {
+      if (!this.findConversation(scope, id)) return false;
+      const previous = this.readSummary(scope, id);
+      const included = new Set(messageIds);
+      const prefix = db
+        .select({ id: messages.id })
+        .from(messages)
+        .where(and(eq(messages.conversationId, id), lte(messages.id, untilMessageId), previous ? gt(messages.id, previous.untilMessageId) : undefined))
+        .all();
+      return prefix.length > 0 && prefix.every((row) => included.has(row.id));
+    },
     touchConversation(scope: UserScope, id: string, title?: string): void {
       if (!this.findConversation(scope, id)) return;
       db.update(conversations)
@@ -116,6 +146,18 @@ export function chatRepository(db: AppDatabase) {
         .map(toMessage);
       rows.reverse();
       return rows;
+    },
+    /** 模型加载摘要锚点和全部未覆盖消息，不沿用界面的 500 条分页。 */
+    listContextMessages(scope: UserScope, conversationId: string): MessageRecord[] | undefined {
+      if (!this.findConversation(scope, conversationId)) return undefined;
+      const summary = this.readSummary(scope, conversationId);
+      return db
+        .select()
+        .from(messages)
+        .where(and(eq(messages.conversationId, conversationId), summary ? gte(messages.id, summary.untilMessageId) : undefined))
+        .orderBy(asc(messages.id))
+        .all()
+        .map(toMessage);
     },
     findMessage(scope: UserScope, id: string): MessageRecord | undefined {
       const row = db

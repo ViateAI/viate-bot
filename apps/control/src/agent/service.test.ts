@@ -249,14 +249,16 @@ describe("task runner", () => {
     expect(modelCalls).toBe(1);
   });
 
-  it("marks a restarted tool call interrupted and does not run it again", async () => {
+  it.each([false, true])("marks a restarted tool call interrupted without rerunning it (queued user: %s)", async (queuedUser) => {
     let execs = 0;
+    const modelBodies: string[] = [];
     const machinePort = await listen(async (req, res) => {
       if (req.url === "/exec") execs += 1;
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end(`data: ${JSON.stringify({ type: "exit", code: 0, signal: null, timedOut: false })}\n\n`);
     });
     const modelPort = await listen(async (_req, res, body) => {
+      modelBodies.push(body);
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end(textSse(body.includes("执行被中断") ? "已从中断处继续，没有重跑命令。" : "不该先说话"));
     });
@@ -285,12 +287,19 @@ describe("task runner", () => {
       timestamp: Date.now(),
     };
     chat.insertMessage(scope, {
-      id: ulid(),
+      id: ulid(1_700_000_000_000),
       conversationId: conversation.id,
       role: "assistant",
       contentJson: storedContent(assistant, ""),
       taskId: task.id,
     });
+    if (queuedUser) {
+      const text = "恢复前排队指令：不要删除，改成备份";
+      chat.insertMessage(scope, {
+        id: ulid(1_700_000_000_001), conversationId: conversation.id, role: "user",
+        contentJson: storedContent({ role: "user", content: text, timestamp: Date.now() }, text), taskId: task.id,
+      });
+    }
     chat.insertStep(scope, {
       id: ulid(),
       taskId: task.id,
@@ -311,6 +320,11 @@ describe("task runner", () => {
     expect(execs).toBe(0);
     const after = chat.listMessages(scope, conversation.id) ?? [];
     expect(after.some((message) => message.contentJson.includes("已从中断处继续，没有重跑命令。"))).toBe(true);
+    if (queuedUser) {
+      const request = modelBodies.at(-1) ?? "";
+      expect(request).toContain("恢复前排队指令");
+      expect(request.indexOf('"role":"tool"')).toBeLessThan(request.indexOf("恢复前排队指令"));
+    }
   });
 
   it("lets a beforeToolCall hook block execution", async () => {

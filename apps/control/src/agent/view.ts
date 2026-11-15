@@ -88,12 +88,33 @@ export function stepView(row: StepRecord): StepView {
 }
 
 export function loadTranscript(rows: MessageRecord[]): AgentMessage[] {
-  const transcript: AgentMessage[] = [];
+  return loadTranscriptEntries(rows).map((entry) => entry.message);
+}
+
+export function loadTranscriptEntries(rows: MessageRecord[]): Array<{ id: string; message: AgentMessage }> {
+  const entries: Array<{ id: string; message: AgentMessage }> = [];
+  let toolResultsAt = 0;
+  const pendingCalls = new Set<string>();
   for (const row of rows) {
     const pi = parseContent(row.contentJson).pi;
-    if (pi) transcript.push(pi);
+    if (!pi) continue;
+    const entry = { id: row.id, message: pi };
+    if (pi.role === "toolResult" && pendingCalls.delete(pi.toolCallId)) {
+      // 用户可能在工具运行时先入库；模型要求结果紧跟调用，用户指令留在整组之后。
+      entries.splice(toolResultsAt, 0, entry);
+      toolResultsAt += 1;
+    } else {
+      entries.push(entry);
+      if (pi.role === "assistant") {
+        pendingCalls.clear();
+        for (const block of pi.content) {
+          if (block.type === "toolCall") pendingCalls.add(block.id);
+        }
+        toolResultsAt = entries.length;
+      }
+    }
   }
-  return transcript;
+  return entries;
 }
 
 export function withoutImages(message: ToolResultMessage): ToolResultMessage {

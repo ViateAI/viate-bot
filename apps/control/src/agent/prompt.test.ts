@@ -5,7 +5,7 @@ import { compactMessages, estimateTokens } from "./prompt.js";
 describe("compactMessages", () => {
   it("drops the oldest group but keeps a tool call with its result", () => {
     const messages: AgentMessage[] = [
-      { role: "user", content: "很早", timestamp: 1 },
+      { role: "user", content: "很早的一段对话，应该被整组丢掉，不能只删半截。", timestamp: 1 },
       {
         role: "assistant",
         content: [{ type: "toolCall", id: "call-1", name: "shell_exec", arguments: { cmd: "true" } }],
@@ -28,7 +28,7 @@ describe("compactMessages", () => {
     ];
     const budget = estimateTokens(messages.slice(1)) + 5;
     const compacted = compactMessages(messages, budget);
-    expect(compacted.some((message) => message.role === "user" && message.content === "很早")).toBe(false);
+    expect(compacted.some((message) => message.role === "user" && message.content === "很早的一段对话，应该被整组丢掉，不能只删半截。")).toBe(false);
     const assistant = compacted.findIndex((message) => message.role === "assistant");
     expect(compacted[assistant + 1]?.role).toBe("toolResult");
     expect(compacted[0]).toMatchObject({ role: "user" });

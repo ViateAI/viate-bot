@@ -150,6 +150,10 @@ export const conversations = sqliteTable("conversations", {
     .notNull()
     .references(() => bots.id),
   title: text("title").notNull().default(""),
+  /** 较早对话的摘要。原始 messages 不改。 */
+  summaryText: text("summary_text"),
+  /** 摘要覆盖到的最后一条消息 id，含这条。 */
+  summaryUntilMessageId: text("summary_until_message_id"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

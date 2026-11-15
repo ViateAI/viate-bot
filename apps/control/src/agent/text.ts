@@ -21,12 +21,15 @@ export function maskSecrets(text: string, secrets: Array<{ name: string; value: 
   const ordered = secrets
     .filter((item) => item.value.length > 0)
     .sort((left, right) => right.value.length - left.value.length || left.name.localeCompare(right.name));
-  let masked = text;
+  if (ordered.length === 0) return text;
+  const replacements = new Map<string, string>();
   for (const item of ordered) {
-    if (!masked.includes(item.value)) continue;
-    masked = masked.split(item.value).join(`{{secret:${item.name}}}`);
+    if (!replacements.has(item.value)) replacements.set(item.value, `{{secret:${item.name}}}`);
   }
-  return masked;
+  const literals = [...replacements.keys()].map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  // 单次替换既保护已有占位符，也避免短密钥再次改写刚生成的占位符。
+  const pattern = new RegExp(`(\\{\\{secret:[a-z0-9_]+\\}\\})|${literals.join("|")}`, "g");
+  return text.replace(pattern, (match: string, placeholder: string | undefined) => placeholder !== undefined ? match : replacements.get(match) ?? match);
 }
 
 /** 逐个字符串打码。不能对序列化后的 JSON 打码：转义后的值匹配不上，短值还会改坏 JSON 结构。 */
