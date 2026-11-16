@@ -143,6 +143,40 @@ describe("browser tools", () => {
     expect(stored).not.toContain(JPEG);
     expect(bodies[bodies.length - 1]).toContain(JPEG);
   });
+
+  it("prefixes a human-check notice and still clicks", async () => {
+    const machine = await fakeCdp();
+    machine.challenge = {
+      url: "http://blocked.test/",
+      iframeUrls: ["https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/if/ov2/av0/rcv/0"],
+      scriptUrls: [],
+      markers: ["cf-turnstile"],
+    };
+    const modelPort = await listen(async (_req, res, body) => {
+      const parsed = JSON.parse(body) as { messages: Array<{ role: string }> };
+      const count = toolsSinceUser(parsed.messages);
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      if (count === 0) res.end(toolSse("call_open", "browser_open", { url: "http://blocked.test" }));
+      else if (count === 1) res.end(toolSse("call_snap", "browser_snapshot", {}));
+      else if (count === 2) res.end(toolSse("call_click", "browser_click", { ref: "e1" }));
+      else res.end(textSse("停下了"));
+    });
+    const { app, alice } = await startApp(
+      { VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1` },
+      async () => ({ host: "127.0.0.1", port: machine.port, token: "token-a" }),
+    );
+    const botId = await createBot(app, alice, "Ada");
+    const sent = await send(app, alice, botId, "打开拦截页");
+    await chatService(app).idle();
+    const steps = await app.inject({
+      method: "GET",
+      url: `/api/tasks/${sent.taskId}/steps`,
+      headers: { cookie: cookie(alice.token) },
+    });
+    const dumped = JSON.stringify(steps.json());
+    expect(dumped).toContain("注意：页面上检测到 Cloudflare 人机验证（Turnstile/challenge）");
+    expect(machine.clicks).toEqual([{ x: 20, y: 10 }]);
+  });
 });
 
 function openThenSnapshot(body: string): string {
@@ -174,6 +208,7 @@ interface Cdp {
   maxTree: number;
   peakTree: number;
   treeGate?: Deferred;
+  challenge?: { url: string; iframeUrls: string[]; scriptUrls: string[]; markers: string[] };
 }
 
 function deferred(): Deferred {
@@ -221,7 +256,11 @@ async function fakeCdp(): Promise<Cdp> {
     else if (message.method === "Browser.getWindowForTarget") result = { windowId: 1 };
     else if (message.method === "Runtime.evaluate") {
       const expression = String(params.expression ?? "");
-      const value = expression === "document.readyState" ? "complete" : "http://login.test";
+      const value = expression === "document.readyState"
+        ? "complete"
+        : expression.includes("iframeUrls") && state.challenge
+          ? state.challenge
+          : "http://login.test";
       result = { result: { type: "string", value } };
     } else if (message.method === "Accessibility.getFullAXTree") {
       inflight += 1;

@@ -1,6 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { bool, num, obj, opt, str } from "@earendil-works/pi-schema";
 import type { BoundBrowser } from "./browser-session.js";
+import { annotatePage, annotateTabList, CHALLENGE_PROBE } from "./challenge.js";
 
 const openSchema = obj({
   url: str({ description: "要在这个 bot 自己的窗口里打开的地址" }),
@@ -53,7 +54,8 @@ export function browserTools(bound: BoundBrowser): AgentTool[] {
     parameters: openSchema,
     execute: async (_id, params) => {
       const window = await bound.run((client) => client.open(bound.botId, params.url));
-      return { content: [{ type: "text", text: `已打开 ${params.url}（窗口 ${window.windowId}）` }], details: { url: params.url } };
+      const text = await withChallengeProbe(bound, `已打开 ${params.url}（窗口 ${window.windowId}）`);
+      return { content: [{ type: "text", text }], details: { url: params.url } };
     },
   };
 
@@ -63,7 +65,11 @@ export function browserTools(bound: BoundBrowser): AgentTool[] {
     description: `读取当前标签页的无障碍树。带 ref 的节点才能点击或输入。ref 在下一次 snapshot 或打开新地址后失效。${OWN_WINDOW}`,
     parameters: emptySchema,
     execute: async () => {
-      const text = await bound.run((client) => client.snapshot(bound.botId));
+      const text = await bound.run(async (client) => {
+        const snapshot = await client.snapshot(bound.botId);
+        const probed = await client.evaluate(bound.botId, CHALLENGE_PROBE).catch(() => null);
+        return annotatePage(snapshot, probed);
+      });
       return { content: [{ type: "text", text }], details: {} };
     },
   };
@@ -149,12 +155,13 @@ export function browserTools(bound: BoundBrowser): AgentTool[] {
       if (params.action === "list") {
         const rows = await bound.run((client) => client.listTabs(bound.botId));
         const text = rows.map((row) => `${row.index}${row.active ? " *" : ""}\t${row.title}\t${row.url}`).join("\n");
-        return { content: [{ type: "text", text: text || "（没有标签页）" }], details: { count: rows.length } };
+        return { content: [{ type: "text", text: text ? annotateTabList(text) : "（没有标签页）" }], details: { count: rows.length } };
       }
       if (params.action === "switch") {
         if (params.index === undefined) throw new Error("switch 需要 index");
         const url = await bound.run((client) => client.switchTab(bound.botId, params.index ?? 0));
-        return { content: [{ type: "text", text: `已切换到 ${url}` }], details: { url } };
+        const text = await withChallengeProbe(bound, `已切换到 ${url}`);
+        return { content: [{ type: "text", text }], details: { url } };
       }
       if (params.action === "close") {
         if (params.index === undefined) throw new Error("close 需要 index");
@@ -166,6 +173,16 @@ export function browserTools(bound: BoundBrowser): AgentTool[] {
   };
 
   return [open, snapshot, click, type, select, scroll, wait, tabs];
+}
+
+/** 导航结果带上页面地址。探测失败时仍按结果里的地址提示，不改变工具是否执行。 */
+async function withChallengeProbe(bound: BoundBrowser, text: string): Promise<string> {
+  try {
+    const probed = await bound.run((client) => client.evaluate(bound.botId, CHALLENGE_PROBE));
+    return annotatePage(text, probed);
+  } catch {
+    return annotatePage(text, null);
+  }
 }
 
 export function browserScreenshotTool(bound: BoundBrowser): AgentTool<typeof emptySchema> {
