@@ -30,5 +30,13 @@
       "tag": "0003_conversation_summary",
       "breakpoints": true
     }
+    ,
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794800000000,
+      "tag": "0004_m2",
+      "breakpoints": true
+    }
   ]
 }

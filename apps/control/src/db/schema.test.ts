@@ -47,6 +47,8 @@ describe("schema migration", () => {
     expect(names).toContain("memories_fts");
     expect(names.filter((name) => name !== "__drizzle_migrations" && !name.startsWith("memories_fts")).sort()).toEqual([
       "app_installs",
+      "app_push_targets",
+      "app_pushes",
       "app_versions",
       "app_visibility",
       "apps",
@@ -63,6 +65,7 @@ describe("schema migration", () => {
       "memories",
       "messages",
       "model_credentials",
+      "notifications",
       "quotas",
       "routine_runs",
       "routines",
@@ -72,6 +75,7 @@ describe("schema migration", () => {
       "stats_minute",
       "task_steps",
       "tasks",
+      "takeover_leases",
       "usage_hourly",
       "users",
     ].sort());
@@ -82,6 +86,9 @@ describe("schema migration", () => {
     expect(primaryKey(db, "identities")).toEqual(["provider", "subject"]);
     expect(primaryKey(db, "usage_hourly")).toEqual(["bot_id", "user_id", "model", "hour"]);
     expect(columnNames(db, "usage_hourly")).toContain("cost_source");
+    expect(columnNames(db, "routines")).toContain("state");
+    expect(columnNames(db, "approvals")).toEqual(expect.arrayContaining(["args_hash", "consumed_at"]));
+    expect(columnNames(db, "app_versions")).toContain("recommended");
     const viateColumns = db.$client
       .prepare(
         `select m.name as tbl, p.name as col

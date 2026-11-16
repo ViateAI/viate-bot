@@ -117,3 +117,93 @@ export interface MachineEndpoint {
   port: number;
   token: string;
 }
+
+/** POST /displays/:n/ensure — 屏幕分区或共用显示器。n 是 bot 的 display_no。 */
+export interface DisplayEnsureRequest {
+  width: number;
+  height: number;
+}
+
+export interface DisplayEnsureResponse {
+  display: number;
+  /** shared：全部 bot 共用一块屏幕。tiled：同一 Xvfb 上按区域裁剪。 */
+  mode: "shared" | "tiled";
+  clip: { x: number; y: number; width: number; height: number };
+}
+
+/** POST /displays/:n/input — 坐标相对该 bot 的 clip，不是整块帧缓冲。 */
+export type DisplayInput =
+  | { type: "key"; key: string; down: boolean }
+  | { type: "text"; text: string }
+  | { type: "mouse"; x: number; y: number; button: 0 | 1 | 2; action: "move" | "down" | "up" }
+  | { type: "wheel"; x: number; y: number; dx: number; dy: number };
+
+export interface DisplayScreenshotResponse {
+  mime: "image/png";
+  /** base64，不进入管理端指标。 */
+  pngBase64: string;
+  width: number;
+  height: number;
+}
+
+export interface SkillListEntry {
+  name: string;
+  description: string;
+}
+
+export interface SkillListResponse {
+  skills: SkillListEntry[];
+}
+
+export interface SkillReadResponse {
+  name: string;
+  content: string;
+  truncated: boolean;
+}
+
+export interface AppArchiveResponse {
+  name: string;
+  version: string;
+  sha256: string;
+  bytes: number;
+}
+
+export interface AppInstallRequest {
+  name: string;
+  version: string;
+  sha256: string;
+}
+
+export interface AppInstallResponse {
+  name: string;
+  version: string;
+  state: "installed";
+}
+
+export interface AppListEntry {
+  name: string;
+  version: string | null;
+  state: "installed" | "absent";
+}
+
+export interface AppListResponse {
+  apps: AppListEntry[];
+}
+
+/** 控制面注入的环境变量。敏感值只出现在这里，不写进包内文件。 */
+export interface McpStdioStartRequest {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+export interface McpRemoteStartRequest {
+  url: string;
+  headers?: Record<string, string>;
+}
+
+export interface McpStartResponse {
+  server: string;
+  running: true;
+}

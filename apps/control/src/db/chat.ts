@@ -219,7 +219,7 @@ export function chatRepository(db: AppDatabase) {
     },
     insertTask(
       scope: UserScope,
-      draft: { id: string; botId: string; conversationId: string },
+      draft: { id: string; botId: string; conversationId: string; trigger?: "user" | "routine"; routineRunId?: string },
     ): TaskRecord | undefined {
       if (!ownsBot(db, scope, draft.botId)) return undefined;
       db.insert(tasks)
@@ -227,8 +227,9 @@ export function chatRepository(db: AppDatabase) {
           id: draft.id,
           botId: draft.botId,
           conversationId: draft.conversationId,
+          ...(draft.routineRunId !== undefined ? { routineRunId: draft.routineRunId } : {}),
           state: "queued",
-          trigger: "user",
+          trigger: draft.trigger ?? "user",
           stepCount: 0,
         })
         .run();
@@ -309,6 +310,15 @@ export function chatRepository(db: AppDatabase) {
         .from(tasks)
         .innerJoin(bots, eq(bots.id, tasks.botId))
         .where(and(eq(bots.userId, userId), inArray(tasks.state, ACTIVE_STATES), isNull(bots.deletedAt)))
+        .get();
+      return row !== undefined;
+    },
+    /** 同一 bot 有排队、运行或等待中的任务时，定时任务不能再开一条。 */
+    systemBotBusy(botId: string): boolean {
+      const row = db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(and(eq(tasks.botId, botId), inArray(tasks.state, ACTIVE_STATES)))
         .get();
       return row !== undefined;
     },

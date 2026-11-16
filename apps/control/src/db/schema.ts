@@ -210,6 +210,9 @@ export const approvals = sqliteTable("approvals", {
   summary: text("summary").notNull(),
   argsJson: text("args_json").notNull(),
   state: text("state").notNull(),
+  /** sha256(tool + canonical JSON)。一次性消费前必须与这次调用一致。 */
+  argsHash: text("args_hash"),
+  consumedAt: text("consumed_at"),
   decidedBy: text("decided_by"),
   decidedAt: text("decided_at"),
 });
@@ -234,6 +237,8 @@ export const routines = sqliteTable("routines", {
   timezone: text("timezone").notNull(),
   prompt: text("prompt").notNull(),
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  /** draft 未确认；active 可调度；deleted 保留运行历史。 */
+  state: text("state").notNull().default("active"),
   nextRunAt: text("next_run_at"),
   createdAt: text("created_at").notNull(),
 });
@@ -278,6 +283,7 @@ export const appVersions = sqliteTable("app_versions", {
   archivePath: text("archive_path").notNull(),
   sha256: text("sha256").notNull(),
   status: text("status").notNull(),
+  recommended: integer("recommended", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at").notNull(),
 });
 
@@ -395,3 +401,72 @@ export const auditLog = sqliteTable("audit_log", {
   target: text("target").notNull(),
   attrsJson: text("attrs_json").notNull().default("{}"),
 });
+
+/** 站内未读。只存种类和任务 id，不存对话正文、截图或密钥。 */
+export const notifications = sqliteTable(
+  "notifications",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id),
+    botId: text("bot_id").references(() => bots.id),
+    taskId: text("task_id").references(() => tasks.id),
+    kind: text("kind").notNull(),
+    readAt: text("read_at"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [index("notifications_user_idx").on(table.userId, table.readAt)],
+);
+
+/** 接管租约。进程重启后 active 租约失效，因为浏览器套接字已经没了。 */
+export const takeoverLeases = sqliteTable(
+  "takeover_leases",
+  {
+    id: text("id").primaryKey(),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id),
+    taskId: text("task_id").references(() => tasks.id),
+    sessionId: text("session_id"),
+    state: text("state").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [index("takeover_leases_bot_idx").on(table.botId, table.state)],
+);
+
+export const appPushes = sqliteTable("app_pushes", {
+  id: text("id").primaryKey(),
+  appVersionId: text("app_version_id")
+    .notNull()
+    .references(() => appVersions.id),
+  actorUserId: text("actor_user_id")
+    .notNull()
+    .references(() => users.id),
+  forced: integer("forced", { mode: "boolean" }).notNull().default(false),
+  wake: integer("wake", { mode: "boolean" }).notNull().default(false),
+  state: text("state").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+export const appPushTargets = sqliteTable(
+  "app_push_targets",
+  {
+    pushId: text("push_id")
+      .notNull()
+      .references(() => appPushes.id),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id),
+    machineId: text("machine_id").references(() => machines.id),
+    installId: text("install_id").references(() => appInstalls.id),
+    state: text("state").notNull(),
+    error: text("error"),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.pushId, table.userId] })],
+);
