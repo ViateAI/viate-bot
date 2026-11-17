@@ -25,7 +25,7 @@ export interface ScreenDeps {
   endpoint: (userId: string, botId: string) => Promise<{ machine: MachineEndpoint; display: number }>;
 }
 
-const viewers = new Map<string, { userId: string; botId: string; sessionId: string }>();
+const viewers = new Map<string, { userId: string; botId: string; sessionId: string; client: WebSocket }>();
 const admitted = new WeakMap<FastifyRequest, ResolvedSession>();
 
 function isInputFrame(frame: Buffer): boolean {
@@ -49,7 +49,9 @@ async function authorize(request: FastifyRequest, deps: ScreenDeps) {
   return { session: lookup.resolved };
 }
 
-export function registerScreenGateway(app: FastifyInstance, deps: ScreenDeps): void {
+export function registerScreenGateway(app: FastifyInstance, deps: ScreenDeps): (userId: string) => void {
+  const attached = new Set<WebSocket>();
+  app.addHook("preClose", async () => { for (const client of attached) client.terminate(); });
   app.get<{ Params: { id: string }; Querystring: { socket: string } }>("/api/bots/:id/screen/vnc", {
       websocket: true,
       preValidation: async (request, reply) => {
@@ -63,9 +65,11 @@ export function registerScreenGateway(app: FastifyInstance, deps: ScreenDeps): v
       const session = admitted.get(request);
       if (!session) { client.close(); return; }
       const socketId = request.query.socket;
+      if (viewers.has(socketId)) { client.close(); return; }
       const userId = session.user.id;
       const botId = request.params.id;
-      viewers.set(socketId, { userId, botId, sessionId: session.session.id });
+      viewers.set(socketId, { userId, botId, sessionId: session.session.id, client });
+      attached.add(client);
       deps.leases.attach(socketId, botId, session.session.id);
       let upstream: WebSocket | undefined;
       let closed = false;
@@ -99,6 +103,15 @@ export function registerScreenGateway(app: FastifyInstance, deps: ScreenDeps): v
         if (machineInput && !deps.leases.canControl(socketId)) void setMachineInput(false).catch(() => client.close());
       }, 1000);
       timer.unref();
+      let alive = true;
+      client.on("pong", () => { alive = true; });
+      const heartbeat = setInterval(() => {
+        if (!alive) { client.terminate(); return; }
+        alive = false;
+        client.ping();
+        void sessionLive().then((live) => { if (!live) client.terminate(); }).catch(() => client.terminate());
+      }, 30_000);
+      heartbeat.unref();
       const unbindInput = deps.inputDrain.bind(botId, () => setMachineInput(false));
       const stillAllowed = (ticket: number) => deps.inputDrain.epoch(botId) === ticket && deps.leases.canControl(socketId);
       let inbound = Promise.resolve();
@@ -148,10 +161,14 @@ export function registerScreenGateway(app: FastifyInstance, deps: ScreenDeps): v
       });
       client.on("close", () => {
         closed = true;
+        attached.delete(client);
         unbindInput();
         clearInterval(timer);
-        viewers.delete(socketId);
-        deps.leases.detach(socketId);
+        clearInterval(heartbeat);
+        if (viewers.get(socketId)?.client === client) {
+          viewers.delete(socketId);
+          deps.leases.detach(socketId);
+        }
         upstream?.terminate();
         if (machine && machineInput) {
           machineInput = false;
@@ -162,7 +179,7 @@ export function registerScreenGateway(app: FastifyInstance, deps: ScreenDeps): v
           }).catch(() => undefined);
         }
       });
-      client.on("error", () => client.close());
+      client.on("error", () => client.terminate());
       void (async () => {
         await deps.wake(userId, "panel");
         const target = await deps.endpoint(userId, botId);
@@ -184,6 +201,11 @@ export function registerScreenGateway(app: FastifyInstance, deps: ScreenDeps): v
         upstream.on("error", () => client.close());
       })().catch(() => client.close());
     });
+  return (userId) => {
+    for (const viewer of viewers.values()) {
+      if (viewer.userId === userId && attached.has(viewer.client)) viewer.client.terminate();
+    }
+  };
 }
 
 export function registerScreenRoutes(app: FastifyInstance, deps: ScreenDeps): void {

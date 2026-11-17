@@ -15,6 +15,7 @@ export function registerDisplayRoutes(app: FastifyInstance, options: { token: st
   const writable = new Map<string, boolean>();
   const wss = new WebSocketServer({ noServer: true });
   let vnc: ChildProcess | undefined;
+  let vncReady: Promise<void> | undefined;
   const displayNumber = (value: string) => /^\d{1,6}$/.test(value) ? Number(value) : undefined;
   const run = async (command: string, args: string[]) => exec(command, args, { env, maxBuffer: 16 * 1024 * 1024, encoding: "buffer" });
 
@@ -22,10 +23,23 @@ export function registerDisplayRoutes(app: FastifyInstance, options: { token: st
     const n = displayNumber(request.params.n);
     if (n === undefined) return reply.code(400).send({ error: "显示器编号无效" });
     displays.add(n);
-    if (!vnc || vnc.exitCode !== null) {
-      vnc = spawn("x11vnc", ["-display", ":1", "-localhost", "-rfbport", "5901", "-forever", "-shared", "-nopw"], { env, stdio: "ignore" });
-      vnc.on("error", () => { vnc = undefined; });
+    if (!vnc || vnc.exitCode !== null || vnc.signalCode !== null) {
+      // Xvfb belongs to bot; cap-drop root cannot attach its MIT-SHM segments.
+      const child = spawn("x11vnc", ["-display", ":1", "-localhost", "-rfbport", "5901", "-forever", "-shared", "-nopw", "-noshm"], { env, stdio: ["ignore", "pipe", "ignore"] });
+      vnc = child;
+      const ready = Promise.withResolvers<void>();
+      const timeout = setTimeout(() => { child.kill(); ready.reject(new Error("VNC 启动超时")); }, 5000);
+      let output = "";
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk: string) => {
+        output = (output + chunk).slice(-1024);
+        if (output.includes("PORT=5901")) ready.resolve();
+      });
+      child.once("error", () => { vnc = undefined; ready.reject(new Error("VNC 启动失败")); });
+      child.once("close", () => ready.reject(new Error("VNC 已退出")));
+      vncReady = ready.promise.finally(() => clearTimeout(timeout));
     }
+    await vncReady;
     return { display: n, mode: screenMode(), clip: { x: 0, y: 0, width: 1280, height: 720 } };
   });
   app.delete<{ Params: { n: string } }>("/displays/:n", async (request, reply) => {

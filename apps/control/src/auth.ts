@@ -132,6 +132,7 @@ export function registerAuth(app: FastifyInstance, deps: AuthDeps): void {
     const resolved = authenticated.get(request);
     if (!resolved) return reply.code(401).send({ error: "未登录" });
     sessionRepository(deps.db).delete(resolved.session.id);
+    deps.runtime.hooks.disconnectUser(resolved.user.id);
     reply.header("set-cookie", clearSessionCookie(deps.config.publicUrl));
     return { ok: true };
   });

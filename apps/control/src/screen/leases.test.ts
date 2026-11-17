@@ -22,6 +22,31 @@ describe("RFB client filter", () => {
 });
 
 describe("takeover lease", () => {
+  it("keeps the requested takeover when an unrelated observer disconnects", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "vb-screen-observer-"));
+    const db = openDatabase(join(dir, "db.sqlite"));
+    try {
+      migrate(db, { migrationsFolder: fileURLToPath(new URL("../../drizzle", import.meta.url)) });
+      const now = new Date().toISOString();
+      db.$client.prepare("insert into users (id,email,name,status,created_at) values ('u','u@example.com','U','active',?)").run(now);
+      db.$client.prepare("insert into bots (id,user_id,name,model,created_at,updated_at) values ('b','u','B','m',?,?)").run(now, now);
+      db.$client.prepare("insert into tasks (id,bot_id,state,trigger) values ('t','b','running','user')").run();
+      const leases = createTakeoverLeases({ db, secretWaitMs: 60_000, quiesce: async () => {} });
+      const waiting = leases.request({ botId: "b", userId: "u", taskId: "t" }).catch((error: unknown) => error);
+      await Promise.resolve();
+      const lease = leases.pending("b")[0]!;
+      leases.attach("observer", "b", "session");
+      leases.attach("controller", "b", "session");
+      leases.detach("observer");
+      expect(leases.grant(lease.id, "controller", "u", "session")).toBe(true);
+      expect(leases.release(lease.id, "u", "session")).toBe(true);
+      await waiting;
+    } finally {
+      db.$client.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("filters input and converges on release, disconnect, stop, and restart", async () => {
     const dir = mkdtempSync(join(tmpdir(), "vb-screen-"));
     const db = openDatabase(join(dir, "db.sqlite"));

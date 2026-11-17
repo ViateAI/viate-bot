@@ -92,7 +92,7 @@ describe("routines", () => {
     service.confirm("u", id, start); service.pause("u", id, true, start);
     const app = Fastify();
     app.addHook("preHandler", async (request) => { authenticated.set(request, { user: { id: "u" } } as never); });
-    registerRoutineRoutes(app, { db, enqueue: (work) => {
+    registerRoutineRoutes(app, { db, userStatus: () => "active", enqueue: (work) => {
       db.$client.prepare("insert into tasks (id,bot_id,state,trigger,routine_run_id) values ('route-task','b','queued','routine',?)").run(work.runId);
       return "route-task";
     } });

@@ -14,22 +14,27 @@ function newSocketId(): string {
 export function Computer({ botId }: { botId: string }) {
   const target = useRef<HTMLDivElement>(null);
   const client = useRef<{ viewOnly: boolean; disconnect: () => void } | null>(null);
-  const socketId = useRef(newSocketId());
+  const socketId = useRef("");
   const [lease, setLease] = useState<Lease | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
     if (!target.current) return;
+    const connectionId = newSocketId();
+    socketId.current = connectionId;
+    setLease(null);
+    setError("");
     const url = new URL(`/api/bots/${encodeURIComponent(botId)}/screen/vnc`, location.href);
     url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    url.searchParams.set("socket", socketId.current);
+    url.searchParams.set("socket", connectionId);
     const rfb = new RFB(target.current, url.toString());
     rfb.viewOnly = true;
     rfb.scaleViewport = true;
     client.current = rfb;
     let alive = true;
+    rfb.addEventListener("disconnect", () => { if (alive) setError("屏幕连接已断开，请重新打开页面。"); });
     const refresh = async () => {
       try {
-        const result = await api<{ leases: Lease[] }>(`/api/bots/${encodeURIComponent(botId)}/screen/leases?socket=${encodeURIComponent(socketId.current)}`);
+        const result = await api<{ leases: Lease[] }>(`/api/bots/${encodeURIComponent(botId)}/screen/leases?socket=${encodeURIComponent(connectionId)}`);
         if (alive) setLease(result.leases[0] ?? null);
       } catch (cause) { if (alive) setError(cause instanceof Error ? cause.message : "屏幕连接失败"); }
     };
@@ -56,6 +61,6 @@ export function Computer({ botId }: { botId: string }) {
       你的各个 bot 共用这一块桌面和同一个浏览器。切换 bot 不会换成另一块屏幕，也不是安全边界。现在只能看；接管生效后才能输入。别的用户和管理员看不到这块屏幕。
     </p>
     {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
-    <div ref={target} className="min-h-80 overflow-hidden rounded bg-black" />
+    <div ref={target} className="h-80 overflow-hidden rounded bg-black" />
   </section>;
 }

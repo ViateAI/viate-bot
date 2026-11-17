@@ -150,6 +150,48 @@ describe("filesystem confinement over http", () => {
 });
 
 describe("exec cancellation", () => {
+  it.each(["cancel", "disconnect"])("stops descendant writes after %s", async (mode) => {
+    const dir = mkdtempSync(join("/tmp", "vb-exec-tree-"));
+    dirs.push(dir);
+    const marker = join(dir, "marker");
+    const script = join(dir, "parent.mjs");
+    writeFileSync(script, [
+      "import { spawn } from 'node:child_process';",
+      "import { writeFileSync } from 'node:fs';",
+      "const marker = process.argv[3];",
+      "const child = spawn(process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker + '.ready')}, 'ready'); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'late'), 500);`], { stdio: 'ignore' });",
+      "writeFileSync(marker + '.pid', String(child.pid));",
+      "setInterval(() => {}, 1000);",
+    ].join("\n"));
+    const app = buildServer({ token: "test-token", execSpawn: { command: process.execPath, baseArgs: [script] } });
+    const controller = new AbortController();
+    let descendant = 0;
+    try {
+      await app.listen({ host: "127.0.0.1", port: 0 });
+      const address = app.server.address();
+      if (!address || typeof address === "string") throw new Error("no port");
+      const base = `http://127.0.0.1:${address.port}`;
+      const headers = { authorization: "Bearer test-token", "content-type": "application/json" };
+      const response = await fetch(`${base}/exec`, { method: "POST", headers, body: JSON.stringify({ cmd: marker, cwd: dir }), signal: controller.signal });
+      await expect.poll(() => existsSync(`${marker}.ready`)).toBe(true);
+      descendant = Number(readFileSync(`${marker}.pid`, "utf8"));
+      if (mode === "cancel") {
+        const cancel = await fetch(`${base}/exec/cancel`, { method: "POST", headers, body: JSON.stringify({ id: response.headers.get("x-exec-id") }) });
+        expect(cancel.status).toBe(200);
+      } else controller.abort();
+      await response.body?.cancel().catch(() => undefined);
+      // The child runs in a separate Node process; fake timers cannot advance its delayed disk write.
+      const elapsed = Promise.withResolvers<void>();
+      setTimeout(elapsed.resolve, 700);
+      await elapsed.promise;
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      controller.abort();
+      if (descendant) { try { process.kill(descendant, "SIGKILL"); } catch { /* already gone */ } }
+      await app.close();
+    }
+  });
+
   it("kills the process and acknowledges before the late write", async () => {
     const dir = mkdtempSync(join("/tmp", "vb-exec-cancel-"));
     dirs.push(dir);

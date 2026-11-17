@@ -188,6 +188,7 @@ describe("takeover flight barrier", () => {
       await takeover;
       expect(flights.paused("u")).toBe(false);
       expect(grantable()).toEqual([]);
+      leases.detach("socket");
 
       const abortHeld = Promise.withResolvers<void>();
       const abortStarted = Promise.withResolvers<void>();

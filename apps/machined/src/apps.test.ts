@@ -190,6 +190,20 @@ function tarBytes(entries: { name: string; data: Buffer; type?: number; link?: s
 }
 
 describe("machine apps", () => {
+  it("stops timed-out setup before rolling back the installation", async () => {
+    const home = temp();
+    const marker = join(home, "late-write");
+    const packed = fixture("timeout", "Not promoted", [{ type: "exec", argv: [process.execPath, "-e", `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'late'), 900)`] }]);
+    const runtime = createAppRuntime({ homeDir: home, setupTimeoutMs: 400 });
+    await expect(runtime.install({ name: "fixture", version: "timeout", ...packed })).rejects.toThrow(/超时/);
+    // The spawned Node process has its own clock; fake timers cannot advance its delayed write.
+    const elapsed = Promise.withResolvers<void>();
+    setTimeout(elapsed.resolve, 1000);
+    await elapsed.promise;
+    expect(existsSync(marker)).toBe(false);
+    expect(await runtime.listApps()).toEqual([{ name: "fixture", version: null, state: "absent" }]);
+  });
+
   it("uses a sealed absolute apt command and keeps non-apt identities", () => {
     const context = { root: "/evil/root", dataDir: "/evil/data", homeDir: "/evil", timeoutMs: 123, env: { PATH: "/evil/bin", HOME: "/evil", PLUGIN_ROOT: "/evil/root", PLUGIN_DATA: "/evil/data" } };
     expect(setupCommand({ type: "apt", packages: ["curl", "git"] }, context, { uid: 1000, gid: 1000 })).toEqual({

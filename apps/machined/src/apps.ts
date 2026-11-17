@@ -37,6 +37,7 @@ import {
   type SkillReadResponse,
 } from "@viate-bot/protocol";
 import type { McpHost } from "./mcp-host.js";
+import { killProcessGroup } from "./process-group.js";
 
 export const PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
 export const MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json";
@@ -688,6 +689,7 @@ function runProcess(command: string, args: string[], options: RunOptions): Promi
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let failure: AppError | undefined;
     const finish = (error?: AppError): void => {
       if (settled) return;
       settled = true;
@@ -712,28 +714,18 @@ function runProcess(command: string, args: string[], options: RunOptions): Promi
     child.stdout?.resume();
     child.stderr?.resume();
     timer = setTimeout(() => {
-      killChild(child);
-      finish(new AppError("\u5b89\u88c5\u6b65\u9aa4\u8d85\u65f6", "timeout"));
+      failure = new AppError("\u5b89\u88c5\u6b65\u9aa4\u8d85\u65f6", "timeout");
+      void killProcessGroup(child.pid).catch(() => finish(new AppError("安装进程停止未确认", "setup")));
     }, options.timeoutMs);
     child.once("error", () => {
-      killChild(child);
       finish(new AppError("\u5b89\u88c5\u6b65\u9aa4\u5931\u8d25", "setup"));
     });
     child.once("close", (code) => {
-      if (code === 0) finish();
+      if (failure) finish(failure);
+      else if (code === 0) finish();
       else finish(new AppError("\u5b89\u88c5\u6b65\u9aa4\u5931\u8d25", "setup"));
     });
   });
-}
-
-function killChild(child: ChildProcess): void {
-  const pid = child.pid;
-  if (pid === undefined) return;
-  try {
-    process.kill(-pid, "SIGKILL");
-  } catch {
-    child.kill("SIGKILL");
-  }
 }
 
 async function resolveCommand(command: string, root: string): Promise<string> {

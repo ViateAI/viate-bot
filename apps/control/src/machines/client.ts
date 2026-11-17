@@ -38,6 +38,7 @@ export class MachinedClient {
     let stopConfirmed = false;
     let stopping: Promise<void> | undefined;
     let execId: string | null = null;
+    let rejected = false;
     // 响应头到达前没有 exec id，调用方的 abort 只能断开这次 POST。
     // 有 id 之后先等 /exec/cancel，再断开，避免把未确认的停止当成已取消。
     const stop = () => {
@@ -58,7 +59,10 @@ export class MachinedClient {
         ...(input.timeoutSec !== undefined ? { timeoutSec: input.timeoutSec } : {}),
         ...(input.env !== undefined ? { env: input.env } : {}),
       }, controller.signal);
-      if (!response.ok) throw new Error(await readError(response));
+      if (!response.ok) {
+        rejected = true;
+        throw new Error(await readError(response));
+      }
       if (!response.body) throw new Error("exec 没有返回内容");
       execId = response.headers.get("x-exec-id");
       if (input.signal?.aborted) stop();
@@ -70,16 +74,24 @@ export class MachinedClient {
       if (!stopping && input.signal?.aborted) stop();
       if (stopping) await stopping.catch(() => undefined);
       if (input.signal?.aborted) throw new Error(stopConfirmed ? "exec 已取消" : "remote_unconfirmed");
-      throw error;
+      if (rejected) throw error;
+      throw new Error("remote_unconfirmed", { cause: error });
     } finally {
       input.signal?.removeEventListener("abort", stop);
     }
   }
 
   private async acknowledgeExecStop(id: string): Promise<void> {
-    const response = await this.post("/exec/cancel", { id });
-    if (!response.ok) throw new Error(await readError(response));
-    await response.body?.cancel().catch(() => undefined);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await this.post("/exec/cancel", { id }, controller.signal);
+      if (!response.ok) throw new Error(await readError(response));
+      const result = await response.json() as { stopped?: unknown } | null;
+      if (result?.stopped !== true) throw new Error("exec 停止未确认");
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async read(path: string, maxBytes: number, signal?: AbortSignal): Promise<FsReadResponse> {

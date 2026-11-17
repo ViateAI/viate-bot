@@ -12,6 +12,7 @@ import { createRuntime } from "./compose.js";
 import { loadConfig, type ControlConfig } from "./config.js";
 import { decrypt, loadOrCreateKey } from "./crypto.js";
 import { openDatabase, type AppDatabase } from "./db/index.js";
+import { identityRepository } from "./db/identities.js";
 import { machineRepository } from "./db/machines.js";
 import { ensureDevUser, userRepository } from "./db/users.js";
 import { createGateway, type GatewayTask } from "./gateway/stream.js";
@@ -85,11 +86,13 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
   const { db, driver, config, key } = ctx;
   const hub = createHub();
   const now = options.now ?? (() => new Date());
+  let disconnectScreens = (_userId: string) => {};
   const runtime = createRuntime(config, db, {
     ...(options.fetch ? { fetch: options.fetch } : {}),
     now,
     onDisconnect: (userId) => {
       hub.disconnect(userId);
+      disconnectScreens(userId);
       options.onDisconnect?.(userId);
     },
   });
@@ -187,7 +190,7 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     }),
   };
   app.after(() => {
-    registerScreenGateway(app, screen);
+    disconnectScreens = registerScreenGateway(app, screen);
     registerScreenRoutes(app, screen);
   });
   registerOpsRoutes(app, { db, now, metricsToken: config.metricsToken });
@@ -203,7 +206,7 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
       throw error;
     }
   };
-  registerRoutineHttp(app, { db, enqueue: enqueueRoutine });
+  registerRoutineHttp(app, { db, enqueue: enqueueRoutine, userStatus: (userId) => routineUserStatus(ctx, runtime, userId) });
   registerNotificationRoutes(app, { db });
   const fetchImpl = options.fetch ?? fetch;
   const reconcileAttempted = new Set<string>();
@@ -350,17 +353,20 @@ export function startReconcileLoop(ctx: ControlContext, intervalMs = 30_000): ()
 }
 
 export function startRoutineLoop(app: FastifyInstance, ctx: ControlContext, intervalMs = 30_000): () => void {
+  const runtime = runtimes.get(app)!;
   const timer = setInterval(() => {
     const chat = chats.get(app);
     if (!chat) return;
     const now = new Date();
     for (const userId of usersToWake(ctx.db, now)) {
-      prepareMachineEndpoint(ctx, userId, () => {}).catch((error: unknown) => {
+      routineUserStatus(ctx, runtime, userId).then(async (status) => {
+        if (status === "active") await prepareMachineEndpoint(ctx, userId, () => {});
+      }).catch((error: unknown) => {
         console.error("定时任务唤醒失败", error);
       });
     }
     dispatchDue(ctx.db, now, {
-      userStatus: (userId) => userRepository(ctx.db).findById(userId)?.status ?? "unknown",
+      userStatus: (userId) => routineUserStatus(ctx, runtime, userId),
       enqueue: (work) => {
         try {
           return chat.enqueueRoutine({
@@ -380,6 +386,19 @@ export function startRoutineLoop(app: FastifyInstance, ctx: ControlContext, inte
   }, intervalMs);
   timer.unref();
   return () => clearInterval(timer);
+}
+
+async function routineUserStatus(ctx: ControlContext, runtime: AppRuntime, userId: string): Promise<"active" | "disabled" | "unknown"> {
+  const local = userRepository(ctx.db).findById(userId)?.status;
+  if (local !== "active") return local === "disabled" ? "disabled" : "unknown";
+  if (ctx.config.integration !== "viate" || !runtime.directory.userStatus) return "active";
+  const identity = identityRepository(ctx.db).findByUser(userId, runtime.identity.id);
+  if (!identity) return "unknown";
+  try {
+    return await runtime.directory.userStatus({ subject: identity.subject, provider: identity.provider });
+  } catch {
+    return "unknown";
+  }
 }
 
 export function startOpsMaintenance(ctx: ControlContext, intervalMs = 60 * 60 * 1000): () => void {

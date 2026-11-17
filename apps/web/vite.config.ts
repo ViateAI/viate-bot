@@ -10,7 +10,7 @@ export default defineConfig({
     port: 4420,
     strictPort: true,
     proxy: {
-      "/api": target,
+      "/api": { target, ws: true },
       "/auth": target,
       "/ws": { target, ws: true },
     },

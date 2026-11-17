@@ -3,7 +3,7 @@ import { authenticated } from "../auth.js";
 import type { AppDatabase } from "../db/index.js";
 import { RoutineError, routineService, type RoutineWork } from "./service.js";
 
-export function registerRoutineRoutes(app: FastifyInstance, deps: { db: AppDatabase; enqueue: (work: RoutineWork) => Promise<string> | string }): void {
+export function registerRoutineRoutes(app: FastifyInstance, deps: { db: AppDatabase; enqueue: (work: RoutineWork) => Promise<string> | string; userStatus: (userId: string) => Promise<string> | string }): void {
   const service = routineService(deps.db);
   const user = (request: FastifyRequest, reply: FastifyReply): string | undefined => {
     const session = authenticated.get(request);
@@ -36,6 +36,8 @@ export function registerRoutineRoutes(app: FastifyInstance, deps: { db: AppDatab
   app.post<{ Params: { id: string } }>("/api/routines/:id/run", async (request, reply) => {
     const id = user(request, reply); if (!id) return;
     try {
+      const status = await deps.userStatus(id);
+      if (status !== "active") return reply.code(status === "disabled" ? 403 : 503).send({ error: status === "disabled" ? "用户已停用" : "暂时无法确认用户状态" });
       const work = service.manual(id, request.params.id);
       const taskId = await deps.enqueue(work);
       service.attachTask(work.runId, taskId);

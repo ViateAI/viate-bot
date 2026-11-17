@@ -6,6 +6,7 @@ import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readdir, readFile, statfs } from "node:fs/promises";
 import { Readable, type Readable as ReadableStream } from "node:stream";
+import { killProcessGroup } from "./process-group.js";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import type {
   ExecEvent,
@@ -70,7 +71,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
 
   app.get("/metrics", async (): Promise<MetricsResponse> => readMetrics());
 
-  const execJobs = new Map<string, { kill: () => void; done: Promise<void> }>();
+  const execJobs = new Map<string, { kill: () => Promise<void>; done: Promise<void> }>();
   const launcher = options.execSpawn ?? { command: "/usr/bin/node", baseArgs: ["/opt/viate/run-as-bot.mjs"] };
 
   app.post("/exec/cancel", async (request) => {
@@ -80,7 +81,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     }
     const job = execJobs.get(body.id);
     if (!job) return { stopped: true };
-    job.kill();
+    await job.kill();
     await job.done;
     return { stopped: true };
   });
@@ -237,7 +238,7 @@ async function streamExec(
   reply: FastifyReply,
   request: FastifyRequest,
   id: string,
-  jobs: Map<string, { kill: () => void; done: Promise<void> }>,
+  jobs: Map<string, { kill: () => Promise<void>; done: Promise<void> }>,
   launcher: { command: string; baseArgs: string[] },
   cmd: string,
   cwd: string,
@@ -251,19 +252,18 @@ async function streamExec(
       cwd,
       env: { ...process.env, ...env, HOME: "/home/bot", USER: "bot", LOGNAME: "bot" },
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     },
   );
   let settle = () => {};
   const done = new Promise<void>((resolve) => {
     settle = resolve;
   });
-  const kill = () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-  };
+  const kill = () => killProcessGroup(child.pid);
   jobs.set(id, { kill, done });
   let ending = false;
   const onClientGone = () => {
-    if (!ending) kill();
+    if (!ending) void kill().catch((error: unknown) => appKillError(error));
   };
   reply.raw.on("close", onClientGone);
   reply.hijack();
@@ -277,7 +277,7 @@ async function streamExec(
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    child.kill("SIGKILL");
+    void kill().catch((error: unknown) => appKillError(error));
   }, timeoutSec * 1000);
   const stdout = captureStream(child.stdout, "stdout", (event) => writeEvent(reply, event));
   const stderr = captureStream(child.stderr, "stderr", (event) => writeEvent(reply, event));
@@ -299,6 +299,10 @@ async function streamExec(
   };
   writeEvent(reply, event);
   reply.raw.end();
+}
+
+function appKillError(error: unknown): void {
+  console.error("exec 进程组停止失败", error instanceof Error ? error.message : "unknown");
 }
 
 export function captureStream(

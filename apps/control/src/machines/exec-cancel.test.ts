@@ -1,6 +1,6 @@
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MachinedClient } from "./client.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -10,6 +10,64 @@ afterEach(async () => {
 });
 
 describe("exec cancellation barrier", () => {
+  it("bounds a stalled cancellation acknowledgement and preserves remote_unconfirmed", async () => {
+    vi.useFakeTimers();
+    const cancel = Promise.withResolvers<Response>();
+    const started = Promise.withResolvers<void>();
+    let stream: ReadableStreamDefaultController<Uint8Array>;
+    const request: typeof fetch = async (url, init) => {
+      if (String(url).endsWith("/exec/cancel")) {
+        started.resolve();
+        init?.signal?.addEventListener("abort", () => cancel.reject(new Error("timeout")), { once: true });
+        return cancel.promise;
+      }
+      const body = new ReadableStream<Uint8Array>({ start(controller) { stream = controller; } });
+      init?.signal?.addEventListener("abort", () => stream.error(new Error("aborted")), { once: true });
+      return new Response(body, { headers: { "x-exec-id": "job-1" } });
+    };
+    const client = new MachinedClient({ host: "127.0.0.1", port: 9, token: "machine" }, request);
+    const controller = new AbortController();
+    let outcome = "pending";
+    const pending = client.exec({ cmd: "sleep", signal: controller.signal }).catch((error: Error) => { outcome = error.message; });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort();
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(outcome).toBe("remote_unconfirmed");
+    } finally {
+      cancel.reject(new Error("cleanup"));
+      await pending;
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not accept an HTTP 200 cancellation without a stopped acknowledgement", async () => {
+    let stream: ReadableStreamDefaultController<Uint8Array>;
+    const ready = Promise.withResolvers<void>();
+    const request: typeof fetch = async (url, init) => {
+      if (String(url).endsWith("/exec/cancel")) return new Response(JSON.stringify({ stopped: false }));
+      const body = new ReadableStream<Uint8Array>({ start(controller) { stream = controller; } });
+      init?.signal?.addEventListener("abort", () => stream.error(new Error("aborted")), { once: true });
+      ready.resolve();
+      return new Response(body, { headers: { "x-exec-id": "job-1" } });
+    };
+    const client = new MachinedClient({ host: "127.0.0.1", port: 9, token: "machine" }, request);
+    const controller = new AbortController();
+    const pending = client.exec({ cmd: "sleep", signal: controller.signal });
+    await ready.promise;
+    controller.abort();
+    await expect(pending).rejects.toThrow("remote_unconfirmed");
+  });
+
+  it("treats a truncated exec stream as remote_unconfirmed without a caller abort", async () => {
+    const request: typeof fetch = async () => new Response("data: {\"type\":\"stdout\",\"data\":\"started\"}\n\n", {
+      headers: { "content-type": "text/event-stream", "x-exec-id": "job-1" },
+    });
+    const client = new MachinedClient({ host: "127.0.0.1", port: 9, token: "machine" }, request);
+    await expect(client.exec({ cmd: "touch later" })).rejects.toThrow("remote_unconfirmed");
+  });
+
   it("does not settle an aborted exec until the machine acknowledges the stop", async () => {
     let execResponse: ServerResponse | undefined;
     let releaseCancel = () => {};

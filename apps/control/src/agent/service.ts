@@ -774,13 +774,16 @@ export function createChatService(deps: ChatServiceDeps) {
       ];
       seq = chat.maxSeq(scope, live.id);
       const guardedTools = rawTools.map((tool) => {
-        if (tool.name !== "shell_exec") return tool;
         const execute = tool.execute.bind(tool);
         tool.execute = async (toolCallId, params, signal, onUpdate) => {
+          // Approval can wait while another task loses confirmation of its remote execution.
+          if (tool.name !== "request_takeover" && !READ_ONLY_TOOLS[tool.name] && remoteUncertain(deps.db, live.userId)) {
+            throw new Error("远端可能仍在执行。需要单独确认后才能继续写操作。");
+          }
           try {
             return await execute(toolCallId, params, signal, onUpdate);
           } catch (error) {
-            if (error instanceof Error && error.message === "remote_unconfirmed") {
+            if (tool.name === "shell_exec" && error instanceof Error && error.message === "remote_unconfirmed") {
               live.remoteUnconfirmed = true;
               chat.updateTask(scope, live.id, { error: "remote_unconfirmed" });
               markRemoteUncertain(deps.db, { userId: live.userId, botId: live.botId, taskId: live.id });

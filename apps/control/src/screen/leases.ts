@@ -110,8 +110,15 @@ export function createTakeoverLeases(deps: {
       const leaseId = socketOwners.get(socketId);
       socketOwners.delete(socketId);
       const lease = leaseId ? byId(leaseId) : undefined;
-      if (lease?.state === "active") transition(lease, "revoked");
+      if (socket && lease?.state === "active") {
+        deps.flights?.bump(lease.userId);
+        transition(lease, "revoked");
+        return;
+      }
       if (!socket) return;
+      for (const remaining of sockets.values()) {
+        if (remaining.botId === socket.botId) return;
+      }
       const bot = deps.db.select({ userId: bots.userId }).from(bots).where(eq(bots.id, socket.botId)).get();
       if (bot) deps.flights?.bump(bot.userId);
       for (const pending of current(socket.botId)) {

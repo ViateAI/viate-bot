@@ -12,6 +12,7 @@ import type { Duplex } from "node:stream";
 import type { FastifyInstance } from "fastify";
 import type { McpRemoteStartRequest, McpStartResponse, McpStdioStartRequest } from "@viate-bot/protocol";
 import { WebSocketServer, type RawData } from "ws";
+import { killProcessGroup } from "./process-group.js";
 
 const MAX_MESSAGE = 1024 * 1024;
 const MAX_SESSIONS = 16;
@@ -431,14 +432,7 @@ class StdioSession implements Session {
       return;
     }
     this.shutdown = true;
-    const pid = this.child.pid;
-    if (pid !== undefined) {
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {
-        this.child.kill("SIGKILL");
-      }
-    }
+    await killProcessGroup(this.child.pid);
     this.child.stdin?.destroy();
     await this.exited;
   }
@@ -462,7 +456,7 @@ class StdioSession implements Session {
 
   private requestCancel(id: number): void {
     if (this.activeId !== id || this.dead || this.shutdown) return;
-    void this.close();
+    void this.close().catch(() => this.fail(new McpError("remote_unconfirmed")));
   }
 
   private markUnconfirmed(id: number): void {
@@ -474,7 +468,7 @@ class StdioSession implements Session {
   private onData(chunk: string): void {
     this.buffer += chunk;
     if (this.buffer.length > MAX_MESSAGE) {
-      void this.close();
+      void this.close().catch(() => this.fail(new McpError("remote_unconfirmed")));
       return;
     }
     let index = this.buffer.indexOf("\n");
@@ -491,7 +485,7 @@ class StdioSession implements Session {
     try {
       message = JSON.parse(line) as unknown;
     } catch {
-      void this.close();
+      void this.close().catch(() => this.fail(new McpError("remote_unconfirmed")));
       return;
     }
     if (!isObject(message) || (typeof message.id !== "number" && typeof message.id !== "string")) return;

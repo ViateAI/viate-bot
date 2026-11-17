@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { BeforeToolCallContext } from "@earendil-works/pi-agent-core";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import Fastify from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { approvalTools } from "../agent/approval-tools.js";
 import { authenticated } from "../auth.js";
 import { openDatabase, type AppDatabase } from "../db/index.js";
@@ -35,6 +35,23 @@ function pending(db: AppDatabase) {
 }
 
 describe("approval gate", () => {
+  it("expires a waiting approval and refuses a late decision", async () => {
+    const { db } = fixture();
+    vi.useFakeTimers();
+    try {
+      const gate = createApprovalGate({ db, waitMs: 100 });
+      const waiting = gate.bind("task").beforeToolCall!(context("shell_exec", { cmd: "write" }));
+      const approval = pending(db);
+      await vi.advanceTimersByTimeAsync(100);
+      expect((await waiting)?.block).toBe(true);
+      expect(gate.decide("a", approval.id, "allow")).toBe("decided");
+      expect(db.$client.prepare("select state,consumed_at from approvals where id=?").get(approval.id)).toEqual({ state: "timeout", consumed_at: null });
+      expect(db.$client.prepare("select state from tasks where id='task'").get()).toEqual({ state: "running" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("binds one decision to canonical arguments and denies without executing", async () => {
     const { db, dir } = fixture();
     const gate = createApprovalGate({ db, waitMs: 5000 });

@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { once } from "node:events";
 import { WebSocketServer } from "ws";
 import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -7,7 +8,7 @@ import { join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { fileURLToPath } from "node:url";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp, chatService, type ControlContext } from "../app.js";
 import { createBot } from "../bot-service.js";
 import { loadConfig, type ControlConfig } from "../config.js";
@@ -27,7 +28,8 @@ import { SESSION_COOKIE } from "../cookies.js";
 import { createSession } from "../session.js";
 import { createUserFlights } from "../screen/flight.js";
 import { createTakeoverLeases } from "../screen/leases.js";
-import { remoteUncertain } from "./remote-uncertain.js";
+import { hasAttachedViewer } from "../screen/gateway.js";
+import { markRemoteUncertain, remoteUncertain } from "./remote-uncertain.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -110,7 +112,93 @@ async function appFor(
   return { app, service: chatService(app), runtime };
 }
 
+async function idleScreen() {
+  const machine = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); });
+  const sockets = new WebSocketServer({ server: machine });
+  const listening = once(machine, "listening");
+  machine.listen(0, "127.0.0.1");
+  await listening;
+  const port = (machine.address() as AddressInfo).port;
+  cleanups.push(async () => {
+    for (const socket of sockets.clients) socket.terminate();
+    sockets.close();
+    const closed = once(machine, "close");
+    machine.close();
+    await closed;
+  });
+  const { config, ctx } = await opened({});
+  const { app, runtime } = await appFor(ctx, config, { host: "127.0.0.1", port, token: "machine" });
+  const bot = await createBot({ db: ctx.db, key: ctx.key, credentials: runtime.credentials, providerId: runtime.identity.id }, userScope("user-a"), { name: "Screen", model: "gpt-test" });
+  const session = createSession(ctx.db, ctx.key, "user-a", "refresh-token", new Date());
+  const headers = { cookie: `${SESSION_COOKIE}=${session.token}`, "x-vb-csrf": session.csrf, origin: config.publicUrl };
+  const connected = once(sockets, "connection");
+  const viewer = await app.injectWS(`/api/bots/${bot.id}/screen/vnc?socket=${ulid()}`, { headers });
+  await connected;
+  cleanups.push(async () => {
+    if (viewer.readyState !== 3) {
+      const closed = once(viewer, "close");
+      viewer.terminate();
+      await closed;
+    }
+  });
+  return { app, ctx, viewer, headers };
+}
+
 describe("task runner", () => {
+  it.each(["logout", "disable"])("closes an idle screen viewer after %s", async (mode) => {
+    const fixture = await idleScreen();
+    if (mode === "logout") {
+      const response = await fixture.app.inject({ method: "POST", url: "/auth/logout", headers: fixture.headers });
+      expect(response.statusCode).toBe(200);
+    } else {
+      fixture.ctx.db.$client.prepare("update users set status='disabled' where id='user-a'").run();
+      const response = await fixture.app.inject({ method: "GET", url: "/api/me", headers: fixture.headers });
+      expect(response.statusCode).toBe(401);
+    }
+    await expect.poll(() => fixture.viewer.readyState).toBe(3);
+    expect(hasAttachedViewer("user-a")).toBe(false);
+  });
+
+  it("removes a half-open screen viewer after a missed heartbeat", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const fixture = await idleScreen();
+      fixture.viewer.pong = () => {};
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => expect(fixture.viewer.readyState).toBe(3));
+      expect(hasAttachedViewer("user-a")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("blocks an approved shell if another task becomes remote_unconfirmed while approval waits", async () => {
+    let execs = 0;
+    const machinePort = await listen(async (req, res) => {
+      if (req.url === "/exec") execs += 1;
+      res.writeHead(req.url === "/exec" ? 200 : 404, { "content-type": "text/event-stream" });
+      res.end(req.url === "/exec" ? `data: ${JSON.stringify({ type: "exit", code: 0, signal: null, timedOut: false })}\n\n` : "");
+    });
+    let calls = 0;
+    const modelPort = await listen(async (_req, res) => {
+      calls += 1;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(calls === 1 ? toolSse(JSON.stringify({ cmd: "touch /tmp/late" })) : textSse("完成"));
+    });
+    const { config, ctx } = await opened({ VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1` });
+    const { service, runtime } = await appFor(ctx, config, { host: "127.0.0.1", port: machinePort, token: "machine" });
+    const bot = await createBot({ db: ctx.db, key: ctx.key, credentials: runtime.credentials, providerId: runtime.identity.id }, userScope("user-a"), { name: "Ada", model: "gpt-test" });
+    const sent = await service.send({ userId: "user-a", botId: bot.id, text: "写文件", mode: "queue" });
+    await waitFor(() => !!ctx.db.$client.prepare("select id from approvals where task_id=? and state='pending'").get(sent.taskId));
+    markRemoteUncertain(ctx.db, { userId: "user-a", botId: bot.id, taskId: "other-task" });
+    const approval = ctx.db.$client.prepare("select id from approvals where task_id=?").get(sent.taskId) as { id: string };
+    expect(service.approvalGate.decide("user-a", approval.id, "allow")).toBe("ok");
+    await service.idle();
+    expect(execs).toBe(0);
+    const messages = chatRepository(ctx.db).listMessages(userScope("user-a"), sent.conversationId) ?? [];
+    expect(messages.some((message) => message.contentJson.includes("远端可能仍在执行"))).toBe(true);
+  });
+
   it("round-robins users when the global cap is one", async () => {
     const started: string[] = [];
     const releases: Array<() => void> = [];
