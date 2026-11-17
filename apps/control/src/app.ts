@@ -14,7 +14,11 @@ import { decrypt, loadOrCreateKey } from "./crypto.js";
 import { openDatabase, type AppDatabase } from "./db/index.js";
 import { identityRepository } from "./db/identities.js";
 import { machineRepository } from "./db/machines.js";
-import { ensureDevUser, userRepository } from "./db/users.js";
+import { ensureDevUser, onUserDisabled, userRepository } from "./db/users.js";
+import { startEgressConnector } from "./egress/connect.js";
+import { createEgressGate, waitingEgressRows } from "./egress/gate.js";
+import { createEgressHub, type EgressHub } from "./egress/hub.js";
+import { registerEgressRoutes, registerEgressSocket } from "./egress/routes.js";
 import { createGateway, type GatewayTask } from "./gateway/stream.js";
 import { taskActivityProbe } from "./machines/activity.js";
 import { DockerDriver } from "./machines/docker.js";
@@ -70,6 +74,13 @@ export interface AppOptions {
 
 const runtimes = new WeakMap<FastifyInstance, AppRuntime>();
 const chats = new WeakMap<FastifyInstance, ChatService>();
+const egressHubs = new WeakMap<FastifyInstance, EgressHub>();
+
+export function egressHub(app: FastifyInstance): EgressHub {
+  const hub = egressHubs.get(app);
+  if (!hub) throw new Error("没有出口");
+  return hub;
+}
 
 export function openContext(config: ControlConfig = loadConfig()): ControlContext {
   mkdirSync(config.dataDir, { recursive: true });
@@ -86,12 +97,33 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
   const { db, driver, config, key } = ctx;
   const hub = createHub();
   const now = options.now ?? (() => new Date());
+  const egress = createEgressHub(db, now);
+  egressHubs.set(app, egress);
+  onUserDisabled(db, (userId) => egress.disconnectUser(userId));
+  const egressHandlers: {
+    resume: (userId: string, taskId: string) => void;
+    fail: (userId: string, taskId: string, error: string) => void;
+  } = {
+    resume: () => undefined,
+    fail: () => undefined,
+  };
+  const egressGate = createEgressGate({
+    blocked: (userId) => egress.paused(userId),
+    waitMs: config.secretWaitMs,
+    now,
+    onResume: (userId, taskId) => egressHandlers.resume(userId, taskId),
+    onFail: (userId, taskId, error) => egressHandlers.fail(userId, taskId, error),
+  });
+  egress.onSelectedChange((userId, online) => {
+    if (online) egressGate.release(userId);
+  });
   let disconnectScreens = (_userId: string) => {};
   const runtime = createRuntime(config, db, {
     ...(options.fetch ? { fetch: options.fetch } : {}),
     now,
     onDisconnect: (userId) => {
       hub.disconnect(userId);
+      egress.disconnectUser(userId);
       disconnectScreens(userId);
       options.onDisconnect?.(userId);
     },
@@ -141,8 +173,12 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     now,
     leases,
     flights,
+    egressGate,
   });
   chats.set(app, chat);
+  egressHandlers.resume = (userId, taskId) => chat.resumeEgress(userId, taskId);
+  egressHandlers.fail = (userId, taskId, error) => chat.failEgress(userId, taskId, error);
+  egressGate.arm(waitingEgressRows(db.$client));
   const ensureMachine = options.ensureMachine ?? ((userId: string, spec?: MachineSpec) => ensureUserMachine(ctx, userId, spec));
   registerChatRoutes(app, {
     db,
@@ -167,8 +203,18 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     deleteMachine: options.deleteMachine ?? ((userId) => deleteCreatedMachine(db, driver, userId)),
     machineControl: options.machineControl ?? dockerMachineControl(db, driver),
     now,
+    egressOnline: (userId: string) => {
+      const settings = db.$client
+        .prepare("select egress_device_id as deviceId from machines where user_id = ?")
+        .get(userId) as { deviceId: string | null } | undefined;
+      return egress.deviceOnline(userId, settings?.deviceId ?? null);
+    },
   });
+  registerEgressRoutes(app, { db, hub: egress, gate: egressGate });
   registerWebsocket(app, { db, key, config, runtime, hub, now });
+  app.after(() => {
+    registerEgressSocket(app, { db, hub: egress });
+  });
   const prepare =
     options.prepareEndpoint ??
     ((userId: string, onPhase: (phase: "starting" | "ready") => void) =>
@@ -266,7 +312,10 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     },
   });
   registerWeb(app);
+  const stopConnector = process.env.VITEST === "true" ? () => undefined : startEgressConnector(db, driver, key, egress);
   app.addHook("onClose", async () => {
+    stopConnector();
+    egress.close();
     chat.shutdown();
   });
 
@@ -365,8 +414,10 @@ export function startRoutineLoop(app: FastifyInstance, ctx: ControlContext, inte
         console.error("定时任务唤醒失败", error);
       });
     }
+    const egress = egressHubs.get(app);
     dispatchDue(ctx.db, now, {
       userStatus: (userId) => routineUserStatus(ctx, runtime, userId),
+      ...(egress ? { egressPaused: (userId: string) => egress.paused(userId) } : {}),
       enqueue: (work) => {
         try {
           return chat.enqueueRoutine({

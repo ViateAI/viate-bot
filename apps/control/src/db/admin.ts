@@ -3,7 +3,7 @@ import type { AdminScope } from "../scope.js";
 import type { AppDatabase } from "./index.js";
 import { bots, tasks, users } from "./schema.js";
 
-const ACTIVE = ["queued", "running", "waiting_approval", "waiting_takeover", "waiting_input"];
+const ACTIVE = ["queued", "running", "waiting_approval", "waiting_takeover", "waiting_input", "waiting_egress"];
 
 export interface AdminUserRecord {
   id: string;

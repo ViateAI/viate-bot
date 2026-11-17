@@ -13,6 +13,8 @@ export default defineConfig({
       "/api": { target, ws: true },
       "/auth": target,
       "/ws": { target, ws: true },
+      "/client/token": target,
+      "/client/egress": { target, ws: true },
     },
   },
 });

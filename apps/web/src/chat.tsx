@@ -44,7 +44,7 @@ export function ChatPage({ botId }: { botId: string }) {
     queryFn: () => api<{ tasks: Task[] }>(`/api/conversations/${conversationId}/tasks`),
     refetchInterval: (query) => {
       const latest = query.state.data?.tasks[0];
-      return latest && ["queued", "running", "waiting_input", "waiting_approval", "waiting_takeover"].includes(latest.state) ? 1000 : false;
+      return latest && ["queued", "running", "waiting_input", "waiting_approval", "waiting_takeover", "waiting_egress"].includes(latest.state) ? 1000 : false;
     },
   });
   const task = tasks.data?.tasks[0];
@@ -57,10 +57,10 @@ export function ChatPage({ botId }: { botId: string }) {
     queryKey: ["steps", task?.id],
     enabled: Boolean(task?.id),
     queryFn: () => api<{ steps: Step[] }>(`/api/tasks/${task?.id}/steps`),
-    refetchInterval: task && ["queued", "running", "waiting_input", "waiting_approval", "waiting_takeover"].includes(task.state) ? 1000 : false,
+    refetchInterval: task && ["queued", "running", "waiting_input", "waiting_approval", "waiting_takeover", "waiting_egress"].includes(task.state) ? 1000 : false,
   });
   const active = task?.state === "queued" || task?.state === "running";
-  const stoppable = active || task?.state === "waiting_input" || task?.state === "waiting_approval" || task?.state === "waiting_takeover";
+  const stoppable = active || task?.state === "waiting_input" || task?.state === "waiting_approval" || task?.state === "waiting_takeover" || task?.state === "waiting_egress";
   const secret = task?.state === "waiting_input" ? pendingSecret(steps.data?.steps ?? []) : undefined;
 
   useEffect(() => {
@@ -141,6 +141,11 @@ export function ChatPage({ botId }: { botId: string }) {
           {taskLabel(task?.state ?? "", machine, task?.error)}
         </p>
       </div>
+      {task?.state === "waiting_egress" ? (
+        <p data-testid="egress-wait" className="mt-3 rounded border border-amber-700 bg-amber-950 px-3 py-2 text-sm text-amber-100">
+          用户网络离线，请打开 viate-bot 桌面客户端。设备上线后会自动继续。
+        </p>
+      ) : null}
       <Computer botId={botId} />
       <Routines botId={botId} />
       <div data-testid="transcript" className="mt-6 flex-1 space-y-4">

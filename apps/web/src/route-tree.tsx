@@ -7,7 +7,9 @@ import { AdminAudit, AdminMetrics } from "./admin-metrics.js";
 import { Approvals } from "./approval.js";
 import { api, rememberCsrf, type Me } from "./api.js";
 import { BotList } from "./bots.js";
+import { ClientLink } from "./client-link.js";
 import { ChatPage } from "./chat.js";
+import { EgressSettings } from "./egress.js";
 
 const rootRoute = createRootRoute({
   component: Shell,
@@ -38,6 +40,18 @@ const appsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/apps",
   component: AppsPage,
+});
+
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings",
+  component: EgressSettings,
+});
+
+const clientLinkRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/client/link",
+  component: ClientLink,
 });
 
 const adminRoute = createRoute({
@@ -93,6 +107,8 @@ export const routeTree = rootRoute.addChildren([
   chatRoute,
   approvalsRoute,
   appsRoute,
+  settingsRoute,
+  clientLinkRoute,
   adminRoute.addChildren([
     adminIndexRoute,
     adminMachinesRoute,
@@ -133,6 +149,9 @@ function Shell() {
           <Link to="/apps" className="text-neutral-300">
             应用
           </Link>
+          <Link to="/settings" data-testid="egress-settings-link" className="text-neutral-300">
+            网络出口
+          </Link>
           {me.data?.isAdmin ? (
             <Link to="/admin" data-testid="admin-link" className="text-neutral-300">
               管理
@@ -146,8 +165,20 @@ function Shell() {
         ) : null}
       </header>
       {me.isPending ? <p className="px-6 py-10 text-neutral-400">正在确认登录…</p> : null}
-      {me.isError ? <p className="px-6 py-10 text-neutral-400">需要登录。</p> : null}
+      {me.isError ? <LoginPrompt /> : null}
       {me.data ? <Outlet /> : null}
     </main>
+  );
+}
+
+function LoginPrompt() {
+  const next = `${window.location.pathname}${window.location.search}`;
+  if (window.location.pathname === "/client/link") {
+    window.location.assign(`/auth/login?return_to=${encodeURIComponent(next)}`);
+  }
+  return (
+    <p className="px-6 py-10 text-neutral-400">
+      需要登录。 <a className="text-neutral-200" href={`/auth/login?return_to=${encodeURIComponent(next)}`}>登录</a>
+    </p>
   );
 }

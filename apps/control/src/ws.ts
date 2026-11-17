@@ -67,7 +67,7 @@ export interface WebsocketDeps {
 
 export function registerWebsocket(app: FastifyInstance, deps: WebsocketDeps): void {
   const hub = deps.hub;
-  app.register(websocket);
+  app.register(websocket, { options: { maxPayload: 1024 * 1024 } });
   app.after(() => {
   app.addHook("onRequest", async (request, reply) => {
     const path = request.url.split("?")[0] ?? "";

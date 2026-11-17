@@ -43,7 +43,10 @@ function reserved(path: string): boolean {
     path.startsWith("/auth/") ||
     path === "/ws" ||
     path.startsWith("/ws/") ||
-    path.startsWith("/dev/")
+    path.startsWith("/dev/") ||
+    path === "/client/token" ||
+    path === "/client/egress" ||
+    path.startsWith("/client/egress/")
   );
 }
 

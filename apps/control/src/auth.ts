@@ -18,10 +18,12 @@ import { sessionRepository } from "./db/sessions.js";
 import { LoginRejected, acceptIdentity } from "./login.js";
 import { newTransaction } from "./oidc.js";
 import type { AppRuntime } from "./providers.js";
+import { egressRepository } from "./db/egress.js";
 import { userScope } from "./scope.js";
 import {
   clearSessionCookie,
   createSession,
+  hashToken,
   rememberSession,
   resolveSession,
   type ResolvedSession,
@@ -43,6 +45,9 @@ export function registerAuth(app: FastifyInstance, deps: AuthDeps): void {
   app.addHook("preHandler", async (request, reply) => {
     // 按匹配到的路由判断：原始 URL 里的 /%61pi/me 也会路由到 /api/me。
     const path = request.routeOptions.url ?? request.url.split("?")[0] ?? "";
+    if (path.startsWith("/api/") && deviceToken(deps.db, request.headers.authorization)) {
+      return reply.code(401).send({ error: "未登录" });
+    }
     if (authExempt(path) || !requiresSession(request.method, path)) return;
     const lookup = await resolveSession(
       deps.db,
@@ -154,7 +159,16 @@ export function registerAuth(app: FastifyInstance, deps: AuthDeps): void {
 }
 
 function authExempt(path: string): boolean {
-  return path === "/auth/login" || path === "/auth/callback" || path === "/health" || path.startsWith("/dev/");
+  return path === "/auth/login" || path === "/auth/callback" || path === "/health" || path.startsWith("/dev/") || path === "/client/token";
+}
+
+/** 设备令牌只能连 /client/egress。拿到 /api 一律 401，即使同时还带着会话。 */
+function deviceToken(db: AuthDeps["db"], header: string | string[] | undefined): boolean {
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value?.startsWith("Bearer ")) return false;
+  const token = value.slice("Bearer ".length);
+  if (!token) return false;
+  return egressRepository(db).findActiveByTokenHash(hashToken(token)) !== undefined;
 }
 
 function mutating(method: string): boolean {

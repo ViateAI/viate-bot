@@ -34,6 +34,9 @@ interface AdminMachine {
   image: string;
   createdAt: string;
   lastHeartbeatAt: string | null;
+  egressMode?: string;
+  egressOfflinePolicy?: string;
+  egressDeviceOnline?: boolean;
 }
 
 interface AuditRow {
@@ -263,6 +266,11 @@ export function AdminMachines() {
           <li key={machine.id} data-testid="machine-row" className="rounded border border-neutral-800 p-4 text-sm">
             <p>{machine.email} · {machine.state} · {machine.spec.cpu} CPU / {machine.spec.memMb} MB</p>
             <p className="text-neutral-400">{machine.image} · {machine.createdAt} · 健康检查 {machine.lastHeartbeatAt ?? "无"}</p>
+            <p data-testid="machine-egress" className="text-neutral-300">
+              出口 {machine.egressMode === "user_network" ? "用户网络" : "直连"}
+              {machine.egressMode === "user_network" ? ` · ${machine.egressOfflinePolicy === "fallback_direct" ? "离线改直连" : "离线暂停"}` : ""}
+              {" · "}设备 {machine.egressDeviceOnline ? "在线" : "离线"}
+            </p>
             <div className="mt-3 flex flex-wrap gap-2">
               <button data-testid="machine-stop" className="rounded border border-neutral-600 px-3 py-1" type="button" onClick={() => run.mutate({ id: machine.id, action: "stop" })}>停止</button>
               <button data-testid="machine-start" className="rounded border border-neutral-600 px-3 py-1" type="button" onClick={() => run.mutate({ id: machine.id, action: "start" })}>启动</button>

@@ -19,6 +19,13 @@ export interface UserDraft {
   isAdmin: boolean;
 }
 
+const disabledListeners = new WeakMap<AppDatabase, (userId: string) => void>();
+
+/** 用户被禁用时立刻通知。设备连接用它断开，不等下一次会话请求。 */
+export function onUserDisabled(db: AppDatabase, listener: (userId: string) => void): void {
+  disabledListeners.set(db, listener);
+}
+
 /** 用户行是身份来源，本身不带 UserScope。开发脚本在创建机器前写入它。 */
 export function ensureDevUser(db: AppDatabase, userId: string, quota?: Partial<QuotaDraft>): void {
   if (db.select().from(users).where(eq(users.id, userId)).get()) {
@@ -85,6 +92,7 @@ export function userRepository(db: AppDatabase) {
     },
     setStatus(id: string, status: string): void {
       db.update(users).set({ status }).where(eq(users.id, id)).run();
+      if (status === "disabled") disabledListeners.get(db)?.(id);
     },
   };
 }

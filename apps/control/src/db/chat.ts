@@ -3,7 +3,7 @@ import type { UserScope } from "../scope.js";
 import type { AppDatabase } from "./index.js";
 import { bots, conversations, messages, taskSteps, tasks } from "./schema.js";
 
-const ACTIVE_STATES = ["queued", "running", "waiting_approval", "waiting_takeover", "waiting_input"];
+const ACTIVE_STATES = ["queued", "running", "waiting_approval", "waiting_takeover", "waiting_input", "waiting_egress"];
 
 export interface ConversationRecord {
   id: string;
@@ -210,7 +210,7 @@ export function chatRepository(db: AppDatabase) {
     findActiveByBot(
       scope: UserScope,
       botId: string,
-      state: "running" | "queued" | "waiting_input" | "waiting_approval" | "waiting_takeover",
+      state: "running" | "queued" | "waiting_input" | "waiting_approval" | "waiting_takeover" | "waiting_egress",
     ): TaskRecord | undefined {
       if (!ownsBot(db, scope, botId)) return undefined;
       const row = db

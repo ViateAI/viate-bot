@@ -20,12 +20,16 @@ import {
   type ProvisionDeps,
 } from "../admin/service.js";
 import { auditRepository } from "../db/audit.js";
+import { egressRepository } from "../db/egress.js";
 import { settingsRepository } from "../db/settings.js";
 import { authenticated } from "../auth.js";
 import { BotRejected } from "../bot-service.js";
 import type { MachineSpec } from "../machines/policy.js";
 
-export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & { machineControl: MachineControl }): void {
+export function registerAdminRoutes(
+  app: FastifyInstance,
+  deps: ProvisionDeps & { machineControl: MachineControl; egressOnline?: (userId: string) => boolean },
+): void {
   app.addHook("preHandler", async (request, reply) => {
     const path = request.routeOptions.url ?? "";
     if (!path.startsWith("/api/admin")) return;
@@ -127,7 +131,19 @@ export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & 
   app.get("/api/admin/machines", async (request, reply) => {
     const scope = actor(request);
     if (!scope) return reply.code(404).send({ error: "找不到" });
-    return { machines: await listMachines(deps.db, scope) };
+    const machines = await listMachines(deps.db, scope);
+    const meta = new Map(egressRepository(deps.db).adminMeta(scope).map((row) => [row.machineId, row]));
+    return {
+      machines: machines.map((machine) => {
+        const row = meta.get(machine.id);
+        return {
+          ...machine,
+          egressMode: row?.mode === "user_network" ? "user_network" : "direct",
+          egressOfflinePolicy: row?.offlinePolicy === "fallback_direct" ? "fallback_direct" : "pause",
+          egressDeviceOnline: deps.egressOnline?.(machine.userId) ?? false,
+        };
+      }),
+    };
   });
 
   app.get<{ Params: { id: string } }>("/api/admin/machines/:id/stats", async (request, reply) => {

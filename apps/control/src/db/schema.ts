@@ -74,12 +74,64 @@ export const machines = sqliteTable(
     volumeName: text("volume_name").notNull(),
     machinedTokenEnc: text("machined_token_enc").notNull(),
     egressMode: text("egress_mode").notNull().default("direct"),
+    egressOfflinePolicy: text("egress_offline_policy").notNull().default("pause"),
+    egressDeviceId: text("egress_device_id"),
     lastHeartbeatAt: text("last_heartbeat_at"),
     lastStartedAt: text("last_started_at"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
   (table) => [uniqueIndex("machines_user_id_unique").on(table.userId)],
+);
+
+/** 桌面客户端设备。token 只存哈希。last_ip 不进管理端响应。 */
+export const clientDevices = sqliteTable(
+  "client_devices",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id),
+    name: text("name").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    createdAt: text("created_at").notNull(),
+    lastSeenAt: text("last_seen_at"),
+    lastIp: text("last_ip"),
+    revokedAt: text("revoked_at"),
+  },
+  (table) => [uniqueIndex("client_devices_token_hash").on(table.tokenHash), index("client_devices_user").on(table.userId)],
+);
+
+/** 一次性绑定码。只存哈希，60 秒过期，绑定 PKCE。 */
+export const clientLinkCodes = sqliteTable(
+  "client_link_codes",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id),
+    deviceName: text("device_name").notNull(),
+    codeHash: text("code_hash").notNull(),
+    codeChallenge: text("code_challenge").notNull(),
+    state: text("state").notNull(),
+    redirectPort: integer("redirect_port").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    usedAt: text("used_at"),
+  },
+  (table) => [uniqueIndex("client_link_codes_hash").on(table.codeHash)],
+);
+
+/** 隧道转发字节，按机器、设备和小时累加。供以后计费，不存用户 IP。 */
+export const egressBytesHourly = sqliteTable(
+  "egress_bytes_hourly",
+  {
+    machineId: text("machine_id").notNull(),
+    deviceId: text("device_id").notNull(),
+    hour: text("hour").notNull(),
+    bytesToClient: integer("bytes_to_client").notNull().default(0),
+    bytesToMachine: integer("bytes_to_machine").notNull().default(0),
+  },
+  (table) => [primaryKey({ columns: [table.machineId, table.deviceId, table.hour] })],
 );
 
 export const bots = sqliteTable("bots", {

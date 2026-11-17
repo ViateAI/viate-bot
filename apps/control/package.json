@@ -22,7 +22,8 @@
     "dockerode": "^4.0.7",
     "drizzle-orm": "^0.44.6",
     "fastify": "^5.6.1",
-    "openid-client": "^6.8.9"
+    "openid-client": "^6.8.9",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
@@ -33,7 +34,6 @@
     "oidc-provider": "^9.14.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.4",
-    "ws": "^8.18.3"
+    "vitest": "^3.2.4"
   }
 }

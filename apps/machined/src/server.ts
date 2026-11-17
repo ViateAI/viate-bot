@@ -23,6 +23,8 @@ import { registerDisplayRoutes } from "./display.js";
 import { createMcpHost, registerMcpRoutes } from "./mcp-host.js";
 import { createFsClient, type FsClient } from "./fs-client.js";
 import { resolveConfined } from "./paths.js";
+import { attachEgress } from "./egress-ws.js";
+import { proxyEnvironment, startEgressProxy } from "./egress-proxy.js";
 
 export const MACHINED_VERSION = "0.0.0";
 const DEFAULT_TIMEOUT_SEC = 30;
@@ -42,6 +44,8 @@ export interface MachinedOptions {
   restartBrowser?: () => Promise<void>;
   /** 测试替换执行器。生产缺省是 run-as-bot。 */
   execSpawn?: { command: string; baseArgs: string[] };
+  /** 缺省 3128。测试进程里用 0，避免并行用例抢端口。 */
+  egressProxyPort?: number;
 }
 
 export function buildServer(options: MachinedOptions): FastifyInstance {
@@ -73,6 +77,12 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
 
   const execJobs = new Map<string, { kill: () => Promise<void>; done: Promise<void> }>();
   const launcher = options.execSpawn ?? { command: "/usr/bin/node", baseArgs: ["/opt/viate/run-as-bot.mjs"] };
+  const proxyPort = options.egressProxyPort ?? (process.env.VITEST ? 0 : undefined);
+  const proxy = startEgressProxy(proxyPort === undefined ? {} : { port: proxyPort });
+  attachEgress(app, proxy, token);
+  app.addHook("onClose", async () => {
+    await proxy.close();
+  });
 
   app.post("/exec/cancel", async (request) => {
     const body = bodyRecord(request.body);
@@ -97,7 +107,18 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     const cwd = typeof body.cwd === "string" ? resolveConfined(body.cwd) : "/home/bot";
     const timeoutSec = clampTimeout(typeof body.timeoutSec === "number" ? body.timeoutSec : undefined);
     const id = randomUUID();
-    await streamExec(reply, request, id, execJobs, launcher, body.cmd, cwd, timeoutSec, stringRecord(body.env));
+    await proxy.ready;
+    await streamExec(
+      reply,
+      request,
+      id,
+      execJobs,
+      launcher,
+      body.cmd,
+      cwd,
+      timeoutSec,
+      proxyEnvironment(proxy.port, process.env, stringRecord(body.env)),
+    );
   });
 
   app.post("/fs/read", async (request, reply) => {
@@ -243,14 +264,14 @@ async function streamExec(
   cmd: string,
   cwd: string,
   timeoutSec: number,
-  env: Record<string, string> | undefined,
+  env: NodeJS.ProcessEnv,
 ): Promise<void> {
   const child: ChildProcessByStdio<null, ReadableStream, ReadableStream> = spawn(
     launcher.command,
     [...launcher.baseArgs, cwd, cmd],
     {
       cwd,
-      env: { ...process.env, ...env, HOME: "/home/bot", USER: "bot", LOGNAME: "bot" },
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     },

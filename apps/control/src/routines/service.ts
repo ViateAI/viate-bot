@@ -11,7 +11,12 @@ import { nextCron, parseCron } from "./cron.js";
 
 type Routine = { id: string; botId: string; userId: string; cron: string; timezone: string; prompt: string; enabled: number; state: string; nextRunAt: string | null; createdAt: string };
 export type RoutineWork = { routineId: string; runId: string; botId: string; userId: string; prompt: string; scheduledAt: string; missedCount: number };
-export type RoutineDeps = { userStatus: (userId: string) => Promise<string> | string; systemBotBusy?: (botId: string) => boolean };
+export type RoutineDeps = {
+  userStatus: (userId: string) => Promise<string> | string;
+  systemBotBusy?: (botId: string) => boolean;
+  /** user_network 且 pause 且桌面客户端不在线。 */
+  egressPaused?: (userId: string) => boolean;
+};
 const selection = `select r.id, r.bot_id as botId, b.user_id as userId, r.cron, r.timezone, r.prompt, r.enabled, r.state, r.next_run_at as nextRunAt, r.created_at as createdAt from routines r join bots b on b.id=r.bot_id`;
 
 export class RoutineError extends Error {
@@ -98,10 +103,12 @@ export async function claimDue(db: AppDatabase, now: Date, deps: RoutineDeps): P
       closeUncovered(sql, insertRun, advance, row, now, seenAt);
       continue;
     }
+    const offline = status === "active" && deps.egressPaused?.(row.userId) === true;
+    const skipReason = status === "disabled" ? "用户已停用" : offline ? "桌面客户端离线" : null;
     const outstanding = sql.prepare("select id,scheduled_at as scheduledAt from routine_runs where routine_id=? and state='claimed' and task_id is null order by scheduled_at limit 1").get(row.id) as { id: string; scheduledAt: string } | undefined;
     if (outstanding) {
-      if (status === "disabled") {
-        sql.prepare("update routine_runs set state='skipped',error=? where id=? and task_id is null").run("用户已停用", outstanding.id);
+      if (skipReason) {
+        sql.prepare("update routine_runs set state='skipped',error=? where id=? and task_id is null").run(skipReason, outstanding.id);
         emitOps(db, opsMinutes, { id: ulid(), ts: now.toISOString(), userId: row.userId, botId: row.botId, type: M2_EVENTS.routineSkipped, attrs: { routineId: row.id, runId: outstanding.id } });
       } else {
         reserved.add(row.botId);
@@ -114,11 +121,11 @@ export async function claimDue(db: AppDatabase, now: Date, deps: RoutineDeps): P
     if (slots.length === 0 || !row.nextRunAt) continue;
     const latest = slots[slots.length - 1]!;
     const next = nextCron(row.cron, row.timezone, new Date(latest)).toISOString();
-    if (status === "disabled") {
+    if (skipReason) {
       const runId = ulid();
       const saved = sql.transaction(() => {
         if (advance.run(next, row.id, row.nextRunAt).changes !== 1) return false;
-        for (const slot of slots) insertRun.run(slot === latest ? runId : ulid(), row.id, slot, "skipped", "用户已停用");
+        for (const slot of slots) insertRun.run(slot === latest ? runId : ulid(), row.id, slot, "skipped", skipReason);
         return true;
       })();
       if (saved) emitOps(db, opsMinutes, { id: ulid(), ts: now.toISOString(), userId: row.userId, botId: row.botId, type: M2_EVENTS.routineSkipped, attrs: { routineId: row.id, runId } });

@@ -49,6 +49,7 @@ import { skillHttpMachine, skillPrompt, skillTools } from "./skill-tools.js";
 import { machineTools } from "./tools.js";
 import { assistantText, loadTranscript, loadTranscriptEntries, messageView, stepView, storedContent, taskView, withoutImages } from "./view.js";
 import { buildModel, type GatewayTask } from "../gateway/stream.js";
+import type { EgressGate } from "../egress/gate.js";
 import { userScope, type UserScope } from "../scope.js";
 
 const INTERRUPTED_TOOL = "执行被中断，结果未知";
@@ -90,6 +91,7 @@ export interface ChatServiceDeps {
   fetch?: typeof fetch;
   leases?: TakeoverLeases;
   flights?: UserFlights;
+  egressGate?: EgressGate;
 }
 
 interface QueuedTask {
@@ -453,6 +455,12 @@ export function createChatService(deps: ChatServiceDeps) {
         cancelWaiting(scope, task);
         return true;
       }
+      if (task.state === "waiting_egress") {
+        deps.egressGate?.cancel(taskId);
+        chat.updateTask(scope, taskId, { state: "cancelled", error: null, endedAt: now().toISOString() });
+        if (task.conversationId) publishTask(scope.userId, task.conversationId, taskId);
+        return true;
+      }
       if (task.state === "waiting_approval") {
         chat.updateTask(scope, taskId, { state: "cancelled", endedAt: now().toISOString(), error: null });
         deps.db.$client
@@ -483,6 +491,31 @@ export function createChatService(deps: ChatServiceDeps) {
       if (approving) this.stop(scope, approving.id);
       const takeover = chat.findActiveByBot(scope, botId, "waiting_takeover");
       if (takeover) this.stop(scope, takeover.id);
+      const egressWait = chat.findActiveByBot(scope, botId, "waiting_egress");
+      if (egressWait) this.stop(scope, egressWait.id);
+    },
+    resumeEgress(userId: string, taskId: string): void {
+      const scope = userScope(userId);
+      const task = chat.findTask(scope, taskId);
+      if (!task || task.state !== "waiting_egress" || !task.conversationId) return;
+      chat.updateTask(scope, taskId, { state: "queued", error: null, endedAt: null });
+      queue.push({ id: taskId, botId: task.botId, userId, conversationId: task.conversationId });
+      remember(userId);
+      publishTask(userId, task.conversationId, taskId);
+      pump();
+    },
+    failEgress(userId: string, taskId: string, error: string): void {
+      const scope = userScope(userId);
+      const task = chat.findTask(scope, taskId);
+      if (!task || task.state !== "waiting_egress") return;
+      chat.updateTask(scope, taskId, { state: "failed", error, endedAt: now().toISOString() });
+      deps.db.$client
+        .prepare(
+          `update routine_runs set state = 'failed', error = ?
+           where state = 'claimed' and (task_id = ? or id = (select routine_run_id from tasks where id = ?))`,
+        )
+        .run(error, taskId, taskId);
+      if (task.conversationId) publishTask(userId, task.conversationId, taskId);
     },
     /** 等正在跑的任务结束。排队但因名额开不了工的会留下。 */
     async idle(): Promise<void> {
@@ -555,6 +588,8 @@ export function createChatService(deps: ChatServiceDeps) {
     }
     const waiting = chat.findActiveByBot(scope, bot.id, "waiting_input");
     if (waiting) throw new ChatError("正在等待输入", 409);
+    const egressWait = chat.findActiveByBot(scope, bot.id, "waiting_egress");
+    if (egressWait) throw new ChatError("正在等待用户网络", 409);
     const task = chat.insertTask(scope, { id: ulid(), botId: bot.id, conversationId: conversation.id });
     if (!task) throw new ChatError("找不到 bot", 404);
     const row = persistUser(scope, conversation.id, message, task.id);
@@ -636,6 +671,15 @@ export function createChatService(deps: ChatServiceDeps) {
   }
 
   function begin(task: QueuedTask): void {
+    if (deps.egressGate?.blocked(task.userId)) {
+      const scope = userScope(task.userId);
+      const existing = chat.findTask(scope, task.id);
+      const startedAt = existing?.startedAt ?? now().toISOString();
+      chat.updateTask(scope, task.id, { state: "waiting_egress", error: null, startedAt, endedAt: null });
+      deps.egressGate.hold(task.userId, task.id, startedAt);
+      publishTask(task.userId, task.conversationId, task.id);
+      return;
+    }
     const live: Live = {
       ...task,
       stopRequested: false,

@@ -9,7 +9,7 @@ import { routineRunRepository } from "../db/routines.js";
 import { settingsRepository } from "../db/settings.js";
 import { adminOverview } from "../ops/report.js";
 import { adminScope, userScope } from "../scope.js";
-import { ROUTINE_LOOP_SEEN_KEY } from "./punctuality.js";
+import { ROUTINE_LOOP_SEEN_KEY, routineOutcome } from "./punctuality.js";
 import { claimDue, routineService } from "./service.js";
 
 const dirs: string[] = [];
@@ -128,6 +128,26 @@ describe("routine punctuality", () => {
     expect(missed.length).toBeGreaterThan(0);
     expect(missed.every((row) => row.state === "missed")).toBe(true);
     expect(db.$client.prepare("select count(*) as n from tasks").get()).toEqual({ n: 0 });
+    db.$client.close();
+  });
+
+  it("records an offline desktop client as skipped and punctuality counts that skip", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "vb-punctual-"));
+    dirs.push(dir);
+    const db = open(join(dir, "test.sqlite"));
+    seed(db);
+    const service = routineService(db);
+    const id = service.propose("u", "b", { cron: "* * * * *", timezone: "UTC", prompt: "secret-prompt-value" }, start);
+    service.confirm("u", id, start);
+    await claimDue(db, later, { userStatus: () => "active", egressPaused: () => true });
+    const rows = db.$client.prepare("select state, error from routine_runs").all() as Array<{ state: string; error: string }>;
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((row) => row.state === "skipped" && row.error === "桌面客户端离线")).toBe(true);
+    expect(routineOutcome({ state: "skipped", scheduledAt: "2025-01-01T00:01:00.000Z", startedAt: null })).toBe("skipped");
+    const stats = routineRunRepository(db).punctuality(userScope("u"), later);
+    expect(stats.skipped).toBe(rows.length);
+    expect(stats.missed).toBe(0);
+    expect(JSON.stringify(stats)).not.toContain("secret-prompt-value");
     db.$client.close();
   });
 });

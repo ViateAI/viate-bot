@@ -208,6 +208,9 @@ importers:
       openid-client:
         specifier: ^6.8.9
         version: 6.8.9
+      ws:
+        specifier: ^8.18.3
+        version: 8.22.2
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7.6.13
@@ -236,9 +239,6 @@ importers:
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@24.19.2)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.15)(yaml@2.8.2)
-      ws:
-        specifier: ^8.18.3
-        version: 8.22.2
 
   apps/machined:
     dependencies:
@@ -336,6 +336,28 @@ importers:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@24.19.2)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.15)(yaml@2.8.2)
 
+  packages/egress-client:
+    dependencies:
+      '@viate-bot/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      ws:
+        specifier: ^8.18.3
+        version: 8.22.2
+    devDependencies:
+      '@types/node':
+        specifier: ^24.10.1
+        version: 24.19.2
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@24.19.2)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.15)(yaml@2.8.2)
+
   packages/integration-viate:
     devDependencies:
       '@types/node':
@@ -360,6 +382,9 @@ importers:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@24.19.2)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.15)(yaml@2.8.2)
 
 packages:
 

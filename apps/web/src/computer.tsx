@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 // @ts-expect-error noVNC does not publish TypeScript declarations.
 import RFB from "@novnc/novnc";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "./api.js";
 
 interface Lease { id: string; state: string; controlledHere: boolean }
@@ -51,7 +52,19 @@ export function Computer({ botId }: { botId: string }) {
       setError("");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "操作失败"); }
   };
+  const egress = useQuery({
+    queryKey: ["egress"],
+    queryFn: () => api<{ mode: string; offlinePolicy: string; deviceOnline: boolean }>("/api/egress"),
+    refetchInterval: 5000,
+    retry: false,
+  });
+  const egressLabel = !egress.data
+    ? ""
+    : egress.data.mode === "user_network"
+      ? `用户网络 · ${egress.data.deviceOnline ? "在线" : "离线"}`
+      : "直连";
   return <section className="space-y-3">
+    {egressLabel ? <p data-testid="egress-status" className="text-sm text-neutral-300">出口 {egressLabel}</p> : null}
     <div className="flex items-center gap-3">
       <button type="button" disabled={!lease || lease.state !== "requested"} onClick={() => void change("grant")} className="rounded bg-blue-600 px-3 py-2 text-white disabled:opacity-40">接管</button>
       <button type="button" disabled={!lease?.controlledHere} onClick={() => void change("release")} className="rounded border px-3 py-2 disabled:opacity-40">交还</button>
