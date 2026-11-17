@@ -87,7 +87,6 @@ export function attachBrowser(app: FastifyInstance, options: BrowserRouteOptions
   async function acceptUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
     if (pathname !== "/browser/cdp") {
-      socket.destroy();
       return;
     }
     if (closing) {

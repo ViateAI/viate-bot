@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import type { FsEntry, FsSearchHit } from "@viate-bot/protocol";
 import {
+  deleteConfined,
   fsFailure,
   listConfined,
   readConfined,
@@ -23,6 +24,7 @@ interface RpcOk {
   list?: { path: string; entries: FsEntry[] };
   search?: { hits: FsSearchHit[]; truncated: boolean };
   file?: string;
+  delete?: { path: string };
 }
 
 interface RpcFail {
@@ -37,7 +39,7 @@ type RpcResponse = RpcOk | RpcFail;
 
 interface RpcRequest {
   id: number;
-  op: "read" | "write" | "list" | "search" | "readFile" | "writeFile";
+  op: "read" | "write" | "list" | "search" | "readFile" | "writeFile" | "delete";
   path: string;
   maxBytes?: number;
   content?: string;
@@ -54,6 +56,7 @@ export interface FsClient {
   search(path: string, pattern: string, maxResults: number): Promise<{ hits: FsSearchHit[]; truncated: boolean }>;
   readFile(path: string): Promise<Buffer>;
   writeFile(path: string, data: Buffer): Promise<FsWriteResult>;
+  delete(path: string): Promise<{ path: string }>;
 }
 
 /** root 时把文件操作交给降权子进程；测试和非 root 进程就地执行。 */
@@ -81,6 +84,9 @@ class LocalFs implements FsClient {
   }
   writeFile(path: string, data: Buffer): Promise<FsWriteResult> {
     return settle(writeConfined(path, data, 0o644));
+  }
+  delete(path: string): Promise<{ path: string }> {
+    return settle(deleteConfined(path));
   }
 }
 
@@ -151,6 +157,13 @@ class WorkerFs implements FsClient {
     return this.call({ op: "writeFile", path, data: data.toString("base64") }).then((response) => {
       if (!response.write) throw new Error("fs worker 没有返回写入结果");
       return response.write;
+    });
+  }
+
+  delete(path: string): Promise<{ path: string }> {
+    return this.call({ op: "delete", path }).then((response) => {
+      if (!response.delete) throw new Error("fs worker 没有返回删除结果");
+      return response.delete;
     });
   }
 

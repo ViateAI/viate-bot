@@ -51,4 +51,23 @@ describe("path confinement", () => {
     roots.push(dir);
     expect(resolveConfined(join(dir, "note.txt"))).toBe(join(dir, "note.txt"));
   });
+
+  it("rejects an outside directory symlink even when it is the final component", async () => {
+    const paths = await confined();
+    const scratch = mkdtempSync(join(tmpdir(), "vb-paths-"));
+    roots.push(scratch);
+    const home = join(scratch, "home");
+    const outside = join(scratch, "outside");
+    mkdirSync(home);
+    mkdirSync(outside);
+    const link = join(home, "escape");
+    symlinkSync(outside, link);
+    paths.__setRootsForTest([home]);
+    try {
+      expect(() => paths.resolveConfined(link)).toThrow(/超出/);
+      expect(() => paths.resolveConfined(join(link, "file"))).toThrow(/超出/);
+    } finally {
+      paths.__setRootsForTest([paths.BOT_HOME, paths.BOT_TMP]);
+    }
+  });
 });

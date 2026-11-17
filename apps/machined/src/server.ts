@@ -3,6 +3,7 @@
  * machined 不提供“把应用地址交给控制面去连”的接口。远程 MCP 从机器内发起。
  */
 import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readdir, readFile, statfs } from "node:fs/promises";
 import { Readable, type Readable as ReadableStream } from "node:stream";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -15,7 +16,10 @@ import type {
   HealthResponse,
   MetricsResponse,
 } from "@viate-bot/protocol";
+import { createAppRuntime, registerAppRoutes } from "./apps.js";
 import { attachBrowser } from "./browser-route.js";
+import { registerDisplayRoutes } from "./display.js";
+import { createMcpHost, registerMcpRoutes } from "./mcp-host.js";
 import { createFsClient, type FsClient } from "./fs-client.js";
 import { resolveConfined } from "./paths.js";
 
@@ -35,6 +39,8 @@ export interface MachinedOptions {
   browserDebugPort?: number;
   /** 缺省以 bot 身份给 Chromium 主进程发 SIGTERM，由 supervisord 重新拉起。 */
   restartBrowser?: () => Promise<void>;
+  /** 测试替换执行器。生产缺省是 run-as-bot。 */
+  execSpawn?: { command: string; baseArgs: string[] };
 }
 
 export function buildServer(options: MachinedOptions): FastifyInstance {
@@ -64,6 +70,21 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
 
   app.get("/metrics", async (): Promise<MetricsResponse> => readMetrics());
 
+  const execJobs = new Map<string, { kill: () => void; done: Promise<void> }>();
+  const launcher = options.execSpawn ?? { command: "/usr/bin/node", baseArgs: ["/opt/viate/run-as-bot.mjs"] };
+
+  app.post("/exec/cancel", async (request) => {
+    const body = bodyRecord(request.body);
+    if (typeof body.id !== "string" || body.id.length === 0) {
+      throw Object.assign(new Error("id 不能为空"), { name: "PathEscapeError" });
+    }
+    const job = execJobs.get(body.id);
+    if (!job) return { stopped: true };
+    job.kill();
+    await job.done;
+    return { stopped: true };
+  });
+
   app.post("/exec", async (request, reply) => {
     const body = bodyRecord(request.body);
     if (typeof body.cmd !== "string" || body.cmd.length === 0) {
@@ -74,13 +95,8 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     }
     const cwd = typeof body.cwd === "string" ? resolveConfined(body.cwd) : "/home/bot";
     const timeoutSec = clampTimeout(typeof body.timeoutSec === "number" ? body.timeoutSec : undefined);
-    reply.hijack();
-    reply.raw.writeHead(200, {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-    });
-    await streamExec(reply, body.cmd, cwd, timeoutSec, stringRecord(body.env));
+    const id = randomUUID();
+    await streamExec(reply, request, id, execJobs, launcher, body.cmd, cwd, timeoutSec, stringRecord(body.env));
   });
 
   app.post("/fs/read", async (request, reply) => {
@@ -136,6 +152,14 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     return response;
   });
 
+  app.post("/fs/delete", async (request) => {
+    const body = bodyRecord(request.body);
+    if (typeof body.path !== "string" || body.path.length === 0) {
+      throw Object.assign(new Error("path 不能为空"), { name: "PathEscapeError" });
+    }
+    return filesystem().delete(body.path);
+  });
+
   app.get("/fs/file", async (request, reply) => {
     const path = resolveConfined(queryPath(request));
     const data = await filesystem().readFile(path);
@@ -154,6 +178,10 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
   });
 
   attachBrowser(app, options);
+  registerDisplayRoutes(app, { token: options.token });
+  const mcp = createMcpHost();
+  registerAppRoutes(app, createAppRuntime(), { mcp });
+  registerMcpRoutes(app, mcp, { token: options.token });
 
   app.setErrorHandler((error, _request, reply) => {
     const known = error instanceof Error ? error : new Error(String(error));
@@ -207,20 +235,45 @@ function clampTimeout(value: number | undefined): number {
 
 async function streamExec(
   reply: FastifyReply,
+  request: FastifyRequest,
+  id: string,
+  jobs: Map<string, { kill: () => void; done: Promise<void> }>,
+  launcher: { command: string; baseArgs: string[] },
   cmd: string,
   cwd: string,
   timeoutSec: number,
   env: Record<string, string> | undefined,
 ): Promise<void> {
   const child: ChildProcessByStdio<null, ReadableStream, ReadableStream> = spawn(
-    "/usr/bin/node",
-    ["/opt/viate/run-as-bot.mjs", cwd, cmd],
+    launcher.command,
+    [...launcher.baseArgs, cwd, cmd],
     {
       cwd,
       env: { ...process.env, ...env, HOME: "/home/bot", USER: "bot", LOGNAME: "bot" },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  let settle = () => {};
+  const done = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  const kill = () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  };
+  jobs.set(id, { kill, done });
+  let ending = false;
+  const onClientGone = () => {
+    if (!ending) kill();
+  };
+  reply.raw.on("close", onClientGone);
+  reply.hijack();
+  reply.raw.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache",
+    connection: "keep-alive",
+    "x-exec-id": id,
+  });
+  reply.raw.flushHeaders?.();
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -232,12 +285,16 @@ async function streamExec(
     child.on("error", () => resolve(null));
     child.on("close", (exitCode) => resolve(exitCode));
   });
+  settle();
   clearTimeout(timer);
+  ending = true;
+  reply.raw.off("close", onClientGone);
+  jobs.delete(id);
   await Promise.all([stdout, stderr]);
   const event: ExecEvent = {
     type: "exit",
     code,
-    signal: timedOut ? "SIGKILL" : null,
+    signal: timedOut || child.signalCode === "SIGKILL" ? "SIGKILL" : null,
     timedOut,
   };
   writeEvent(reply, event);

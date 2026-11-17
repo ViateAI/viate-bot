@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import type { FsEntry, FsSearchHit } from "@viate-bot/protocol";
-import { fsFailure, listConfined, readConfined, readRaw, searchConfined, writeConfined } from "./fs-ops.js";
+import { deleteConfined, fsFailure, listConfined, readConfined, readRaw, searchConfined, writeConfined } from "./fs-ops.js";
 
 dropToBot();
 
@@ -27,7 +27,7 @@ function dropToBot(): void {
 
 interface Request {
   id: number;
-  op: "read" | "write" | "list" | "search" | "readFile" | "writeFile";
+  op: "read" | "write" | "list" | "search" | "readFile" | "writeFile" | "delete";
   path?: string;
   maxBytes?: number;
   content?: string;
@@ -82,6 +82,9 @@ async function run(request: Request, path: string): Promise<Record<string, unkno
   if (request.op === "readFile") {
     const result = await readRaw(path);
     return { file: result.data.toString("base64") };
+  }
+  if (request.op === "delete") {
+    return { delete: await deleteConfined(path) };
   }
   throw Object.assign(new Error("未知文件操作"), { statusCode: 400 });
 }

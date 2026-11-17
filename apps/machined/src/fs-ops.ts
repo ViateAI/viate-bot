@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { mkdir, open, readdir, stat } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { lstat, mkdir, open, readdir, stat, unlink } from "node:fs/promises";
+import { basename, dirname, join, relative } from "node:path";
 import type { FsEntry, FsSearchHit } from "@viate-bot/protocol";
 import { PathEscapeError, resolveConfined } from "./paths.js";
 
@@ -59,6 +59,24 @@ export async function writeConfined(requested: string, content: Buffer, mode: nu
   } finally {
     await file.close();
   }
+}
+
+/**
+ * 只删普通文件。先看请求路径的最后一段，不让 resolveConfined 把符号链接解析成目标。
+ * 父目录仍走限制检查；最后一段是符号链接或目录时什么都不删。
+ */
+export async function deleteConfined(requested: string): Promise<{ path: string }> {
+  const name = basename(requested);
+  if (name.length === 0 || name === "." || name === "..") {
+    throw Object.assign(new Error("只能删除普通文件"), { statusCode: 400 });
+  }
+  const path = join(resolveConfined(dirname(requested)), name);
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw Object.assign(new Error("只能删除普通文件"), { statusCode: 400 });
+  }
+  await unlink(path);
+  return { path };
 }
 
 export async function listConfined(requested: string): Promise<{ path: string; entries: FsEntry[] }> {
