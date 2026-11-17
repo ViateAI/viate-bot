@@ -990,7 +990,7 @@ describe("task runner", () => {
     const session = createSession(ctx.db, ctx.key, "user-a", "refresh-token", new Date());
     const headers = { cookie: `${SESSION_COOKIE}=${session.token}`, "x-vb-csrf": session.csrf, "content-type": "application/json", origin: config.publicUrl };
     const lease = ctx.db.$client.prepare("select id from takeover_leases where state='requested'").get() as { id: string };
-    const socketId = "abcdefghijklmnop";
+    const socketId = "unconfirmedsock01";
     const viewer = await app.injectWS(`/api/bots/${other.id}/screen/vnc?socket=${socketId}`, { headers: { cookie: headers.cookie, origin: config.publicUrl } });
     const granted = await app.inject({ method: "POST", url: `/api/bots/${other.id}/screen/grant`, headers, payload: { leaseId: lease.id, socketId } });
     expect(granted.statusCode).toBe(409);

@@ -358,7 +358,15 @@ async function createBot(app: FastifyInstance, session: Session, name: string): 
     payload: { name, model: "gpt-test" },
   });
   expect(created.statusCode).toBe(201);
-  return created.json().bot.id as string;
+  const id = created.json().bot.id as string;
+  const allowed = await app.inject({
+    method: "PUT",
+    url: `/api/bots/${id}/approval-settings`,
+    headers: auth(session),
+    payload: { alwaysAllow: ["browser"] },
+  });
+  expect(allowed.statusCode).toBe(200);
+  return id;
 }
 
 async function send(app: FastifyInstance, session: Session, botId: string, text: string): Promise<{ taskId: string; conversationId: string }> {

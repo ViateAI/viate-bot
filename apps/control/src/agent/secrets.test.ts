@@ -129,6 +129,7 @@ describe("secure form", () => {
     );
     const { app, ctx, alice, config } = started;
     const botId = await createBot(app, alice);
+    ctx.db.$client.prepare("update bots set settings_json=? where id=?").run(JSON.stringify({ alwaysAllow: ["browser", "shell", "fs_write"] }), botId);
     const sent = await app.inject({
       method: "POST",
       url: `/api/bots/${botId}/messages`,

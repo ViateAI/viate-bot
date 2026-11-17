@@ -126,6 +126,7 @@ describe("chat http and websocket", () => {
     });
     expect(created.statusCode).toBe(201);
     const botId = created.json().bot.id as string;
+    ctx.db.$client.prepare("update bots set settings_json=? where id=?").run(JSON.stringify({ alwaysAllow: ["shell"] }), botId);
     const sent = await app.inject({
       method: "POST",
       url: `/api/bots/${botId}/messages`,

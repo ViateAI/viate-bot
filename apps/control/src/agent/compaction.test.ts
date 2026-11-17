@@ -132,7 +132,12 @@ describe("context summary", () => {
         res.end(chats <= 2 ? toolSse(6000, 10) : textSse("完成"));
       });
       let tools = 0;
-      const machinePort = await listen((_req, res) => {
+      const machinePort = await listen((req, res) => {
+        if (req.url !== "/exec") {
+          res.writeHead(404);
+          res.end();
+          return;
+        }
         tools += 1;
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.end(execSse(tools === 1 ? "工具结果".repeat(1750) : "末次结果"));
@@ -141,6 +146,7 @@ describe("context summary", () => {
       const first = await appFor(ctx, config, { host: "127.0.0.1", port: machinePort, token: "t" });
       const scope = userScope("user-a");
       const bot = await createBot({ db: ctx.db, key: ctx.key, credentials: first.runtime.credentials, providerId: first.runtime.identity.id }, scope, { name: "Ada", model: "gpt-test" });
+      ctx.db.$client.prepare("update bots set settings_json=? where id=?").run(JSON.stringify({ alwaysAllow: ["shell"] }), bot.id);
       const sent = await first.service.send({ userId: "user-a", botId: bot.id, text: "旧目标", mode: "queue" });
       await firstRequest;
       try {
@@ -251,6 +257,7 @@ describe("context summary", () => {
       scope,
       { name: "Ada", model: "gpt-test" },
     );
+    ctx.db.$client.prepare("update bots set settings_json=? where id=?").run(JSON.stringify({ alwaysAllow: ["shell"] }), bot.id);
     const chat = chatRepository(ctx.db);
     const conversation = chat.insertConversation(scope, { id: ulid(), botId: bot.id, title: "压缩" });
     if (!conversation) throw new Error("no conversation");
