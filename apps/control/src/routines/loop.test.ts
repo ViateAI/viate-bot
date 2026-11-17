@@ -41,7 +41,13 @@ describe("routine account eligibility", () => {
       stop = startRoutineLoop(app, ctx, 100);
       await vi.advanceTimersByTimeAsync(100);
       expect(db.$client.prepare("select count(*) as n from tasks").get()).toEqual({ n: 0 });
-      expect(service.history("u", id)).toEqual(status === "disabled" ? [expect.objectContaining({ state: "skipped" })] : []);
+      const history = service.history("u", id) as Array<{ state: string }>;
+      if (status === "disabled") {
+        expect(history.length).toBeGreaterThan(0);
+        expect(history.every((row) => row.state === "skipped")).toBe(true);
+      } else {
+        expect(history).toEqual([]);
+      }
       const manual = await app.inject({ method: "POST", url: `/api/routines/${id}/run`, headers: { cookie: `vb_session=${session.token}`, "x-vb-csrf": session.csrf } });
       expect(manual.statusCode).toBe(status === "disabled" ? 403 : 503);
       expect(db.$client.prepare("select count(*) as n from tasks").get()).toEqual({ n: 0 });

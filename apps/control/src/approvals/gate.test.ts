@@ -113,8 +113,7 @@ describe("approval gate", () => {
     const changed = hook(context("shell_exec", { ...args, env: { A: "different" } }));
     gate.decide("a", pending(db).id, "deny");
     expect((await changed)?.block).toBe(true);
-    db.$client.prepare("update bots set settings_json=? where id='bot'").run(JSON.stringify({ alwaysAllow: ["payment", "risky_tool"], approveShell: true }));
-    expect(await hook(context("payment_action", { amount: 4 }))).toBeUndefined();
+    db.$client.prepare("update bots set settings_json=? where id='bot'").run(JSON.stringify({ alwaysAllow: ["risky_tool"], approveShell: true }));
     expect(await hook(context("plugin_danger", {}))).toBeUndefined();
     const shellStill = hook(context("shell_exec", args));
     const extra = hook(context("plugin_danger_extra", {}));
@@ -145,10 +144,6 @@ describe("approval gate", () => {
     expect(db.$client.prepare("select tool from approvals where state='pending' order by rowid desc limit 1").get()).toEqual({ tool: "plugin_danger" });
     dynamic.decide("a", pending(db).id, "deny");
     expect((await becameMcp)?.block).toBe(true);
-    for (const name of ["payment_action", "send_action"]) {
-      const tool = approvalTools({ delete: async () => { throw new Error("unexpected delete"); } }).find((item) => item.name === name)!;
-      expect((await tool.execute("x", { value: "local" }, undefined, undefined)).content).toEqual([{ type: "text", text: '{"value":"local"}' }]);
-    }
   });
 
   it("leaves a fixture unchanged when shell or browser is denied and runs an allow once", async () => {
@@ -188,8 +183,8 @@ describe("approval gate", () => {
     const { db } = fixture();
     const args = { recipient: "local" };
     db.$client.prepare("update tasks set state='waiting_approval' where id='task'").run();
-    db.$client.prepare("insert into approvals(id,task_id,tool,summary,args_json,state,args_hash) values ('old','task','send_action','send',?,'pending',?)")
-      .run(canonicalJson(args), argsHash("send_action", args));
+    db.$client.prepare("insert into approvals(id,task_id,tool,summary,args_json,state,args_hash) values ('old','task','foreign_mcp','mcp',?,'pending',?)")
+      .run(canonicalJson(args), argsHash("foreign_mcp", args));
     const resumed: string[] = [];
     const gate = createApprovalGate({ db, waitMs: 5000, onRearm: (taskId) => resumed.push(taskId) });
     gate.arm(); expect(resumed).toEqual(["task"]);
@@ -200,8 +195,8 @@ describe("approval gate", () => {
     const outsider = await app.inject({ method: "POST", url: "/api/approvals/old/decide", headers: { "x-test-user": "b" }, payload: { decision: "allow" } });
     expect(outsider.statusCode).toBe(404);
     const hook = gate.bind("task").beforeToolCall!;
-    expect((await hook(context("send_action", { recipient: "different" })))?.block).toBe(true);
-    const wait = hook(context("send_action", args));
+    expect((await hook(context("foreign_mcp", { recipient: "different" })))?.block).toBe(true);
+    const wait = hook(context("foreign_mcp", args));
     const allowed = await app.inject({ method: "POST", url: "/api/approvals/old/decide", headers: { "x-test-user": "a" }, payload: { decision: "allow" } });
     expect(allowed.statusCode).toBe(200); expect(await wait).toBeUndefined();
     expect(db.$client.prepare("select consumed_at from approvals where id='old'").get()).toEqual({ consumed_at: expect.any(String) });

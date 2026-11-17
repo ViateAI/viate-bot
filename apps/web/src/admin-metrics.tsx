@@ -12,6 +12,14 @@ interface Overview {
   failureClasses: Array<{ errorClass: string; count: number }>;
   activeTrend: Array<{ day: string; count: number }>;
   alerts: Array<{ kind: "machine" | "routine"; target: string }>;
+  routinePunctuality7d: {
+    planned: number;
+    onTime: number;
+    late: number;
+    missed: number;
+    skipped: number;
+    onTimeRate: number | null;
+  };
 }
 
 interface AuditRow {
@@ -29,6 +37,8 @@ export function AdminMetrics() {
   });
   const data = overview.data;
   const rate = data && data.tasksToday > 0 ? Math.round((data.tasksSucceededToday / data.tasksToday) * 100) : 0;
+  const punctual = data?.routinePunctuality7d;
+  const punctualRate = punctual?.onTimeRate == null ? "—" : `${(punctual.onTimeRate * 100).toFixed(1)}%`;
   return (
     <section className="grid gap-6">
       <h2 className="text-lg">运维总览</h2>
@@ -44,6 +54,20 @@ export function AdminMetrics() {
             <Stat label="今日成功率" value={`${rate}%`} />
             <Stat label="今日费用" value={data.costUsdToday.toFixed(4)} />
           </dl>
+          {punctual ? (
+            <div data-testid="routine-punctuality">
+              <h3 className="mb-2 text-sm text-neutral-400">定时任务按时率（近 7 天）</h3>
+              <dl className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
+                <Stat label="按时率" value={punctualRate} />
+                <Stat label="计划次数" value={String(punctual.planned)} />
+                <Stat label="按时" value={String(punctual.onTime)} />
+                <Stat label="迟到" value={String(punctual.late)} />
+                <Stat label="错过" value={String(punctual.missed)} />
+                <Stat label="跳过" value={String(punctual.skipped)} />
+              </dl>
+              <p className="mt-2 text-xs text-neutral-500">计划时刻后 2 分钟内开始算按时。跳过不计入按时率。控制面停机错过的次数记在「错过」。</p>
+            </div>
+          ) : null}
           <div>
             <h3 className="mb-2 text-sm text-neutral-400">资源异常</h3>
             <ul className="grid gap-1 text-sm">

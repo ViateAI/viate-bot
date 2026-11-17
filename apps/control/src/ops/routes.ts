@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { authenticated } from "../auth.js";
 import type { AppDatabase } from "../db/index.js";
+import { adminScope } from "../scope.js";
 import { adminOverview, authorizeMetrics, metricsSnapshot, renderMetrics } from "./report.js";
 
 export function registerOpsRoutes(
@@ -16,8 +17,9 @@ export function registerOpsRoutes(
   });
 
   app.get("/api/admin/overview", async (request, reply) => {
-    if (!authenticated.get(request)?.user.isAdmin) return reply.code(404).send({ error: "\u627e\u4e0d\u5230" });
-    return adminOverview(deps.db, deps.now());
+    const auth = authenticated.get(request);
+    if (!auth?.user.isAdmin) return reply.code(404).send({ error: "\u627e\u4e0d\u5230" });
+    return adminOverview(deps.db, deps.now(), adminScope(auth.user.id));
   });
 }
 

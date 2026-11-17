@@ -1,8 +1,10 @@
 import { timingSafeEqual } from "node:crypto";
 import { and, eq, gte, sql } from "drizzle-orm";
 import type { AppDatabase } from "../db/index.js";
+import { routineRunRepository, type RoutinePunctuality } from "../db/routines.js";
 import { events, machines, quotas, tasks, usageHourly } from "../db/schema.js";
 import { M2_EVENTS } from "../m2/events.js";
+import { schedulerScope, type AdminScope } from "../scope.js";
 
 export function authorizeMetrics(header: string | undefined, token: string): boolean {
   if (token.length === 0 || header === undefined) return false;
@@ -46,9 +48,10 @@ export interface Overview {
   failureClasses: Array<{ errorClass: string; count: number }>;
   activeTrend: Array<{ day: string; count: number }>;
   alerts: Array<{ kind: "machine" | "routine"; target: string }>;
+  routinePunctuality7d: RoutinePunctuality;
 }
 
-export function adminOverview(db: AppDatabase, now: Date): Overview {
+export function adminOverview(db: AppDatabase, now: Date, scope: AdminScope = schedulerScope): Overview {
   const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
   const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
   const provisioned = db.select({ n: sql<number>`count(*)` }).from(quotas).get();
@@ -90,6 +93,7 @@ export function adminOverview(db: AppDatabase, now: Date): Overview {
       ...anomalies.map((item) => ({ kind: "machine" as const, target: item.machineId })),
       ...routineAlerts(db, dayAgo),
     ],
+    routinePunctuality7d: routineRunRepository(db).punctuality(scope, now),
   };
 }
 

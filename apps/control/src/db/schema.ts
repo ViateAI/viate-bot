@@ -252,6 +252,8 @@ export const routineRuns = sqliteTable("routine_runs", {
   scheduledAt: text("scheduled_at").notNull(),
   state: text("state").notNull(),
   error: text("error"),
+  /** schedule：调度产生；manual：用户手动运行，不进入按时率。 */
+  source: text("source").notNull().default("schedule"),
 });
 
 export const secrets = sqliteTable("secrets", {
