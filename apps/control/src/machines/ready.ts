@@ -15,6 +15,8 @@ export interface MachineHost {
   db: AppDatabase;
   driver: DockerDriver;
   key: Buffer;
+  /** 机器健康后按容器身份重装期望仍在的应用。失败不得让就绪变成机器重启。 */
+  reconcileApps?: (input: { userId: string; machineId: string; containerId: string; force?: boolean }) => Promise<void>;
 }
 
 /** 该用户第一台机器在创建 bot 时建好，先停着。之后的 bot 直接复用。 */
@@ -69,6 +71,10 @@ export async function prepareMachineEndpoint(
         });
         if (response.ok) {
           onPhase("ready");
+          const current = store.find(scope) ?? record;
+          if (ctx.reconcileApps && current.containerId) {
+            await ctx.reconcileApps({ userId, machineId: current.id, containerId: current.containerId });
+          }
           return { host, port: MACHINED_PORT, token };
         }
       } catch {

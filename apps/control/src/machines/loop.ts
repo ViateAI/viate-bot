@@ -26,6 +26,13 @@ export interface ReconcileDeps {
   idleStopMinutes: number;
   key: Buffer;
   now?: () => Date;
+  /** 测试替换健康检查。缺省打 machined /health。 */
+  ping?: (record: MachineRecord) => Promise<boolean>;
+  /**
+   * 容器身份变化且健康后重装 desired=present。
+   * 抛错只记应用失败，不得因此重启或把机器打成 error。
+   */
+  reconcileApps?: (input: { userId: string; machineId: string; containerId: string; force?: boolean }) => Promise<void>;
 }
 
 /** 容器刚启动时 machined 可能还没监听。这段时间内的心跳失败不触发重启。 */
@@ -38,6 +45,8 @@ interface MachineRuntime {
   idleSince: Date | null;
   /** 此时间之前不计心跳失败。null 表示还没观察到这次启动。 */
   healthyAfter: Date | null;
+  /** 已经对过账的容器。失败也记在这里，避免安装失败把机器重启循环打满。 */
+  reconciledContainerId: string | null;
 }
 
 const runtime = new Map<string, MachineRuntime>();
@@ -51,6 +60,7 @@ function runtimeOf(userId: string): MachineRuntime {
     stopRequestedAt: null,
     idleSince: null,
     healthyAfter: null,
+    reconciledContainerId: null,
   };
   runtime.set(userId, created);
   return created;
@@ -138,10 +148,19 @@ function nextDesired(
 }
 
 async function observeHeartbeat(deps: ReconcileDeps, record: MachineRecord, state: MachineRuntime): Promise<void> {
-  const healthy = await ping(deps, record);
+  const healthy = deps.ping ? await deps.ping(record) : await ping(deps, record);
   if (healthy) {
     state.heartbeatFailures = 0;
     state.restartFailures = 0;
+    const containerId = record.containerId;
+    if (deps.reconcileApps && containerId && state.reconciledContainerId !== containerId) {
+      state.reconciledContainerId = containerId;
+      try {
+        await deps.reconcileApps({ userId: record.userId, machineId: record.id, containerId });
+      } catch (error) {
+        console.error("应用对账失败", error instanceof Error ? error.message : "unknown");
+      }
+    }
     return;
   }
   state.heartbeatFailures += 1;

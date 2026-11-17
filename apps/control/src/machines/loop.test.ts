@@ -142,6 +142,50 @@ describe("reconcile orchestration", () => {
     expect(starts).toHaveLength(3);
   });
 
+  it("records an app reconcile failure once and does not restart the machine", async () => {
+    const rows = [machine("app-user", "running")];
+    const calls: string[] = [];
+    let nowMs = 0;
+    const deps = {
+      driver: {
+        actualState: async () => "running" as const,
+        inspect: async () => ({ NetworkSettings: { Networks: {} } }),
+        create: async () => {
+          throw new Error("不应创建");
+        },
+        start: async () => {
+          throw new Error("不应重启");
+        },
+        stop: async () => {
+          throw new Error("不应停止");
+        },
+        delete: async () => {
+          throw new Error("不应删除");
+        },
+      },
+      store: memory(rows),
+      admin: adminScope("scheduler"),
+      probe: idle,
+      idleStopMinutes: 10_000,
+      key,
+      now: () => new Date(nowMs),
+      ping: async () => true,
+      reconcileApps: async (input: { containerId: string }) => {
+        calls.push(input.containerId);
+        throw new Error("install failed");
+      },
+    };
+    await reconcileOnce(deps);
+    expect(calls).toEqual([]);
+    nowMs += 60_000;
+    await reconcileOnce(deps);
+    await reconcileOnce(deps);
+    rows[0]!.containerId = "c-next";
+    await reconcileOnce(deps);
+    expect(calls).toEqual(["c-app-user", "c-next"]);
+    expect(rows[0]?.state).toBe("running");
+  });
+
   it("starts the stop wait at zero even when a task is active", async () => {
     const rows = [machine("stop-user", "stopped")];
     const stops: string[] = [];
