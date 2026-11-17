@@ -39,8 +39,6 @@ export function registerApprovalRoutes(app: FastifyInstance, deps: { db: AppData
     if (!bot) return reply.code(404).send({ error: "找不到 bot" });
     const body = request.body as { alwaysAllow?: unknown } | null;
     const allowed: Record<string, true> = {
-      payment: true,
-      send: true,
       bulk_delete: true,
       shell: true,
       browser: true,

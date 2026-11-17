@@ -58,7 +58,13 @@ describe("routines", () => {
     expect(usersToWake(db, start)).toEqual(["u"]);
     expect(hasRoutineSoon(db, "u", start)).toBe(true);
     const [work] = await claimDue(db, later, active);
-    expect(work).toMatchObject({ routineId: id, scheduledAt: "2025-01-01T00:05:00.000Z", missedCount: 5 });
+    expect(work).toMatchObject({ routineId: id, scheduledAt: "2025-01-01T00:05:00.000Z", missedCount: 4 });
+    expect(db.$client.prepare("select scheduled_at as scheduledAt from routine_runs where state='missed' order by scheduled_at").all()).toEqual([
+      { scheduledAt: "2025-01-01T00:01:00.000Z" },
+      { scheduledAt: "2025-01-01T00:02:00.000Z" },
+      { scheduledAt: "2025-01-01T00:03:00.000Z" },
+      { scheduledAt: "2025-01-01T00:04:00.000Z" },
+    ]);
     expect((await claimDue(db, later, active))[0]?.runId).toBe(work!.runId);
     expect(() => db.$client.prepare("insert into routine_runs (id,routine_id,scheduled_at,state) values ('duplicate',?,?,'claimed')").run(id, work!.scheduledAt)).toThrow(/UNIQUE/);
     db.$client.prepare("insert into tasks (id,bot_id,state,trigger) values ('task','b','running','routine')").run();
@@ -78,7 +84,10 @@ describe("routines", () => {
     const manual = service.manual("u", id, new Date("2025-01-01T00:09:00Z"));
     service.remove("u", id);
     expect(await claimDue(db, new Date("2025-01-01T00:12:00Z"), active)).toEqual([]);
-    expect(service.history("u", id)).toHaveLength(3);
+    const history = service.history("u", id) as Array<{ state: string }>;
+    expect(history.filter((row) => row.state === "missed")).toHaveLength(4);
+    expect(history.filter((row) => row.state === "skipped")).toHaveLength(3);
+    expect(history.filter((row) => row.state === "claimed")).toHaveLength(2);
     expect(manual.routineId).toBe(id);
     notifyTaskSettled(db, { userId: "u", botId: "b", taskId: "task", outcome: "succeeded" });
     expect(JSON.stringify(db.$client.prepare("select * from notifications").all())).not.toContain("private prompt");

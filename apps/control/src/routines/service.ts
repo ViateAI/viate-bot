@@ -2,9 +2,11 @@ import type { AppDatabase } from "../db/index.js";
 import { chatRepository } from "../db/chat.js";
 import { emitOps, opsMinutes } from "../ops/rollup.js";
 import { auditRepository } from "../db/audit.js";
+import { settingsRepository } from "../db/settings.js";
 import { ulid } from "../id.js";
 import { AUDIT_ACTIONS, M2_EVENTS } from "../m2/events.js";
 import { adminScope } from "../scope.js";
+import { ROUTINE_LOOP_SEEN_KEY, ROUTINE_ON_TIME_MS, slotCoveredByLoop } from "./punctuality.js";
 import { nextCron, parseCron } from "./cron.js";
 
 type Routine = { id: string; botId: string; userId: string; cron: string; timezone: string; prompt: string; enabled: number; state: string; nextRunAt: string | null; createdAt: string };
@@ -68,7 +70,7 @@ export function routineService(db: AppDatabase) {
       if (!row || row.state !== "active") throw new RoutineError("找不到定时任务", 404);
       const scheduledAt = now.toISOString();
       const runId = ulid();
-      try { sql.prepare("insert into routine_runs (id,routine_id,scheduled_at,state) values (?,?,?,'claimed')").run(runId, id, scheduledAt); }
+      try { sql.prepare("insert into routine_runs (id,routine_id,scheduled_at,state,source) values (?,?,?,'claimed','manual')").run(runId, id, scheduledAt); }
       catch (error) { if (error instanceof Error && error.message.includes("UNIQUE")) throw new RoutineError("该时间已触发", 409); throw error; }
       return { routineId: id, runId, botId: row.botId, userId, prompt: row.prompt, scheduledAt, missedCount: 1 };
     },
@@ -81,6 +83,9 @@ export function routineService(db: AppDatabase) {
 export async function claimDue(db: AppDatabase, now: Date, deps: RoutineDeps): Promise<RoutineWork[]> {
   const sql = db.$client;
   sql.prepare("update routine_runs set task_id=(select t.id from tasks t where t.routine_run_id=routine_runs.id limit 1) where state='claimed' and task_id is null and exists(select 1 from tasks t where t.routine_run_id=routine_runs.id)").run();
+  const seenAt = readLoopSeen(db);
+  const insertRun = sql.prepare("insert into routine_runs (id,routine_id,scheduled_at,state,error,source) values (?,?,?,?,?,'schedule') on conflict(routine_id,scheduled_at) do nothing");
+  const advance = sql.prepare("update routines set next_run_at=? where id=? and state='active' and enabled=1 and next_run_at=?");
   const busy = deps.systemBotBusy ?? ((botId: string) => chatRepository(db).systemBotBusy(botId));
   const pending = sql.prepare(`${selection} where r.state='active' and (exists(select 1 from routine_runs rr where rr.routine_id=r.id and rr.state='claimed' and rr.task_id is null) or (r.enabled=1 and r.next_run_at<=?)) and b.deleted_at is null`).all(now.toISOString()) as Routine[];
   const work: RoutineWork[] = [];
@@ -88,8 +93,11 @@ export async function claimDue(db: AppDatabase, now: Date, deps: RoutineDeps): P
   for (const row of pending) {
     if (reserved.has(row.botId) || busy(row.botId)) continue;
     let status: string;
-    try { status = await deps.userStatus(row.userId); } catch { continue; }
-    if (status !== "active" && status !== "disabled") continue;
+    try { status = await deps.userStatus(row.userId); } catch { status = "unknown"; }
+    if (status !== "active" && status !== "disabled") {
+      closeUncovered(sql, insertRun, advance, row, now, seenAt);
+      continue;
+    }
     const outstanding = sql.prepare("select id,scheduled_at as scheduledAt from routine_runs where routine_id=? and state='claimed' and task_id is null order by scheduled_at limit 1").get(row.id) as { id: string; scheduledAt: string } | undefined;
     if (outstanding) {
       if (status === "disabled") {
@@ -102,25 +110,83 @@ export async function claimDue(db: AppDatabase, now: Date, deps: RoutineDeps): P
       continue;
     }
     if (!row.enabled || !row.nextRunAt || row.nextRunAt > now.toISOString()) continue;
-    const matches = parseCron(row.cron, row.timezone);
-    let cursor = new Date(row.nextRunAt).getTime();
-    let latest = cursor;
-    let missedCount = 1;
-    const end = now.getTime();
-    while ((cursor += 60_000) <= end) if (matches(new Date(cursor))) { latest = cursor; missedCount++; }
+    const slots = dueSlots(row.cron, row.timezone, row.nextRunAt, now);
+    if (slots.length === 0 || !row.nextRunAt) continue;
+    const latest = slots[slots.length - 1]!;
     const next = nextCron(row.cron, row.timezone, new Date(latest)).toISOString();
+    if (status === "disabled") {
+      const runId = ulid();
+      const saved = sql.transaction(() => {
+        if (advance.run(next, row.id, row.nextRunAt).changes !== 1) return false;
+        for (const slot of slots) insertRun.run(slot === latest ? runId : ulid(), row.id, slot, "skipped", "用户已停用");
+        return true;
+      })();
+      if (saved) emitOps(db, opsMinutes, { id: ulid(), ts: now.toISOString(), userId: row.userId, botId: row.botId, type: M2_EVENTS.routineSkipped, attrs: { routineId: row.id, runId } });
+      continue;
+    }
+    const earlier = slots.slice(0, -1);
     const runId = ulid();
-    const scheduledAt = new Date(latest).toISOString();
     const inserted = sql.transaction(() => {
-      const changed = sql.prepare("update routines set next_run_at=? where id=? and state='active' and enabled=1 and next_run_at=?").run(next, row.id, row.nextRunAt).changes;
-      if (!changed) return false;
-      return sql.prepare("insert into routine_runs (id,routine_id,scheduled_at,state,error) values (?,?,?,?,?) on conflict(routine_id,scheduled_at) do nothing").run(runId, row.id, scheduledAt, status === "disabled" ? "skipped" : "claimed", status === "disabled" ? "用户已停用" : null).changes === 1;
+      if (advance.run(next, row.id, row.nextRunAt).changes !== 1) return false;
+      for (const slot of earlier) insertRun.run(ulid(), row.id, slot, "missed", null);
+      return insertRun.run(runId, row.id, latest, "claimed", null).changes === 1;
     })();
     if (!inserted) continue;
-    emitOps(db, opsMinutes, { id: ulid(), ts: now.toISOString(), userId: row.userId, botId: row.botId, type: status === "disabled" ? M2_EVENTS.routineSkipped : M2_EVENTS.routineFired, attrs: { routineId: row.id, runId, missedCount } });
-    if (status === "active") { reserved.add(row.botId); work.push({ routineId: row.id, runId, botId: row.botId, userId: row.userId, prompt: row.prompt, scheduledAt, missedCount }); }
+    emitOps(db, opsMinutes, { id: ulid(), ts: now.toISOString(), userId: row.userId, botId: row.botId, type: M2_EVENTS.routineFired, attrs: { routineId: row.id, runId, missedCount: earlier.length } });
+    reserved.add(row.botId);
+    work.push({ routineId: row.id, runId, botId: row.botId, userId: row.userId, prompt: row.prompt, scheduledAt: latest, missedCount: earlier.length });
   }
+  settingsRepository(db).setJson(ROUTINE_LOOP_SEEN_KEY, now.toISOString());
   return work;
+}
+
+function readLoopSeen(db: AppDatabase): number | null {
+  const value = settingsRepository(db).getJson(ROUTINE_LOOP_SEEN_KEY);
+  if (typeof value !== "string") return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function dueSlots(cron: string, timezone: string, nextRunAt: string, now: Date): string[] {
+  const matches = parseCron(cron, timezone);
+  const slots: string[] = [];
+  let cursor = new Date(nextRunAt).getTime();
+  const end = now.getTime();
+  if (Number.isNaN(cursor) || cursor > end) return slots;
+  slots.push(new Date(cursor).toISOString());
+  while ((cursor += 60_000) <= end) if (matches(new Date(cursor))) slots.push(new Date(cursor).toISOString());
+  return slots;
+}
+
+function closeUncovered(
+  sql: AppDatabase["$client"],
+  insertRun: { run: (...args: unknown[]) => { changes: number } },
+  advance: { run: (...args: unknown[]) => { changes: number } },
+  row: Routine,
+  now: Date,
+  seenAt: number | null,
+): void {
+  const outstanding = sql.prepare("select id, scheduled_at as scheduledAt from routine_runs where routine_id=? and state='claimed' and task_id is null order by scheduled_at limit 1").get(row.id) as { id: string; scheduledAt: string } | undefined;
+  if (outstanding) {
+    const scheduledMs = Date.parse(outstanding.scheduledAt);
+    if (scheduledMs + ROUTINE_ON_TIME_MS < now.getTime()) {
+      const covered = slotCoveredByLoop(seenAt, scheduledMs);
+      sql.prepare("update routine_runs set state=?, error=? where id=? and task_id is null").run(covered ? "skipped" : "missed", covered ? "上游不可用" : null, outstanding.id);
+    }
+  }
+  if (!row.enabled || !row.nextRunAt || row.nextRunAt > now.toISOString()) return;
+  const slots = dueSlots(row.cron, row.timezone, row.nextRunAt, now);
+  const openAt = slots.findIndex((slot) => Date.parse(slot) + ROUTINE_ON_TIME_MS >= now.getTime());
+  const closed = openAt === -1 ? slots : slots.slice(0, openAt);
+  if (closed.length === 0) return;
+  const resume = openAt === -1 ? nextCron(row.cron, row.timezone, new Date(closed[closed.length - 1]!)).toISOString() : slots[openAt]!;
+  sql.transaction(() => {
+    if (advance.run(resume, row.id, row.nextRunAt).changes !== 1) return;
+    for (const slot of closed) {
+      const covered = slotCoveredByLoop(seenAt, Date.parse(slot));
+      insertRun.run(ulid(), row.id, slot, covered ? "skipped" : "missed", covered ? "上游不可用" : null);
+    }
+  })();
 }
 
 export function usersToWake(db: AppDatabase, now: Date): string[] {

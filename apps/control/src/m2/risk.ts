@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
-/** 具名动作。不表示 shell 或浏览器可以按命令文本判断。 */
-export const RISK_CLASSES = ["payment", "send", "bulk_delete"] as const;
+/** 具名动作。只留会真正改文件的批量删除。不按命令文本猜付款或发送。 */
+export const RISK_CLASSES = ["bulk_delete"] as const;
 export type RiskClass = (typeof RISK_CLASSES)[number];
 
 /** 默认要审批的执行类。用户每 bot 显式写进 alwaysAllow 才关掉，缺省为空。 */
@@ -10,8 +10,6 @@ export type ExecClass = (typeof EXEC_CLASSES)[number];
 export type AlwaysAllow = RiskClass | ExecClass;
 
 export const GATED_TOOLS: Record<string, RiskClass> = {
-  payment_action: "payment",
-  send_action: "send",
   bulk_delete_action: "bulk_delete",
 };
 
@@ -60,8 +58,6 @@ export interface BotRuntimeSettings {
 }
 
 const ALWAYS: Record<string, true> = {
-  payment: true,
-  send: true,
   bulk_delete: true,
   shell: true,
   browser: true,
