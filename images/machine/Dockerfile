@@ -51,7 +51,8 @@ COPY chromium.sh /opt/viate/chromium.sh
 COPY xvfb.sh /opt/viate/xvfb.sh
 COPY supervisord.conf /etc/supervisor/conf.d/viate.conf
 RUN chmod 755 /opt/viate/machined.mjs /opt/viate/fs-worker.mjs /opt/viate/run-as-bot.mjs /opt/viate/chromium.sh /opt/viate/xvfb.sh \
-    && chown root:root /opt/viate/machined.mjs /opt/viate/fs-worker.mjs /opt/viate/run-as-bot.mjs /opt/viate/chromium.sh /opt/viate/xvfb.sh
+    && chown root:root /opt/viate/machined.mjs /opt/viate/fs-worker.mjs /opt/viate/run-as-bot.mjs /opt/viate/chromium.sh /opt/viate/xvfb.sh \
+    && sed -i 's/\r$//' /opt/viate/chromium.sh /opt/viate/xvfb.sh
 
 EXPOSE 7070
 

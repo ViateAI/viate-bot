@@ -1,0 +1,5 @@
+# Linux shebangs break when Git's autocrlf checks these out as CRLF.
+*.sh text eol=lf
+deploy/rancher-desktop/vb-firewall.start text eol=lf
+images/machine/Dockerfile text eol=lf
+images/machine/supervisord.conf text eol=lf
