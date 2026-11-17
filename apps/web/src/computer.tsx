@@ -51,16 +51,16 @@ export function Computer({ botId }: { botId: string }) {
       setError("");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "操作失败"); }
   };
-  return <section className="space-y-3">
+  return <section className="space-y-3 text-neutral-800">
     <div className="flex items-center gap-3">
-      <button type="button" disabled={!lease || lease.state !== "requested"} onClick={() => void change("grant")} className="rounded bg-blue-600 px-3 py-2 text-white disabled:opacity-40">接管</button>
-      <button type="button" disabled={!lease?.controlledHere} onClick={() => void change("release")} className="rounded border px-3 py-2 disabled:opacity-40">交还</button>
-      <span className="text-sm text-gray-500">{lease?.controlledHere ? "正在接管，可以输入" : "只读观察"}</span>
+      <button type="button" disabled={!lease || lease.state !== "requested"} onClick={() => void change("grant")} className="rounded-full bg-neutral-900 px-3 py-2 text-sm text-white disabled:opacity-40">接管</button>
+      <button type="button" disabled={!lease?.controlledHere} onClick={() => void change("release")} className="rounded-full border border-neutral-300 px-3 py-2 text-sm disabled:opacity-40">交还</button>
+      <span className="text-sm text-neutral-500">{lease?.controlledHere ? "正在接管，可以输入" : "只读观察"}</span>
     </div>
-    <p className="text-sm text-neutral-400">
+    <p className="text-xs leading-5 text-neutral-500">
       你的各个 bot 共用这一块桌面和同一个浏览器。切换 bot 不会换成另一块屏幕，也不是安全边界。现在只能看；接管生效后才能输入。别的用户和管理员看不到这块屏幕。
     </p>
     {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
-    <div ref={target} className="h-80 overflow-hidden rounded bg-black" />
+    <div ref={target} className="h-56 overflow-hidden rounded-xl bg-black" />
   </section>;
 }

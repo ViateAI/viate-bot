@@ -297,4 +297,63 @@ describe("model gateway", () => {
     expect(message.content).toEqual([{ type: "text", text: "响应" }]);
     db.$client.close();
   });
+
+  it("omits an aborted assistant turn that has no text and no tool call", async () => {
+    const db = database();
+    let body = "";
+    const tasks = new Map([["task-1", task()]]);
+    const config = loadConfig({ VB_MODEL_BASE_URL: "http://model.test/v1" });
+    const gateway = createGateway({
+      db,
+      config,
+      tasks,
+      retryDelays: [0, 0],
+      fetch: async (_input, init) => {
+        body = String(init?.body);
+        return textSse("继续");
+      },
+    });
+    const usage = {
+      input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+    const called: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call-1", name: "shell_exec", arguments: { cmd: "true" } }],
+      api: "openai-completions", provider: "viate-bot", model: "gpt-test",
+      usage, stopReason: "toolUse", timestamp: 1,
+    };
+    const aborted: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "" }],
+      api: "openai-completions", provider: "viate-bot", model: "gpt-test",
+      usage, stopReason: "aborted", timestamp: 3, errorMessage: "已停止",
+    };
+    await finish(gateway(buildModel(config, "gpt-test"), {
+      messages: [
+        called,
+        { role: "toolResult", toolCallId: "call-1", toolName: "shell_exec", content: [{ type: "text", text: "Operation aborted" }], isError: true, timestamp: 2 },
+        aborted,
+        { role: "user", content: "继续", timestamp: 4 },
+      ],
+    }, { sessionId: "task-1" }));
+    const parsed: unknown = JSON.parse(body);
+    if (!parsed || typeof parsed !== "object" || !("messages" in parsed) || !Array.isArray(parsed.messages)) {
+      throw new Error("请求里没有 messages");
+    }
+    const messages = parsed.messages.flatMap((item) => {
+      if (!item || typeof item !== "object" || !("role" in item) || !("content" in item)) return [];
+      const role = item.role;
+      const content = item.content;
+      if (typeof role !== "string" || (content !== null && typeof content !== "string")) return [];
+      const toolCalls = "tool_calls" in item && Array.isArray(item.tool_calls) ? item.tool_calls : undefined;
+      return [{ role, content, tool_calls: toolCalls }];
+    });
+    expect(messages.filter((item) => item.role === "assistant")).toEqual([
+      expect.objectContaining({ content: null, tool_calls: [expect.objectContaining({ id: "call-1" })] }),
+    ]);
+    expect(messages.some((item) => item.role === "assistant" && item.content === null && item.tool_calls === undefined)).toBe(false);
+    expect(messages.some((item) => item.role === "user" && item.content === "继续")).toBe(true);
+    db.$client.close();
+  });
 });

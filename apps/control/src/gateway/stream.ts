@@ -249,6 +249,8 @@ function toChatMessages(system: string, messages: ConversationMessage[], model: 
         .map((block) => block.text)
         .join("");
       const calls = message.content.filter((block) => block.type === "toolCall");
+      // 中断留下的空回复没有正文，也没有工具调用。content 写成 null 后，网关会拒掉之后每一次请求。
+      if (text.length === 0 && calls.length === 0) continue;
       const item: Record<string, unknown> = { role: "assistant", content: text.length > 0 ? text : null };
       if (calls.length > 0) {
         item.tool_calls = calls.map((call) => ({

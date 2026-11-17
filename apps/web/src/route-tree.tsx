@@ -1,12 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { createRootRoute, createRoute, Link, Outlet } from "@tanstack/react-router";
+import { createRootRoute, createRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { AdminApps } from "./admin-apps.js";
 import { AdminLayout, AdminMachines, AdminSettings, AdminTemplates, AdminUsers } from "./admin.js";
 import { AppsPage } from "./apps-page.js";
 import { AdminAudit, AdminMetrics } from "./admin-metrics.js";
 import { Approvals } from "./approval.js";
 import { api, rememberCsrf, type Me } from "./api.js";
-import { BotList } from "./bots.js";
+import { BotSidebar } from "./bots.js";
 import { ChatPage } from "./chat.js";
 
 const rootRoute = createRootRoute({
@@ -16,7 +16,13 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: BotList,
+  component: function Home() {
+    return (
+      <div className="flex min-w-0 flex-1 items-center justify-center px-8 text-sm text-neutral-500">
+        从左侧选择一个 bot
+      </div>
+    );
+  },
 });
 
 const chatRoute = createRoute({
@@ -106,6 +112,7 @@ export const routeTree = rootRoute.addChildren([
 
 function Shell() {
   const queryClient = useQueryClient();
+  const { workspace, botId } = useWorkspace();
   const me = useQuery({
     queryKey: ["me"],
     retry: false,
@@ -122,13 +129,26 @@ function Shell() {
     window.location.assign("/auth/login");
   }
 
+  if (workspace && me.data) {
+    return (
+      <main className="flex h-dvh overflow-hidden bg-[#f5f5f5] text-neutral-900" style={{ colorScheme: "light" }}>
+        <BotSidebar activeId={botId} onLogout={() => void logout()} />
+        <div className={`${botId ? "flex" : "hidden md:flex"} min-h-0 min-w-0 flex-1`}>
+          <Outlet />
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100">
       <header className="flex items-center justify-between border-b border-neutral-800 px-6 py-3 text-sm">
         <span className="flex items-center gap-4">
-          viate-bot
+          <Link to="/" className="font-medium text-neutral-100">
+            viate-bot
+          </Link>
           <Link to="/approvals" className="text-neutral-300">
-            审批
+            批准
           </Link>
           <Link to="/apps" className="text-neutral-300">
             应用
@@ -150,4 +170,18 @@ function Shell() {
       {me.data ? <Outlet /> : null}
     </main>
   );
+}
+
+function useWorkspace(): { workspace: boolean; botId?: string | undefined } {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const botMatch = /^\/b\/([^/]+)$/.exec(pathname);
+  let botId: string | undefined;
+  if (botMatch?.[1]) {
+    try {
+      botId = decodeURIComponent(botMatch[1]);
+    } catch {
+      botId = botMatch[1];
+    }
+  }
+  return { workspace: pathname === "/" || Boolean(botId), botId };
 }

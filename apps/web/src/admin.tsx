@@ -52,17 +52,32 @@ export function AdminLayout() {
   if (!me.data?.isAdmin) return <p data-testid="not-found" className="px-6 py-10">404 页面不存在</p>;
   return (
     <section>
-      <nav className="flex gap-4 border-b border-neutral-800 px-6 py-3 text-sm">
-        <Link to="/admin" data-testid="admin-users-link">用户</Link>
-        <Link to="/admin/machines" data-testid="admin-machines-link">机器</Link>
-        <Link to="/admin/templates" data-testid="admin-templates-link">模板</Link>
-        <Link to="/admin/settings" data-testid="admin-settings-link">设置</Link>
-        <Link to="/admin/metrics" data-testid="admin-metrics-link">看板</Link>
-        <Link to="/admin/audit" data-testid="admin-audit-link">审计</Link>
-        <Link to="/admin/apps" data-testid="admin-apps-link">应用</Link>
+      <nav className="flex gap-1 border-b border-neutral-800 px-4 text-sm" aria-label="管理">
+        <AdminTab to="/admin" testId="admin-users-link">用户</AdminTab>
+        <AdminTab to="/admin/machines" testId="admin-machines-link">机器</AdminTab>
+        <AdminTab to="/admin/templates" testId="admin-templates-link">模板</AdminTab>
+        <AdminTab to="/admin/settings" testId="admin-settings-link">设置</AdminTab>
+        <AdminTab to="/admin/metrics" testId="admin-metrics-link">看板</AdminTab>
+        <AdminTab to="/admin/audit" testId="admin-audit-link">审计</AdminTab>
+        <AdminTab to="/admin/apps" testId="admin-apps-link">应用</AdminTab>
       </nav>
       <Outlet />
     </section>
+  );
+}
+
+function AdminTab({ to, testId, children }: { to: "/admin" | "/admin/machines" | "/admin/templates" | "/admin/settings" | "/admin/metrics" | "/admin/audit" | "/admin/apps"; testId: string; children: string }) {
+  return (
+    <Link
+      to={to}
+      data-testid={testId}
+      className="-mb-px border-b-2 px-3 py-3"
+      activeOptions={{ exact: true, includeSearch: false }}
+      activeProps={{ className: "border-white font-medium text-white" }}
+      inactiveProps={{ className: "border-transparent text-neutral-400" }}
+    >
+      {children}
+    </Link>
   );
 }
 
