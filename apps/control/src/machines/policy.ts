@@ -21,6 +21,7 @@ export interface MachineCreateInput {
   image: string;
   token: string;
   spec: MachineSpec;
+  dns?: readonly string[];
 }
 
 export class MachinePolicyError extends Error {
@@ -98,8 +99,11 @@ type HostConfig = NonNullable<ContainerCreateOptions["HostConfig"]> & {
 };
 
 /** 第 6.4 节的硬性规则。只接受白名单里的容器形态，创建之前必须调用。 */
-export function assertMachinePolicy(userId: string, options: ContainerCreateOptions): void {
+export function assertMachinePolicy(userId: string, options: ContainerCreateOptions, dns: readonly string[] = []): void {
   const host: HostConfig = options.HostConfig ?? {};
+  if ((host.Dns !== undefined && !Array.isArray(host.Dns)) || (host.Dns?.length ?? 0) !== dns.length || dns.some((address, index) => host.Dns?.[index] !== address)) {
+    throw new MachinePolicyError("DNS 必须等于 VB_MACHINE_DNS 配置");
+  }
   const binds = stringList(host.Binds, "Binds");
   if (binds.length > 0) throw new MachinePolicyError("Binds 必须为空");
   if (options.Volumes && Object.keys(options.Volumes).length > 0) {
@@ -172,6 +176,7 @@ export function buildCreateOptions(input: MachineCreateInput): ContainerCreateOp
       "vb.image": input.image,
     },
     HostConfig: {
+      ...(input.dns?.length ? { Dns: [...input.dns] } : {}),
       Binds: [],
       Mounts: [
         {
@@ -198,7 +203,7 @@ export function buildCreateOptions(input: MachineCreateInput): ContainerCreateOp
       RestartPolicy: { Name: "unless-stopped" },
     },
   };
-  assertMachinePolicy(input.userId, options);
+  assertMachinePolicy(input.userId, options, input.dns);
   return options;
 }
 

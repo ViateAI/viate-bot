@@ -68,6 +68,7 @@ exec "$CHROME" \
   --no-default-browser-check \
   --disable-sync \
   --proxy-server=http://127.0.0.1:3128 \
+  '--proxy-bypass-list=<-loopback>' \
   --disable-quic \
   --force-webrtc-ip-handling-policy=disable_non_proxied_udp \
   about:blank

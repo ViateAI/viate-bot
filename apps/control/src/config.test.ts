@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import { loadConfig, requireOidc, requireServiceCredentials, requireSharedModelKey } from "./config.js";
 
 describe("loadConfig", () => {
+  it("accepts only literal IP addresses for machine DNS", () => {
+    expect(loadConfig({}).machineDns).toEqual([]);
+    expect(loadConfig({ VB_MACHINE_DNS: "223.5.5.5, 2606:4700:4700::1111" }).machineDns).toEqual(["223.5.5.5", "2606:4700:4700::1111"]);
+    for (const value of ["dns.example", "1.1.1.1,,8.8.8.8", "1.2.3.999", "[::1]", "fe80::1%eth0", "1.1.1.1/32"]) {
+      expect(() => loadConfig({ VB_MACHINE_DNS: value }), value).toThrow(/VB_MACHINE_DNS/);
+    }
+  });
+
   it("uses documented defaults when optional variables are absent", () => {
     const config = loadConfig({});
     expect(config.dataDir).toBe("/data");

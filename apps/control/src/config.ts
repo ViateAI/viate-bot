@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { isIP } from "node:net";
 
 export type IntegrationName = "none" | "viate";
 export type ModelApi = "openai-completions" | "openai-responses";
@@ -38,6 +39,7 @@ export interface ControlConfig {
   adminEmails: string[];
   dataDir: string;
   machineImage: string;
+  machineDns: string[];
   idleStopMinutes: number;
   maxRunningTasks: number;
   /** 空字符串表示 /metrics 拒绝所有请求。不要把空 token 当成开放。 */
@@ -83,6 +85,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig 
       .filter((email) => email.length > 0),
     dataDir,
     machineImage: optional(env, "VB_MACHINE_IMAGE", "viate-bot/machine:dev"),
+    machineDns: machineDns(env.VB_MACHINE_DNS),
     idleStopMinutes: integer(env, "VB_IDLE_STOP_MINUTES", 120),
     maxRunningTasks: integer(env, "VB_MAX_RUNNING_TASKS", 20),
     metricsToken: optional(env, "VB_METRICS_TOKEN", ""),
@@ -172,6 +175,15 @@ function list(env: NodeJS.ProcessEnv, name: string): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+function machineDns(raw: string | undefined): string[] {
+  if (!raw?.trim()) return [];
+  const addresses = raw.split(",").map((value) => value.trim());
+  if (addresses.some((address) => !isIP(address) || address.includes("%"))) {
+    throw new Error("VB_MACHINE_DNS 必须是逗号分隔的 IP 字面量列表");
+  }
+  return addresses;
 }
 
 function positive(env: NodeJS.ProcessEnv, name: string, fallback: number): number {

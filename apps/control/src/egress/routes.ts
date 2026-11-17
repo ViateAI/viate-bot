@@ -48,6 +48,7 @@ export function registerEgressRoutes(
     const scope = scopeOf(request);
     if (!scope) return reply.code(401).send({ error: "未登录" });
     repo.assignDefaultDevice(scope);
+    deps.hub.notifySettings(scope.userId);
     const settings = repo.settings(scope);
     if (!settings) return reply.code(404).send({ error: "找不到" });
     return view(repo, scope, settings, deps.hub);
@@ -139,7 +140,7 @@ export function registerEgressSocket(app: FastifyInstance, deps: { db: AppDataba
       return;
     }
     const ip = request.socket.remoteAddress ?? null;
-    deps.hub.attachClient(device.id, device.userId, ws, ip);
+    deps.hub.attachClient(device.id, device.userId, ws, ip, request.headers["x-vb-allow-fake-ip"] === "true");
   });
 }
 

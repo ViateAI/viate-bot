@@ -27,13 +27,14 @@ export function startEgressClient(options: EgressClientOptions): { close: () => 
   const connect = () => {
     if (stopped) return;
     const ws = new WebSocket(options.url, {
-      headers: { authorization: `Bearer ${options.token}` },
+      headers: { authorization: `Bearer ${options.token}`, "x-vb-allow-fake-ip": options.allowFakeIp === true ? "true" : "false" },
       maxPayload: 70 * 1024,
     });
     socket = ws;
     const dialOptions: DialOptions = {};
     if (options.resolve) dialOptions.resolve = options.resolve;
     if (options.allowPrivate) dialOptions.allowPrivate = options.allowPrivate;
+    if (options.allowFakeIp !== undefined) dialOptions.allowFakeIp = options.allowFakeIp;
     if (options.connect) dialOptions.connect = options.connect;
     const peer = createClientPeer(
       (frame) => {
@@ -70,7 +71,6 @@ export function startEgressClient(options: EgressClientOptions): { close: () => 
       if (socket === ws) socket = null;
       if (stopped) return;
       timer = setTimeout(connect, wait);
-      timer.unref?.();
       wait = Math.min(wait * 2, 60_000);
     };
     ws.on("close", failed);

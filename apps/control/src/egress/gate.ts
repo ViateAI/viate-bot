@@ -5,6 +5,7 @@ export interface EgressGate {
   cancel(taskId: string): void;
   release(userId: string): void;
   arm(tasks: Array<{ id: string; userId: string; startedAt: string | null }>): void;
+  close(): void;
 }
 
 const WAIT_ERROR = "等待用户网络超时";
@@ -23,15 +24,10 @@ export function createEgressGate(deps: {
       this.cancel(taskId);
       const started = Date.parse(startedAt);
       const remain = deps.waitMs - (deps.now().getTime() - (Number.isFinite(started) ? started : deps.now().getTime()));
-      if (remain <= 0) {
-        const timer = setTimeout(() => deps.onFail(userId, taskId, WAIT_ERROR), 0);
-        timer.unref?.();
-        return;
-      }
       const timer = setTimeout(() => {
         timers.delete(taskId);
         deps.onFail(userId, taskId, WAIT_ERROR);
-      }, remain);
+      }, Math.max(0, remain));
       timer.unref?.();
       timers.set(taskId, { userId, timer });
     },
@@ -57,6 +53,10 @@ export function createEgressGate(deps: {
         users.add(task.userId);
       }
       for (const userId of users) this.release(userId);
+    },
+    close() {
+      for (const item of timers.values()) clearTimeout(item.timer);
+      timers.clear();
     },
   };
 }

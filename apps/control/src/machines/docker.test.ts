@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import Docker from "dockerode";
+import Docker, { type ContainerCreateOptions } from "dockerode";
 import { describe, expect, it } from "vitest";
 import type { MachineRecord, MachineStore } from "../db/machines.js";
 import { userScope } from "../scope.js";
@@ -80,7 +80,7 @@ function fakeDocker(present: Set<string>, created: string[], network: {
   Driver: "bridge",
   Options: { "com.docker.network.bridge.name": bridgeName("user-1") },
   Containers: {},
-}, removed: string[] = []): Docker {
+}, removed: string[] = [], optionsSeen: ContainerCreateOptions[] = []): Docker {
   const docker = {
     getContainer(name: string) {
       return {
@@ -115,7 +115,8 @@ function fakeDocker(present: Set<string>, created: string[], network: {
         }),
       };
     },
-    createContainer: async () => {
+    createContainer: async (options: ContainerCreateOptions) => {
+      optionsSeen.push(options);
       created.push("c-new");
       return { id: "c-new" };
     },
@@ -126,6 +127,16 @@ function fakeDocker(present: Set<string>, created: string[], network: {
 }
 
 describe("docker create recovery", () => {
+  it("uses configured DNS for both creation and rebuild", async () => {
+    const seen: ContainerCreateOptions[] = [];
+    const docker = fakeDocker(new Set(), [], undefined, [], seen);
+    const driver = new DockerDriver({ docker, image: "viate-bot/machine:m31a", key: randomBytes(32), dns: ["223.5.5.5", "1.1.1.1"] });
+    const store = memory(machine(null));
+    await driver.create(store, userScope("user-1"), spec);
+    await driver.rebuild(store, userScope("user-1"), spec);
+    expect(seen.map((options) => options.HostConfig?.Dns)).toEqual([["223.5.5.5", "1.1.1.1"], ["223.5.5.5", "1.1.1.1"]]);
+  });
+
   it("replaces an empty legacy network before creating the machine", async () => {
     const created: string[] = [];
     const removed: string[] = [];

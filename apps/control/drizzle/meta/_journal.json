@@ -53,6 +53,13 @@
       "when": 1795000000000,
       "tag": "0006_egress",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1795000000001,
+      "tag": "0007_client_fake_ip",
+      "breakpoints": true
     }
   ]
 }

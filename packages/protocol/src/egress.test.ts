@@ -36,6 +36,10 @@ describe("egress frames", () => {
 });
 
 describe("egress address check", () => {
+  it("resolves ordinary domain names made entirely of hexadecimal letters", async () => {
+    expect(await checkEgressTarget("abc.de", async () => ["8.8.8.8"])).toMatchObject({ ok: true, address: "8.8.8.8" });
+  });
+
   it("normalizes decimal, octal, hex and shorthand IPv4", () => {
     expect(parseIpv4Literal("2130706433")).toBe("127.0.0.1");
     expect(parseIpv4Literal("0177.0.0.1")).toBe("127.0.0.1");
@@ -86,7 +90,19 @@ describe("egress address check", () => {
     expect(v6.ok).toBe(true);
     expect(isBlockedIp("8.8.8.8")).toBe(false);
     expect(isBlockedIp("1.1.1.1")).toBe(false);
-    expect(isBlockedIp("198.18.9.106")).toBe(false);
+    expect(isBlockedIp("198.18.9.106")).toBe(true);
+  });
+
+  it("rejects benchmark LANs and non-global IPv6 transition destinations", async () => {
+    for (const host of ["198.18.0.1", "64:ff9b:1::a00:1", "2001:0:4136:e378:8000:63bf:80ff:fffe", "4000::1", "::ffff:0:7f00:1"]) {
+      expect((await checkEgressTarget(host)).ok, host).toBe(false);
+    }
+  });
+
+  it("diagnoses fake-ip DNS while retaining the blocked failure code", async () => {
+    expect(await checkEgressTarget("public.example", async () => ["198.18.9.106"])).toEqual({
+      ok: false, code: "blocked", message: "目标解析到 198.18.0.0/15，疑似 fake-ip DNS；请改用真实 DNS",
+    });
   });
 
   it("blocks a name that resolves to a private address and dials the resolved public IP", async () => {

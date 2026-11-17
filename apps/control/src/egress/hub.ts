@@ -2,7 +2,7 @@
  * 每个用户一条机器连接和若干设备连接。只有当前选中的设备接到 relay。
  * 客户端发来 OPEN 时 relay 会拆掉这条设备连接。
  */
-import { EGRESS_PING_INTERVAL_MS, EGRESS_PONG_TIMEOUT_MS } from "@viate-bot/protocol";
+import { EGRESS_PING_INTERVAL_MS, EGRESS_PONG_TIMEOUT_MS, FRAME_OPEN } from "@viate-bot/protocol";
 import { WebSocket } from "ws";
 import { egressRepository } from "../db/egress.js";
 import { eventRepository } from "../db/events.js";
@@ -31,7 +31,10 @@ interface Lane {
   endpointKey: string;
   stopHeartbeat: () => void;
   relay: Relay | null;
+  relayMachine: RelaySocket | null;
+  relayClient: RelaySocket | null;
   wasOnline: boolean;
+  deviceWasOnline: boolean;
   deviceId: string | null;
   toClient: number;
   toMachine: number;
@@ -41,7 +44,7 @@ interface Lane {
 export interface EgressHub {
   connectEndpoint(userId: string, endpoint: EgressEndpoint): void;
   machineConnected(userId: string): boolean;
-  attachClient(deviceId: string, userId: string, socket: RelaySocket & HeartbeatSocket, ip: string | null): boolean;
+  attachClient(deviceId: string, userId: string, socket: RelaySocket & HeartbeatSocket, ip: string | null, allowFakeIp?: boolean): boolean;
   disconnectDevice(deviceId: string): void;
   disconnectUser(userId: string): void;
   deviceOnline(userId: string, deviceId: string | null): boolean;
@@ -76,7 +79,10 @@ export function createEgressHub(db: AppDatabase, now: () => Date = () => new Dat
         endpointKey: "",
         stopHeartbeat: () => undefined,
         relay: null,
+        relayMachine: null,
+        relayClient: null,
         wasOnline: false,
+        deviceWasOnline: false,
         deviceId: null,
         toClient: 0,
         toMachine: 0,
@@ -101,12 +107,18 @@ export function createEgressHub(db: AppDatabase, now: () => Date = () => new Dat
     const lane = laneFor(userId);
     if (!lane) return;
     flushLane(lane);
-    lane.relay?.close();
-    lane.relay = null;
     const selected = selectedSocket(userId);
     const online = Boolean(selected && lane.machine && lane.machine.readyState === 1);
-    if (online && selected && lane.machine) {
+    if (!online || lane.relayClient !== selected?.socket || lane.relayMachine !== lane.machine) {
+      lane.relay?.close();
+      lane.relay = null;
+      lane.relayMachine = null;
+      lane.relayClient = null;
+    }
+    if (online && selected && lane.machine && !lane.relay) {
       lane.deviceId = selected.deviceId;
+      lane.relayMachine = lane.machine;
+      lane.relayClient = selected.socket;
       lane.relay = attachRelay(lane.machine, selected.socket, {
         onBytes(direction, bytes) {
           addBytes(lane, direction, bytes);
@@ -115,10 +127,11 @@ export function createEgressHub(db: AppDatabase, now: () => Date = () => new Dat
           disconnectDevice(selected.deviceId);
         },
       });
-    } else {
+    } else if (!online) {
       lane.deviceId = null;
     }
-    const changed = lane.wasOnline !== online;
+    const changed = lane.deviceWasOnline !== Boolean(selected);
+    lane.deviceWasOnline = Boolean(selected);
     lane.wasOnline = online;
     if (changed) {
       if (!online && lane.machineId) {
@@ -134,7 +147,7 @@ export function createEgressHub(db: AppDatabase, now: () => Date = () => new Dat
           });
         }
       }
-      for (const listener of listeners) listener(userId, online);
+      for (const listener of listeners) listener(userId, Boolean(selected));
     }
     pushConfig(userId);
   }
@@ -225,7 +238,7 @@ export function createEgressHub(db: AppDatabase, now: () => Date = () => new Dat
     machineConnected(userId) {
       return lanes.get(userId)?.machine?.readyState === 1;
     },
-    attachClient(deviceId, userId, socket, ip) {
+    attachClient(deviceId, userId, socket, ip, allowFakeIp = false) {
       if (repo.userStatus(userId) === "disabled") {
         socket.terminate();
         return false;
@@ -241,7 +254,12 @@ export function createEgressHub(db: AppDatabase, now: () => Date = () => new Dat
         if (devices.get(deviceId)?.socket === socket) disconnectDevice(deviceId);
       });
       socket.on("pong", () => repo.touchDevice(deviceId, now().toISOString(), ip));
+      socket.on("message", (data, binary) => {
+        const bytes = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
+        if (!binary || bytes.length < 5 || bytes[0] === FRAME_OPEN) disconnectDevice(deviceId);
+      });
       devices.set(deviceId, { userId, deviceId, socket, stopHeartbeat });
+      repo.setFakeIp(deviceId, allowFakeIp);
       repo.touchDevice(deviceId, now().toISOString(), ip);
       rebind(userId);
       return true;

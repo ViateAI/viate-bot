@@ -25,6 +25,18 @@ function patched(change: (options: ContainerCreateOptions) => void): ContainerCr
 }
 
 describe("machine create policy", () => {
+  it("restricts DNS to exactly the configured list", () => {
+    const dns = ["223.5.5.5", "1.1.1.1"];
+    const options = buildCreateOptions({ ...input, dns });
+    expect(options.HostConfig?.Dns).toEqual(dns);
+    assertMachinePolicy(input.userId, options, dns);
+    expect(() => assertMachinePolicy(input.userId, options)).toThrow(/DNS/);
+    options.HostConfig!.Dns = ["8.8.8.8"];
+    expect(() => assertMachinePolicy(input.userId, options, dns)).toThrow(/DNS/);
+    delete options.HostConfig!.Dns;
+    expect(() => assertMachinePolicy(input.userId, options, dns)).toThrow(/DNS/);
+  });
+
   it("accepts the documented container shape", () => {
     const options = buildCreateOptions(input);
     expect(options.HostConfig?.NetworkMode).toBe("vb-net-user-1");

@@ -315,6 +315,7 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
   const stopConnector = process.env.VITEST === "true" ? () => undefined : startEgressConnector(db, driver, key, egress);
   app.addHook("onClose", async () => {
     stopConnector();
+    egressGate.close();
     egress.close();
     chat.shutdown();
   });

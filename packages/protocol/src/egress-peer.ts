@@ -1,6 +1,6 @@
 /**
  * 机器侧和客户端共用的流复用。窗口用完之前不再发 DATA，本地消费后用 CREDIT 归还。
- * 窗口上限是初始窗口的 8 倍：对端可以把已消费的额度还回来，不能靠发 CREDIT 把发送窗口撑到无界。
+ * 双向窗口都限定为初始窗口；CREDIT 只能归还已经发送的额度。
  */
 import {
   EGRESS_INITIAL_WINDOW,
@@ -11,8 +11,6 @@ import {
   type EgressFailCode,
   type EgressFrame,
 } from "./egress.js";
-
-const WINDOW_CAP = EGRESS_INITIAL_WINDOW * 8;
 
 export class EgressOpenError extends Error {
   readonly code: EgressFailCode;
@@ -50,6 +48,7 @@ export interface BytePipe {
   onData(cb: (chunk: Buffer) => void): void;
   onEnd(cb: () => void): void;
   onDrain(cb: () => void): void;
+  onError(cb: () => void): void;
 }
 
 export interface MachinePeer {
@@ -68,10 +67,13 @@ export interface ClientPeer {
 interface StreamState {
   id: number;
   sendWindow: number;
+  received: number;
+  pending: Buffer[];
   ready: boolean;
   localEnded: boolean;
   remoteEnded: boolean;
   dead: boolean;
+  closeInfo: CloseInfo | null;
   onData: ((chunk: Buffer) => void) | null;
   onDrain: (() => void) | null;
   onClose: ((info: CloseInfo) => void) | null;
@@ -141,6 +143,7 @@ export function createClientPeer(
 ): ClientPeer {
   const streams = new Map<number, StreamState>();
   const pipes = new Map<number, BytePipe>();
+  let dialing = 0;
   const emit = (frame: EgressFrame) => {
     try {
       send(encodeEgressFrame(frame));
@@ -160,18 +163,18 @@ export function createClientPeer(
     ingest(frame) {
       const decoded = decodeEgressFrame(frame);
       if (decoded.type === "OPEN") {
-        if (streams.size >= EGRESS_MAX_STREAMS) {
+        if (streams.has(decoded.streamId)) throw new Error("重复的 OPEN streamId");
+        if (streams.size >= EGRESS_MAX_STREAMS || dialing >= EGRESS_MAX_STREAMS) {
           emit({ type: "OPEN_FAIL", streamId: decoded.streamId, code: "limit", message: "流数量达到上限" });
           return;
         }
         const state = makeState(decoded.streamId);
-        state.ready = true;
         streams.set(state.id, state);
         const tunnelApi = tunnel(state, Promise.resolve(), emit, () => {
           streams.delete(state.id);
-          pipes.get(state.id)?.destroy();
           pipes.delete(state.id);
         });
+        dialing++;
         void dial(decoded.host, decoded.port)
           .then((result) => {
             if (state.dead) {
@@ -184,30 +187,44 @@ export function createClientPeer(
               return;
             }
             pipes.set(state.id, result.pipe);
-            emit({ type: "OPEN_OK", streamId: state.id });
-            result.pipe.onData((chunk) => pump(tunnelApi, chunk, result.pipe));
-            result.pipe.onEnd(() => tunnelApi.end());
+            let owed = 0;
+            let draining = false;
             tunnelApi.onData((chunk) => {
               const ok = result.pipe.write(chunk);
               if (ok) tunnelApi.consumed(chunk.length);
-              else result.pipe.onDrain(() => tunnelApi.consumed(chunk.length));
+              else {
+                owed += chunk.length;
+                if (!draining) {
+                  draining = true;
+                  result.pipe.onDrain(() => {
+                    draining = false;
+                    const credit = owed;
+                    owed = 0;
+                    tunnelApi.consumed(credit);
+                  });
+                }
+              }
             });
             tunnelApi.onClose((info) => {
               if (info.kind === "end") result.pipe.end();
               else result.pipe.destroy();
             });
+            result.pipe.onError(() => tunnelApi.reset());
+            state.ready = true;
+            emit({ type: "OPEN_OK", streamId: state.id });
+            pipeToTunnel(tunnelApi, result.pipe);
           })
           .catch(() => {
             if (state.dead) return;
             emit({ type: "OPEN_FAIL", streamId: state.id, code: "connect", message: "连接失败" });
             finish(state, { kind: "fail", code: "connect", message: "连接失败" }, () => streams.delete(state.id));
-          });
+          })
+          .finally(() => { dialing--; });
         return;
       }
       const state = streams.get(decoded.streamId);
       if (!state || state.dead) return;
       applyPeerFrame(state, decoded, emit, () => {
-        pipes.get(state.id)?.destroy();
         pipes.delete(state.id);
         streams.delete(state.id);
       });
@@ -215,11 +232,13 @@ export function createClientPeer(
   };
 }
 
-function pump(stream: Tunnel, chunk: Buffer, pipe: BytePipe): void {
+function pipeToTunnel(stream: Tunnel, pipe: BytePipe): void {
+  let pending: Buffer | null = null;
   let offset = 0;
+  let ended = false;
   const step = () => {
-    while (offset < chunk.length) {
-      const accepted = stream.write(chunk.subarray(offset));
+    while (pending && offset < pending.length) {
+      const accepted = stream.write(pending.subarray(offset));
       if (accepted <= 0) {
         pipe.pause();
         stream.onDrain(step);
@@ -227,9 +246,13 @@ function pump(stream: Tunnel, chunk: Buffer, pipe: BytePipe): void {
       }
       offset += accepted;
     }
-    pipe.resume();
+    pending = null;
+    offset = 0;
+    if (ended) stream.end();
+    else pipe.resume();
   };
-  step();
+  pipe.onData((chunk) => { pending = chunk; offset = 0; step(); });
+  pipe.onEnd(() => { ended = true; step(); });
 }
 
 function allocate(streams: Map<number, StreamState>, next: () => number): number | null {
@@ -245,10 +268,13 @@ function makeState(id: number): StreamState {
   return {
     id,
     sendWindow: EGRESS_INITIAL_WINDOW,
+    received: 0,
+    pending: [],
     ready: false,
     localEnded: false,
     remoteEnded: false,
     dead: false,
+    closeInfo: null,
     onData: null,
     onDrain: null,
     onClose: null,
@@ -264,16 +290,17 @@ function tunnel(state: StreamState, ready: Promise<void>, emit: (frame: EgressFr
       let accepted = 0;
       while (accepted < chunk.length && state.sendWindow > 0) {
         const size = Math.min(state.sendWindow, EGRESS_MAX_DATA, chunk.length - accepted);
-        emit({ type: "DATA", streamId: state.id, payload: chunk.subarray(accepted, accepted + size) });
         state.sendWindow -= size;
+        emit({ type: "DATA", streamId: state.id, payload: chunk.subarray(accepted, accepted + size) });
         accepted += size;
       }
       return accepted;
     },
     consumed(bytes) {
       if (state.dead || bytes <= 0) return;
-      const credit = Math.min(bytes, 0xffff_ffff);
-      emit({ type: "CREDIT", streamId: state.id, credit });
+      if (!Number.isInteger(bytes) || bytes > state.received) throw new Error("消费字节数超过接收量");
+      state.received -= bytes;
+      emit({ type: "CREDIT", streamId: state.id, credit: bytes });
     },
     end() {
       if (state.dead || state.localEnded) return;
@@ -288,12 +315,18 @@ function tunnel(state: StreamState, ready: Promise<void>, emit: (frame: EgressFr
     },
     onData(cb) {
       state.onData = cb;
+      for (const chunk of state.pending.splice(0)) {
+        if (state.dead) break;
+        cb(chunk);
+      }
     },
     onDrain(cb) {
       state.onDrain = cb;
     },
     onClose(cb) {
       state.onClose = cb;
+      if (state.closeInfo) cb(state.closeInfo);
+      else if (state.remoteEnded) cb({ kind: "end" });
     },
   };
 }
@@ -314,17 +347,23 @@ function applyPeerFrame(state: StreamState, frame: EgressFrame, emit: (frame: Eg
     return;
   }
   if (frame.type === "DATA") {
-    if (!state.ready) {
+    if (!state.ready || state.remoteEnded || state.received + frame.payload.length > EGRESS_INITIAL_WINDOW) {
       emit({ type: "RESET", streamId: state.id });
       finish(state, { kind: "reset" }, release);
       return;
     }
-    state.onData?.(frame.payload);
+    state.received += frame.payload.length;
+    if (state.onData) state.onData(frame.payload);
+    else state.pending.push(frame.payload);
     return;
   }
   if (frame.type === "CREDIT") {
-    const room = WINDOW_CAP - state.sendWindow;
-    if (room > 0) state.sendWindow += Math.min(frame.credit, room);
+    if (!state.ready || frame.credit > EGRESS_INITIAL_WINDOW - state.sendWindow) {
+      emit({ type: "RESET", streamId: state.id });
+      finish(state, { kind: "reset" }, release);
+      return;
+    }
+    state.sendWindow += frame.credit;
     if (state.sendWindow > 0) {
       const drain = state.onDrain;
       state.onDrain = null;
@@ -333,6 +372,7 @@ function applyPeerFrame(state: StreamState, frame: EgressFrame, emit: (frame: Eg
     return;
   }
   if (frame.type === "END") {
+    if (!state.ready || state.remoteEnded) return;
     state.remoteEnded = true;
     state.onClose?.({ kind: "end" });
     if (state.localEnded) finish(state, { kind: "end" }, release);
@@ -344,6 +384,8 @@ function applyPeerFrame(state: StreamState, frame: EgressFrame, emit: (frame: Eg
 function finish(state: StreamState, info: CloseInfo, release: () => void): void {
   if (state.dead) return;
   state.dead = true;
+  state.closeInfo = info;
+  state.pending.length = 0;
   if (!state.ready) state.reject?.(new EgressOpenError(info.code ?? "connect", info.message ?? "流已关闭"));
   state.onClose?.(info);
   release();

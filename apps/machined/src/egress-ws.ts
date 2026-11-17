@@ -9,7 +9,9 @@ import { WebSocketServer, type RawData } from "ws";
 import type { EgressProxy } from "./egress-proxy.js";
 
 export function attachEgress(app: FastifyInstance, proxy: EgressProxy, token: string): void {
-  const wss = new WebSocketServer({ noServer: true });
+  // Never expose the host IP before the control plane supplies the persisted mode.
+  proxy.setConfig({ mode: "user_network", offlinePolicy: "pause", deviceOnline: false });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 70 * 1024 });
   let active: { close: () => void } | null = null;
 
   const stop = () => {

@@ -97,6 +97,7 @@ export const clientDevices = sqliteTable(
     createdAt: text("created_at").notNull(),
     lastSeenAt: text("last_seen_at"),
     lastIp: text("last_ip"),
+    allowFakeIp: integer("allow_fake_ip", { mode: "boolean" }).notNull().default(false),
     revokedAt: text("revoked_at"),
   },
   (table) => [uniqueIndex("client_devices_token_hash").on(table.tokenHash), index("client_devices_user").on(table.userId)],

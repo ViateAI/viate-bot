@@ -9,6 +9,7 @@ interface Device {
   lastSeenAt: string | null;
   revokedAt: string | null;
   online: boolean;
+  allowFakeIp: boolean;
 }
 
 interface EgressView {
@@ -111,6 +112,7 @@ export function EgressSettings() {
         {rows.map((device) => (
           <li key={device.id} data-testid="device-row" className="rounded border border-neutral-800 p-3 text-sm">
             <p>{device.name} · {device.revokedAt ? "已吊销" : device.online ? "在线" : "离线"}</p>
+            {device.allowFakeIp ? <span data-testid="allow-fake-ip" className="text-amber-400">允许 fake-ip</span> : null}
             <p className="text-neutral-500">最后在线 {device.lastSeenAt ?? "无"}</p>
             {device.revokedAt ? null : (
               <span className="mt-2 flex gap-2">

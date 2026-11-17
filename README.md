@@ -69,6 +69,7 @@ PowerShell 没有仓库里的导入脚本。在 Windows 上按下表逐项设置
 | `VB_ADMIN_EMAILS` | 空 | 逗号分隔。可信邮箱命中则登录后是管理员 |
 | `VB_DATA_DIR` | `/data` | SQLite、密钥和应用归档目录。库文件是 `$VB_DATA_DIR/viate-bot.sqlite` |
 | `VB_MACHINE_IMAGE` | `viate-bot/machine:dev` | 新建机器使用的镜像标签 |
+| `VB_MACHINE_DNS` | 空 | 逗号分隔的 DNS IP 字面量；写入新建/重建容器的 `HostConfig.Dns`。空则沿用 Docker 默认 DNS；非法地址会阻止启动 |
 | `VB_IDLE_STOP_MINUTES` | `120` | 空闲多久后停机，单位分钟。非负整数。`0` 表示空闲条件一满足就停机 |
 | `VB_MAX_RUNNING_TASKS` | `20` | 控制面全局同时处于运行中的任务上限。非负整数。`0` 表示不再开始新任务 |
 | `VB_METRICS_TOKEN` | 空 | `GET /metrics` 的 Bearer token。空则拒绝所有抓取 |
@@ -93,6 +94,14 @@ pnpm --filter @viate-bot/machined image viate-bot/machine:dev linux/amd64
 ```
 
 标签要和 `VB_MACHINE_IMAGE` 一致。然后按上面的方式启动控制面。管理员登录后开通用户；开通会按当时的镜像标签建容器。
+
+### 网络出口与 fake-ip DNS
+
+machined 和桌面客户端默认拒绝 `198.18.0.0/15`，避免 fake-ip 隐藏最终的私网目标。宿主机启用 Clash / Surge / sing-box fake-ip 时，设置 `VB_MACHINE_DNS=223.5.5.5,1.1.1.1`，使机器容器使用真实 DNS；已有机器必须重建容器才生效。用户网桥里 `/etc/resolv.conf` 可能仍显示 Docker 的 `127.0.0.11`，实际外部解析器应在容器 `HostConfig.Dns` 及 resolv.conf 注释里检查。若 TUN 劫持所有 DNS，还需在代理软件中让这些解析器返回真实地址。TUN 按 IP / SNI 分流不依赖 fake-ip。
+
+Rancher Desktop 防火墙脚本不封锁公网 IPv4 的 UDP/TCP 53；公网 DNS 仍受连接速率限额约束。它封锁私网 DNS，且用户网桥的 IPv6 全部丢弃，因此该部署请使用可达的公网 IPv4 DNS。不要为 DNS 放宽现有防火墙策略。
+
+用户电脑也建议使用真实 DNS。确实需要 fake-ip 时，可运行 `viate-egress run --base https://bot.example --allow-fake-ip`：只额外放行 `198.18.0.0/15`，其它私网仍拒绝。**fake-ip 会隐藏真实目标；必须确保代理软件不会把这些连接直连进内网。** 每次启用启动都会打印风险提示。选择持久化在 `~/.viate-bot/egress.json`（`{"allowFakeIp":true}`；可用 `--config <path>` 指定路径）；使用 `--no-allow-fake-ip` 或把值改为 `false` 关闭。默认没有配置文件时关闭。控制面只在用户设备列表显示“允许 fake-ip”，不改变中继规则，管理端不显示该标记。machined direct 不提供此例外。
 
 ## 升级
 

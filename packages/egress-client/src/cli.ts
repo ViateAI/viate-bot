@@ -5,6 +5,7 @@ import { allowPrivatePredicate } from "@viate-bot/protocol";
 import { bindDevice, egressWebSocketUrl, startEgressClient } from "./client.js";
 import { readTokenFile } from "./token.js";
 import { readFileSync } from "node:fs";
+import { readClientConfig, writeClientConfig } from "./config.js";
 
 interface Parsed {
   command: string;
@@ -12,6 +13,8 @@ interface Parsed {
   name: string;
   tokenFile: string;
   allowPrivate: string[] | undefined;
+  allowFakeIp: boolean | undefined;
+  configFile: string;
 }
 
 export function parseCli(argv: string[]): Parsed {
@@ -20,11 +23,16 @@ export function parseCli(argv: string[]): Parsed {
   let name = "这台电脑";
   let tokenFile = join(homedir(), ".viate-bot", "egress-token");
   let allowPrivate: string[] | undefined;
+  let allowFakeIp: boolean | undefined;
+  let configFile = join(homedir(), ".viate-bot", "egress.json");
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--base") base = argv[++i] ?? "";
     else if (arg === "--name") name = argv[++i] ?? "";
     else if (arg === "--token-file") tokenFile = argv[++i] ?? "";
+    else if (arg === "--config") configFile = argv[++i] ?? "";
+    else if (arg === "--allow-fake-ip") allowFakeIp = true;
+    else if (arg === "--no-allow-fake-ip") allowFakeIp = false;
     else if (arg === "--allow-private") {
       const value = argv[++i];
       if (!value) throw new Error("--allow-private 需要显式的地址列表");
@@ -33,7 +41,7 @@ export function parseCli(argv: string[]): Parsed {
     } else if (arg && !arg.startsWith("-") && !command) command = arg;
   }
   if (command !== "link" && command !== "run" && command !== "status") throw new Error("用法：viate-egress link|run|status");
-  return { command, base, name, tokenFile, allowPrivate };
+  return { command, base, name, tokenFile, allowPrivate, allowFakeIp, configFile };
 }
 
 async function main(): Promise<void> {
@@ -69,10 +77,17 @@ async function main(): Promise<void> {
     return;
   }
   const token = readTokenFile(parsed.tokenFile);
+  const config = readClientConfig(parsed.configFile);
+  if (parsed.allowFakeIp !== undefined) {
+    config.allowFakeIp = parsed.allowFakeIp;
+    writeClientConfig(parsed.configFile, config);
+  }
+  if (config.allowFakeIp) process.stderr.write("风险：已允许 fake-ip；fake-ip 会隐藏真实目标，需确保代理软件不会把这些连接直连进内网。\n");
   const allowPrivate = parsed.allowPrivate ? allowPrivatePredicate(parsed.allowPrivate) : undefined;
   const client = startEgressClient({
     url: egressWebSocketUrl(parsed.base),
     token,
+    allowFakeIp: config.allowFakeIp,
     statusFile: `${parsed.tokenFile}.status`,
     ...(allowPrivate ? { allowPrivate } : {}),
   });

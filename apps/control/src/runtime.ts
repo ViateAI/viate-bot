@@ -22,6 +22,7 @@ export function createDriver(): DockerDriver {
   const config = loadConfig();
   return new DockerDriver({
     image: config.machineImage,
+    dns: config.machineDns,
     key: loadOrCreateKey(config.secretKeyPath),
   });
 }

@@ -65,8 +65,7 @@ ban4("192.0.0.0", 24);
 ban4("192.0.2.0", 24);
 ban4("192.88.99.0", 24);
 ban4("192.168.0.0", 16);
-// 198.18.0.0/15 stays allowed: Clash/Surge/sing-box fake-ip DNS hands out these
-// addresses for public hosts on both the deployment host and user PCs.
+ban4("198.18.0.0", 15);
 ban4("198.51.100.0", 24);
 ban4("203.0.113.0", 24);
 ban4("224.0.0.0", 4);
@@ -172,7 +171,7 @@ export function parseIpLiteral(host: string): string | "invalid" | null {
     if (!groups) return text.startsWith("[") || text.includes(":") ? "invalid" : null;
     return dialOf(groups);
   }
-  if (!/^[0-9a-fx.]+$/i.test(text)) return null;
+  if (!/^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*$/i.test(text)) return null;
   const v4literal = parseIpv4Literal(text);
   return v4literal ?? "invalid";
 }
@@ -211,7 +210,12 @@ export async function checkEgressTarget(
   for (const candidate of candidates) {
     const dial = canonicalDial(candidate);
     if (!dial) return { ok: false, code: "blocked", message: "目标地址不允许" };
-    if (isBlockedIp(dial) && !allow?.(dial)) return { ok: false, code: "blocked", message: "目标地址不允许" };
+    if (isBlockedIp(dial) && !allow?.(dial)) {
+      const message = /^198\.(18|19)\./.test(dial)
+        ? "目标解析到 198.18.0.0/15，疑似 fake-ip DNS；请改用真实 DNS"
+        : "目标地址不允许";
+      return { ok: false, code: "blocked", message };
+    }
     addresses.push(dial);
   }
   const address = addresses[0];
@@ -311,6 +315,10 @@ function blockedGroups(groups: number[]): boolean {
   if (groups[0] === 0x2002) return isBlockedIp(v4From(groups[1] ?? 0, groups[2] ?? 0));
   const compatible = groups.slice(0, 6).every((part) => part === 0) && ((groups[6] ?? 0) !== 0 || (groups[7] ?? 0) !== 0);
   if (compatible && !loopback(groups)) return isBlockedIp(v4From(groups[6] ?? 0, groups[7] ?? 0));
+  // Only global unicast and the well-known NAT64 prefix are routable here.
+  // Local-use translation prefixes and Teredo hide destinations we cannot verify.
+  if (((groups[0] ?? 0) & 0xe000) !== 0x2000) return true;
+  if (groups[0] === 0x2001 && (groups[1] ?? 0) < 0x200) return true;
   return v6.check(formatV6(groups), "ipv6");
 }
 

@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { encodeEgressFrame, FRAME_OPEN } from "@viate-bot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
-import { WebSocket, WebSocketServer } from "ws";
-import { buildApp, type ControlContext } from "../app.js";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
+import { buildApp, egressHub, type ControlContext } from "../app.js";
 import { recoverInterruptedTasks } from "../agent/service.js";
 import { loadConfig } from "../config.js";
 import { loadOrCreateKey } from "../crypto.js";
@@ -95,6 +95,67 @@ async function issue(app: ReturnType<typeof boot>["app"], session: { token: stri
 }
 
 describe("egress control plane", () => {
+  it("records client fake-IP opt-in only in user device metadata", async () => {
+    const { app, db, alice } = boot();
+    const device = await issue(app, alice, "fake-ip 设备");
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("没有监听端口");
+    const client = new WebSocket(`ws://127.0.0.1:${address.port}/client/egress`, { headers: { authorization: `Bearer ${device.token}`, "x-vb-allow-fake-ip": "true" } });
+    cleanups.push(async () => client.terminate());
+    await opened(client);
+    await waitUntil(() => egressHub(app).deviceOnline("user-a", device.deviceId));
+    const devices = await app.inject({ method: "GET", url: "/api/client/devices", headers: { cookie: cookie(alice.token) } });
+    expect(devices.json().devices[0]).toMatchObject({ id: device.deviceId, allowFakeIp: true });
+    expect(devices.body).not.toContain("lastIp");
+    db.$client.prepare("update users set is_admin = 1 where id = 'user-a'").run();
+    const admin = await app.inject({ method: "GET", url: "/api/admin/machines", headers: { cookie: cookie(alice.token) } });
+    expect(admin.body).not.toContain("allowFakeIp");
+  });
+
+  it("closes active egress clients when the app shuts down", async () => {
+    const { app, alice } = boot();
+    const device = await issue(app, alice, "退出设备");
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("没有监听端口");
+    const client = new WebSocket(`ws://127.0.0.1:${address.port}/client/egress`, { headers: { authorization: `Bearer ${device.token}` } });
+    cleanups.push(async () => client.terminate());
+    await opened(client);
+    await withTimeout(app.close(), "出口连接阻止控制面关闭");
+  });
+
+  it("signals selected-device availability even when the machine is stopped", async () => {
+    const { app, alice } = boot();
+    const device = await issue(app, alice, "唤醒电脑");
+    const hub = egressHub(app);
+    const seen: boolean[] = [];
+    hub.onSelectedChange((userId, online) => { if (userId === "user-a") seen.push(online); });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("没有监听端口");
+    const client = new WebSocket(`ws://127.0.0.1:${address.port}/client/egress`, { headers: { authorization: `Bearer ${device.token}` } });
+    cleanups.push(async () => client.terminate());
+    await opened(client);
+    await waitUntil(() => hub.deviceOnline("user-a", device.deviceId));
+    expect(seen).toEqual([true]);
+  });
+
+  it("disconnects an unselected device that attempts OPEN without a machine relay", async () => {
+    const { app, alice } = boot();
+    await issue(app, alice, "选中设备");
+    const device = await issue(app, alice, "未选中设备");
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("没有监听端口");
+    const client = new WebSocket(`ws://127.0.0.1:${address.port}/client/egress`, { headers: { authorization: `Bearer ${device.token}` } });
+    cleanups.push(async () => client.terminate());
+    await opened(client);
+    const closed = closedSoon(client);
+    client.send(encodeEgressFrame({ type: "OPEN", streamId: 1, host: "1.1.1.1", port: 443 }));
+    await closed;
+  });
+
   it("rejects loopback ports outside 1024-65535", () => {
     expect(callbackPort(80)).toBeNull();
     expect(callbackPort(1023)).toBeNull();
@@ -176,6 +237,17 @@ describe("egress control plane", () => {
     setTimeout(resume, 50);
     await pause;
     expect(seenB).toEqual([]);
+    const framesOnRefresh: number[] = [];
+    const { promise: configured, resolve: markConfigured } = Promise.withResolvers<void>();
+    const onRefresh = (data: RawData, binary: boolean) => {
+      if (binary && Buffer.isBuffer(data)) framesOnRefresh.push(data[0] ?? 0);
+      else markConfigured();
+    };
+    fromA.on("message", onRefresh);
+    hub.notifySettings("user-a");
+    await withTimeout(configured, "没有收到配置刷新");
+    fromA.off("message", onRefresh);
+    expect(framesOnRefresh).not.toContain(7);
     const closed = closedSoon(clientA);
     clientA.send(encodeEgressFrame({ type: "OPEN", streamId: 1, host: "1.1.1.1", port: 80 }));
     await closed;

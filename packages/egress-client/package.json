@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "pnpm --filter @viate-bot/protocol build && vitest run"
+    "test": "pnpm --filter @viate-bot/protocol build && pnpm build && vitest run"
   },
   "dependencies": {
     "@viate-bot/protocol": "workspace:*",

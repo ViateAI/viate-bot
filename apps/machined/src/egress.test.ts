@@ -1,5 +1,6 @@
 import { once } from "node:events";
 import net from "node:net";
+import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { createClientPeer, createMachinePeer, type BytePipe } from "@viate-bot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,6 +15,50 @@ afterEach(async () => {
 });
 
 describe("machined egress proxy", () => {
+  it("passes an absolute ws URL upgrade through the checked target", async () => {
+    const upstream = await scripted("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\nopaque-websocket-data");
+    const proxy = await listen(startEgressProxy({ port: 0, resolve: async () => ["9.9.9.9"], dial: () => net.connect(upstream.port, "127.0.0.1") }));
+    const response = await raw(proxy.port, "GET ws://example.com/chat HTTP/1.1\r\nHost: private.internal\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
+    expect(response.status).toBe(101);
+    expect(response.body).toContain("opaque-websocket-data");
+    expect(upstream.text()).toMatch(/^GET \/chat HTTP\/1.1\r\n/);
+  });
+
+  it("streams a chunked POST with an authoritative Host and does not duplicate writes under backpressure", async () => {
+    const expected = Buffer.alloc(2 * 1024 * 1024, 65);
+    const upstream = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => res.end(JSON.stringify({ host: req.headers.host, bytes: Buffer.concat(chunks).length })));
+    });
+    upstream.listen(0, "127.0.0.1");
+    await once(upstream, "listening");
+    closers.push(async () => { upstream.closeAllConnections(); const done = once(upstream, "close"); upstream.close(); await done; });
+    const proxy = await listen(startEgressProxy({ port: 0, resolve: async () => ["9.9.9.9"], dial: () => net.connect((upstream.address() as AddressInfo).port, "127.0.0.1") }));
+    const { promise, resolve, reject } = Promise.withResolvers<string>();
+    const request = http.request({ host: "127.0.0.1", port: proxy.port, path: "http://example.com/upload", method: "POST", headers: { host: "private.internal" } }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    });
+    request.on("error", reject);
+    request.write(expected.subarray(0, 1024 * 1024));
+    request.end(expected.subarray(1024 * 1024));
+    const result = await promise;
+    expect(JSON.parse(result)).toEqual({ host: "example.com", bytes: expected.length });
+  });
+
+  it("finishes a chunked response without waiting for the upstream TCP connection to close", async () => {
+    const upstream = net.createServer((socket) => {
+      socket.on("data", () => socket.write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n0\r\n\r\n"));
+    });
+    upstream.listen(0, "127.0.0.1");
+    await once(upstream, "listening");
+    closers.push(async () => { const done = once(upstream, "close"); upstream.close(); await done; });
+    const proxy = await listen(startEgressProxy({ port: 0, resolve: async () => ["9.9.9.9"], dial: () => net.connect((upstream.address() as AddressInfo).port, "127.0.0.1") }));
+    expect(await httpBody(proxy.port, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")).toBe("ab");
+  });
+
   it("rejects private targets and non-80/443 ports in direct mode", async () => {
     const dialed: Array<{ address: string; port: number }> = [];
     const proxy = await listen(startEgressProxy({
@@ -112,7 +157,11 @@ describe("machined egress proxy", () => {
     expect(response.status, response.body).toBe(200);
     expect(response.body).toContain("OK");
     expect(upstream.text()).toContain("GET /hello HTTP/1.1");
-    expect(upstream.text()).toContain("Host: example.com");
+    const headers = Object.fromEntries(upstream.text().split("\r\n").slice(1).filter((line) => line.includes(":")).map((line) => {
+      const colon = line.indexOf(":");
+      return [line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim()];
+    }));
+    expect(headers.host).toBe("example.com");
   });
 
   it("forces proxy variables over the command environment", () => {
@@ -130,6 +179,7 @@ describe("machined egress proxy", () => {
     await app.listen({ host: "127.0.0.1", port: 0 });
     closers.push(() => app.close());
     const address = app.server.address() as AddressInfo;
+    expect((await raw(proxyPort, "CONNECT 127.0.0.1:80 HTTP/1.1\r\nHost: 127.0.0.1:80\r\n\r\n")).status).toBe(503);
     await expect(openSocket(address.port, undefined)).rejects.toThrow();
     const ws = await openSocket(address.port, "machine-token");
     closers.push(async () => {
@@ -256,6 +306,9 @@ async function socketPipe(port: number): Promise<BytePipe> {
     },
     onDrain(cb) {
       onDrain = cb;
+    },
+    onError(cb) {
+      socket.on("error", cb);
     },
   };
 }

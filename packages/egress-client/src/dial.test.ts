@@ -17,6 +17,40 @@ const blocked = [
 ];
 
 describe("client dial target checks", () => {
+  it("settles a socket that closes before connecting", async () => {
+    let settled = false;
+    const result = dialTarget("8.8.8.8", 80, { connect() {
+      const socket = new net.Socket();
+      queueMicrotask(() => socket.destroy());
+      return socket;
+    } });
+    void result.then(() => { settled = true; });
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setImmediate(resolve);
+    await promise;
+    expect(settled).toBe(true);
+    expect(await result).toMatchObject({ ok: false, code: "connect" });
+  });
+
+  it("allows fake-IP only with explicit opt-in, without allowing other private destinations", async () => {
+    const blockedFake = await dialTarget("fake.example", 80, { resolve: async () => ["198.18.1.2"] });
+    expect(blockedFake).toMatchObject({ ok: false, code: "blocked", message: expect.stringContaining("--allow-fake-ip") });
+    for (const addresses of [["10.0.0.1"], ["192.168.1.1"], ["127.0.0.1"], ["::1"], ["198.18.1.2", "192.168.1.1"]]) {
+      expect(await dialTarget("mixed.example", 80, { resolve: async () => addresses, allowFakeIp: true })).toMatchObject({ ok: false, code: "blocked" });
+    }
+    const server = net.createServer((socket) => socket.end());
+    const { promise, resolve } = Promise.withResolvers<void>();
+    server.listen(0, "127.0.0.1", resolve);
+    await promise;
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("没有监听端口");
+    try {
+      const result = await dialTarget("fake.example", 80, { allowFakeIp: true, resolve: async () => ["198.18.1.2"], connect: () => net.connect(address.port, "127.0.0.1") });
+      expect(result).toMatchObject({ ok: true, address: "198.18.1.2" });
+      if (result.ok) result.pipe.destroy();
+    } finally { server.close(); }
+  });
+
   it("refuses private literals and does not connect", async () => {
     for (const host of blocked) {
       let dialed = false;

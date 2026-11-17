@@ -18,6 +18,7 @@ export interface DevicePublic {
   createdAt: string;
   lastSeenAt: string | null;
   revokedAt: string | null;
+  allowFakeIp: boolean;
 }
 
 export interface DeviceAuth {
@@ -96,12 +97,13 @@ export function egressRepository(db: AppDatabase) {
       return result.changes > 0;
     },
     listDevices(scope: UserScope): DevicePublic[] {
-      return sql
+      const rows = sql
         .prepare(
-          `select id, name, created_at as createdAt, last_seen_at as lastSeenAt, revoked_at as revokedAt
+          `select id, name, created_at as createdAt, last_seen_at as lastSeenAt, revoked_at as revokedAt, allow_fake_ip as allowFakeIp
            from client_devices where user_id = ? order by created_at desc`,
         )
         .all(scope.userId) as DevicePublic[];
+      return rows.map((row) => ({ ...row, allowFakeIp: Boolean(row.allowFakeIp) }));
     },
     renameDevice(scope: UserScope, id: string, name: string): boolean {
       const result = sql
@@ -129,6 +131,9 @@ export function egressRepository(db: AppDatabase) {
     },
     touchDevice(id: string, seenAt: string, ip: string | null): void {
       sql.prepare("update client_devices set last_seen_at = ?, last_ip = ? where id = ? and revoked_at is null").run(seenAt, ip, id);
+    },
+    setFakeIp(id: string, enabled: boolean): void {
+      sql.prepare("update client_devices set allow_fake_ip = ? where id = ? and revoked_at is null").run(enabled ? 1 : 0, id);
     },
     userStatus(userId: string): string | undefined {
       const row = sql.prepare("select status from users where id = ?").get(userId) as { status: string } | undefined;

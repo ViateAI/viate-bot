@@ -22,6 +22,7 @@ export interface DockerDriverOptions {
   docker?: Docker;
   image: string;
   key: Buffer;
+  dns?: readonly string[];
   now?: () => Date;
 }
 
@@ -29,11 +30,13 @@ export class DockerDriver {
   readonly docker: Docker;
   private readonly image: string;
   private readonly key: Buffer;
+  private readonly dns: readonly string[];
 
   constructor(options: DockerDriverOptions) {
     this.docker = options.docker ?? new Docker({ socketPath: "/var/run/docker.sock" });
     this.image = options.image;
     this.key = options.key;
+    this.dns = options.dns ?? [];
   }
 
   async create(store: MachineStore, scope: UserScope, spec: MachineSpec): Promise<MachineRecord> {
@@ -57,9 +60,10 @@ export class DockerDriver {
       image,
       token,
       spec,
+      dns: this.dns,
     };
     const options = buildCreateOptions(input);
-    assertMachinePolicy(userId, options);
+    assertMachinePolicy(userId, options, this.dns);
     await this.removeContainerIfPresent(containerName(userId));
     const container = await this.docker.createContainer(options);
     const record: MachineRecord = {

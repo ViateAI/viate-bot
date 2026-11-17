@@ -1,11 +1,8 @@
-/**
- * 机器内的 HTTP 代理。只听 127.0.0.1，只放行 80 和 443。
- * direct 由这里解析并拨号；user_network 把主机名原样交给已经接上的出口流，由客户端解析。
- */
+/** HTTP framing belongs to Node's parser; both routes supply a checked byte stream. */
 import http from "node:http";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
-import type { Duplex } from "node:stream";
+import { Duplex, pipeline } from "node:stream";
 import {
   EGRESS_OPEN_TIMEOUT_MS,
   EGRESS_PROXY_HOST,
@@ -46,46 +43,13 @@ const HOP: Record<string, true> = {
   "proxy-authenticate": true,
 };
 
-/** 上游是 chunked 时先拆开再交给 Node。否则去掉 transfer-encoding 头之后，浏览器会把分块边界当成正文。 */
-function chunkedBody(write: (chunk: Buffer) => boolean): (chunk: Buffer) => boolean {
-  let pending = Buffer.alloc(0);
-  let size: number | null = null;
-  return (chunk) => {
-    pending = Buffer.concat([pending, chunk]);
-    while (true) {
-      if (size === null) {
-        const line = pending.indexOf("\r\n");
-        if (line < 0) return true;
-        const text = pending.subarray(0, line).toString("latin1").split(";")[0] ?? "";
-        const next = Number.parseInt(text, 16);
-        if (!Number.isFinite(next) || next < 0) return true;
-        pending = Buffer.from(pending.subarray(line + 2));
-        if (next === 0) return true;
-        size = next;
-      }
-      if (pending.length < size + 2) return true;
-      const body = Buffer.from(pending.subarray(0, size));
-      pending = Buffer.from(pending.subarray(size + 2));
-      size = null;
-      if (!write(body)) return false;
-    }
-  };
-}
-
 export function proxyEnvironment(port: number, base: NodeJS.ProcessEnv, extra?: Record<string, string>): NodeJS.ProcessEnv {
   const value = `http://${EGRESS_PROXY_HOST}:${port}`;
   return {
-    ...base,
-    ...extra,
-    HTTP_PROXY: value,
-    HTTPS_PROXY: value,
-    http_proxy: value,
-    https_proxy: value,
-    NO_PROXY: "localhost,127.0.0.1",
-    no_proxy: "localhost,127.0.0.1",
-    HOME: "/home/bot",
-    USER: "bot",
-    LOGNAME: "bot",
+    ...base, ...extra,
+    HTTP_PROXY: value, HTTPS_PROXY: value, http_proxy: value, https_proxy: value,
+    NO_PROXY: "localhost,127.0.0.1", no_proxy: "localhost,127.0.0.1",
+    HOME: "/home/bot", USER: "bot", LOGNAME: "bot",
   };
 }
 
@@ -95,30 +59,38 @@ export function startEgressProxy(options: {
   dial?: (address: string, port: number) => net.Socket;
 } = {}): EgressProxy {
   const resolve = options.resolve ?? defaultResolve;
-  const dial = options.dial ?? ((address: string, port: number) => net.connect({ host: address, port, family: net.isIP(address) === 6 ? 6 : 4 }));
+  const dial = options.dial ?? ((address: string, port: number) => net.connect({ host: address, port, family: net.isIP(address) === 6 ? 6 : 4, allowHalfOpen: true }));
   let config: EgressConfig = { mode: "direct", offlinePolicy: "pause", deviceOnline: false };
   let peer: MachinePeer | null = null;
+  let stopped = false;
+  const sockets = new Set<Duplex>();
+  const track = <T extends Duplex>(socket: T): T => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    if (stopped) socket.destroy();
+    return socket;
+  };
   const server = http.createServer((req, res) => {
     void handleHttp(req, res).catch((error: unknown) => {
-      if (res.headersSent || res.writableEnded) return;
+      if (res.destroyed) return;
+      if (res.headersSent) { res.destroy(); return; }
       const status = error instanceof ProxyError ? error.status : 502;
       res.writeHead(status, { "content-type": "text/plain; charset=utf-8", connection: "close" });
       res.end(error instanceof Error ? error.message : "连接失败");
     });
   });
+  server.on("connection", (socket) => track(socket));
   server.on("connect", (req, socket, head) => {
-    void handleConnect(req, socket, head).catch((error: unknown) => {
-      const status = error instanceof ProxyError ? error.status : 502;
-      const message = error instanceof Error ? error.message : "连接失败";
-      writeRaw(socket, status, message);
-    });
+    void handleConnect(req, socket, head).catch((error: unknown) => writeRaw(socket, error));
   });
-  const ready = new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(options.port ?? EGRESS_PROXY_PORT, EGRESS_PROXY_HOST, () => {
-      server.off("error", reject);
-      resolve();
-    });
+  server.on("upgrade", (req, socket, head) => {
+    void handleUpgrade(req, socket, head).catch((error: unknown) => writeRaw(socket, error));
+  });
+  const { promise: ready, resolve: markReady, reject } = Promise.withResolvers<void>();
+  server.once("error", reject);
+  server.listen(options.port ?? EGRESS_PROXY_PORT, EGRESS_PROXY_HOST, () => {
+    server.off("error", reject);
+    markReady();
   });
   return {
     ready,
@@ -126,377 +98,188 @@ export function startEgressProxy(options: {
       const address = server.address();
       return address && typeof address === "object" ? address.port : (options.port ?? EGRESS_PROXY_PORT);
     },
-    setConfig(next) {
-      config = next;
-    },
-    setPeer(next) {
-      peer = next;
-    },
+    setConfig(next) { config = next; },
+    setPeer(next) { peer = next; },
     close() {
-      return new Promise((resolveClose) => server.close(() => resolveClose()));
+      stopped = true;
+      for (const socket of sockets) socket.destroy();
+      const { promise, resolve: closed } = Promise.withResolvers<void>();
+      server.close(() => closed());
+      return promise;
     },
   };
 
   function decide(): "direct" | "tunnel" | "pause" {
     if (config.mode !== "user_network") return "direct";
     if (config.deviceOnline && peer) return "tunnel";
-    if (config.offlinePolicy === "fallback_direct") return "direct";
-    return "pause";
+    return config.offlinePolicy === "fallback_direct" ? "direct" : "pause";
   }
 
   async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const pending: Buffer[] = [];
-    let requestEnded = false;
-    let link: Link | null = null;
-    const flush = () => {
-      if (!link) return;
-      while (pending.length > 0) {
-        const next = pending[0];
-        if (!next) break;
-        if (!link.send(next)) {
-          req.pause();
-          return;
-        }
-        pending.shift();
-      }
-      if (requestEnded) link.finish();
-    };
-    req.on("data", (chunk: Buffer) => {
-      pending.push(chunk);
-      let queued = 0;
-      for (const item of pending) queued += item.length;
-      if (!link && queued > 1024 * 1024) {
-        req.destroy();
-        return;
-      }
-      flush();
-    });
-    req.on("end", () => {
-      requestEnded = true;
-      flush();
-    });
-    req.on("error", () => link?.destroy());
+    req.pause();
     const target = parseAbsolute(req.url ?? "");
     if (!target) throw new ProxyError(400, "需要绝对 URL");
     if (!portAllowed(target.port)) throw new ProxyError(403, "端口不允许");
-    const route = decide();
-    if (route === "pause") {
+    if (decide() === "pause") {
       res.writeHead(503, { "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(OFFLINE_HTML), connection: "close" });
       res.end(OFFLINE_HTML);
       return;
     }
-    const opened = await open(route, target.host, target.port);
-    link = opened;
-    let headersSent = false;
-    let buffer = Buffer.alloc(0);
-    let decode: ((chunk: Buffer) => boolean) | null = null;
-    const writeBody = (chunk: Buffer) => {
-      if (chunk.length === 0) return true;
-      const ok = res.write(chunk);
-      if (!ok) opened.pause();
-      return ok;
-    };
-    opened.onData((chunk) => {
-      if (headersSent) return decode ? decode(chunk) : writeBody(chunk);
-      buffer = Buffer.concat([buffer, chunk]);
-      const split = buffer.indexOf("\r\n\r\n");
-      if (split < 0) {
-        if (buffer.length > 64 * 1024) opened.destroy();
-        return true;
-      }
-      const raw = buffer.subarray(0, split).toString("latin1");
-      const rest = buffer.subarray(split + 4);
-      const [statusLine, ...lines] = raw.split("\r\n");
-      const status = Number(statusLine?.split(" ")[1] ?? 502);
-      const headers: Record<string, string | string[]> = {};
-      let chunked = false;
-      for (const line of lines) {
-        const index = line.indexOf(":");
-        if (index <= 0) continue;
-        const name = line.slice(0, index).trim();
-        const value = line.slice(index + 1).trim();
-        if (name.toLowerCase() === "transfer-encoding" && value.toLowerCase().includes("chunked")) chunked = true;
-        if (HOP[name.toLowerCase()]) continue;
-        const existing = headers[name];
-        headers[name] = existing === undefined ? value : Array.isArray(existing) ? [...existing, value] : [existing, value];
-      }
-      headersSent = true;
-      if (chunked) decode = chunkedBody(writeBody);
-      res.writeHead(Number.isInteger(status) ? status : 502, { ...headers, connection: "close" });
-      if (rest.length === 0) return true;
-      return decode ? decode(rest) : writeBody(rest);
+    const socket = await open(target.host, target.port);
+    if (res.destroyed) { socket.destroy(); return; }
+    const agent = new http.Agent({ keepAlive: false });
+    agent.createConnection = () => socket;
+    const upstream = http.request({
+      method: req.method, path: target.path, host: target.host, port: target.port,
+      headers: { ...headersOf(req.headers), host: target.hostHeader, connection: "close" },
+      agent,
     });
-    res.on("drain", () => opened.resume());
-    opened.onEnd(() => {
-      if (!res.writableEnded) res.end();
+    upstream.on("response", (response) => {
+      res.writeHead(response.statusCode ?? 502, { ...headersOf(response.headers), connection: "close" });
+      pipeline(response, res, () => socket.destroy());
     });
-    opened.onError(() => {
-      if (!res.headersSent) res.writeHead(502);
+    upstream.on("error", () => {
+      if (!res.headersSent) res.writeHead(502, { connection: "close" });
       res.end();
+      socket.destroy();
     });
-    const head = Buffer.from(`${req.method ?? "GET"} ${target.path} HTTP/1.1\r\nHost: ${target.hostHeader}\r\n${headerLines(req)}\r\n`);
-    pending.unshift(head);
-    opened.onSendDrain(() => {
-      req.resume();
-      flush();
-    });
-    res.on("close", () => opened.destroy());
-    flush();
+    res.on("close", () => { upstream.destroy(); socket.destroy(); });
+    req.on("error", () => upstream.destroy());
+    req.pipe(upstream);
   }
 
   async function handleConnect(req: http.IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     const target = parseAuthority(req.url ?? "");
     if (!target) throw new ProxyError(400, "CONNECT 目标无效");
     if (!portAllowed(target.port)) throw new ProxyError(403, "端口不允许");
+    const upstream = await open(target.host, target.port);
+    if (socket.destroyed) { upstream.destroy(); return; }
+    socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    bridge(socket, upstream, head);
+  }
+
+  async function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
+    const target = parseAbsolute((req.url ?? "").replace(/^ws:\/\//, "http://"));
+    if (!target) throw new ProxyError(400, "需要绝对 URL");
+    if (!portAllowed(target.port)) throw new ProxyError(403, "端口不允许");
+    const upstream = await open(target.host, target.port);
+    if (socket.destroyed) { upstream.destroy(); return; }
+    const headers = { ...headersOf(req.headers), host: target.hostHeader, connection: "Upgrade", upgrade: req.headers.upgrade ?? "websocket" };
+    upstream.write(`${req.method ?? "GET"} ${target.path} HTTP/1.1\r\n${Object.entries(headers).map(([name, value]) => `${name}: ${value}\r\n`).join("")}\r\n`);
+    bridge(socket, upstream, head);
+  }
+
+  async function open(host: string, port: number): Promise<Duplex> {
     const route = decide();
     if (route === "pause") throw new ProxyError(503, OFFLINE_BODY);
-    const link = await open(route, target.host, target.port);
-    socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-    link.onData((chunk) => {
-      const ok = socket.write(chunk);
-      if (!ok) link.pause();
-      return ok;
-    });
-    socket.on("drain", () => link.resume());
-    if (head.length > 0 && !link.send(head)) socket.pause();
-    socket.on("data", (chunk: Buffer) => {
-      if (!link.send(chunk)) socket.pause();
-    });
-    link.onSendDrain(() => socket.resume());
-    socket.on("end", () => link.finish());
-    socket.on("error", () => link.destroy());
-    socket.on("close", () => link.destroy());
-    link.onEnd(() => socket.end());
-    link.onError(() => socket.destroy());
-  }
-
-  async function open(route: "direct" | "tunnel", host: string, port: number): Promise<Link> {
-    if (route === "tunnel") return openTunnel(host, port);
+    if (route === "tunnel") {
+      if (!peer) throw new ProxyError(503, OFFLINE_BODY);
+      const tunnel = peer.open(host, port);
+      const timer = setTimeout(() => tunnel.reset(), EGRESS_OPEN_TIMEOUT_MS);
+      try { await tunnel.ready; }
+      catch (error) {
+        throw new ProxyError(error instanceof EgressOpenError && error.code === "blocked" ? 403 : 502, error instanceof Error ? error.message : "连接失败");
+      } finally { clearTimeout(timer); }
+      return track(tunnelSocket(tunnel));
+    }
     const checked = await checkEgressTarget(host, resolve);
     if (!checked.ok) throw new ProxyError(checked.code === "dns" ? 502 : 403, checked.message);
-    const socket = dial(checked.address, port);
-    const timer = setTimeout(() => {
-      socket.destroy();
-    }, 10_000);
-    try {
-      await new Promise<void>((resolve, reject) => {
-        socket.once("connect", () => resolve());
-        socket.once("error", () => reject(new ProxyError(502, "连接失败")));
-      });
-    } catch {
-      throw new ProxyError(502, "连接失败");
-    } finally {
+    const socket = track(dial(checked.address, port));
+    const { promise, resolve: connected, reject: failed } = Promise.withResolvers<void>();
+    const onError = () => failed(new ProxyError(502, "连接失败"));
+    socket.once("connect", connected);
+    socket.once("error", onError);
+    socket.once("close", onError);
+    const timer = setTimeout(() => socket.destroy(new Error("连接超时")), 10_000);
+    try { await promise; }
+    finally {
       clearTimeout(timer);
+      socket.off("connect", connected);
+      socket.off("error", onError);
+      socket.off("close", onError);
     }
-    return socketLink(socket);
-  }
-
-  async function openTunnel(host: string, port: number): Promise<Link> {
-    if (!peer) throw new ProxyError(503, OFFLINE_BODY);
-    const tunnel = peer.open(host, port);
-    const timer = setTimeout(() => tunnel.reset(), EGRESS_OPEN_TIMEOUT_MS);
-    try {
-      await tunnel.ready;
-    } catch (error) {
-      const status = error instanceof EgressOpenError && error.code === "blocked" ? 403 : 502;
-      throw new ProxyError(status, error instanceof Error ? error.message : "连接失败");
-    } finally {
-      clearTimeout(timer);
-    }
-    return tunnelLink(tunnel);
+    return socket;
   }
 }
 
 class ProxyError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-    this.name = "ProxyError";
-  }
+  constructor(readonly status: number, message: string) { super(message); this.name = "ProxyError"; }
 }
 
-interface Link {
-  send(chunk: Buffer): boolean;
-  finish(): void;
-  destroy(): void;
-  pause(): void;
-  resume(): void;
-  onData(cb: (chunk: Buffer) => boolean): void;
-  onSendDrain(cb: () => void): void;
-  onEnd(cb: () => void): void;
-  onError(cb: () => void): void;
-}
-
-function socketLink(socket: net.Socket): Link {
-  let onData: (chunk: Buffer) => boolean = () => true;
-  let onSendDrain: () => void = () => undefined;
-  let onEnd: () => void = () => undefined;
-  let onError: () => void = () => undefined;
-  socket.on("data", (chunk: Buffer) => {
-    if (!onData(chunk)) socket.pause();
-  });
-  socket.on("drain", () => onSendDrain());
-  socket.on("end", () => onEnd());
-  socket.on("error", () => onError());
-  return {
-    send(chunk) {
-      return socket.write(chunk);
-    },
-    finish() {
-      socket.end();
-    },
-    destroy() {
-      socket.destroy();
-    },
-    pause() {
-      socket.pause();
-    },
-    resume() {
-      socket.resume();
-    },
-    onData(cb) {
-      onData = cb;
-    },
-    onSendDrain(cb) {
-      onSendDrain = cb;
-    },
-    onEnd(cb) {
-      onEnd = cb;
-    },
-    onError(cb) {
-      onError = cb;
-    },
-  };
-}
-
-function tunnelLink(tunnel: Tunnel): Link {
-  let onData: (chunk: Buffer) => boolean = () => true;
-  let onSendDrain: () => void = () => undefined;
-  let onEnd: () => void = () => undefined;
-  let onError: () => void = () => undefined;
-  const pending: Buffer[] = [];
-  let ended = false;
-  let pumping = false;
-  let blocked = false;
+function tunnelSocket(tunnel: Tunnel): Duplex {
   let owed = 0;
-  const pump = () => {
-    if (pumping) return;
-    pumping = true;
-    while (pending.length > 0) {
-      const next = pending[0];
-      if (!next) break;
-      const accepted = tunnel.write(next);
-      if (accepted <= 0) {
-        pumping = false;
-        blocked = true;
-        tunnel.onDrain(pump);
-        return;
-      }
-      if (accepted < next.length) pending[0] = next.subarray(accepted);
-      else pending.shift();
-    }
-    pumping = false;
-    if (blocked) {
-      blocked = false;
-      onSendDrain();
-    }
-    if (ended && pending.length === 0) tunnel.end();
-  };
+  const socket = new Duplex({
+    allowHalfOpen: true,
+    read() {
+      const credit = owed;
+      owed = 0;
+      if (credit) tunnel.consumed(credit);
+    },
+    write(chunk: Buffer, _encoding, callback) {
+      let offset = 0;
+      const pump = () => {
+        while (offset < chunk.length) {
+          const accepted = tunnel.write(chunk.subarray(offset));
+          if (accepted === 0) { tunnel.onDrain(pump); return; }
+          offset += accepted;
+        }
+        callback();
+      };
+      pump();
+    },
+    final(callback) { tunnel.end(); callback(); },
+    destroy(error, callback) { tunnel.reset(); callback(error); },
+  });
   tunnel.onData((chunk) => {
-    const ok = onData(chunk);
-    if (ok) tunnel.consumed(chunk.length);
+    if (socket.push(chunk)) tunnel.consumed(chunk.length);
     else owed += chunk.length;
   });
   tunnel.onClose((info) => {
-    if (info.kind === "end") onEnd();
-    else onError();
+    if (info.kind === "end") socket.push(null);
+    else socket.destroy(new Error(info.message ?? "出口连接已断开"));
   });
-  return {
-    send(chunk) {
-      if (chunk.length === 0) return true;
-      pending.push(chunk);
-      pump();
-      return pending.length === 0;
-    },
-    finish() {
-      if (ended) return;
-      ended = true;
-      pump();
-    },
-    destroy() {
-      tunnel.reset();
-    },
-    pause() {},
-    resume() {
-      if (owed > 0) {
-        const credit = owed;
-        owed = 0;
-        tunnel.consumed(credit);
-      }
-    },
-    onData(cb) {
-      onData = cb;
-    },
-    onSendDrain(cb) {
-      onSendDrain = cb;
-    },
-    onEnd(cb) {
-      onEnd = cb;
-    },
-    onError(cb) {
-      onError = cb;
-    },
-  };
+  return socket;
+}
+
+function bridge(socket: Duplex, upstream: Duplex, head: Buffer): void {
+  socket.on("error", () => upstream.destroy());
+  upstream.on("error", () => socket.destroy());
+  socket.on("close", () => upstream.destroy());
+  upstream.on("close", () => socket.destroy());
+  if (head.length) upstream.write(head);
+  socket.pipe(upstream).pipe(socket);
+}
+
+function headersOf(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
+  const out: http.OutgoingHttpHeaders = {};
+  const nominated = new Set((headers.connection ?? "").toLowerCase().split(",").map((name) => name.trim()));
+  for (const [name, value] of Object.entries(headers)) {
+    if (!HOP[name] && !nominated.has(name)) out[name] = value;
+  }
+  return out;
 }
 
 function parseAbsolute(raw: string): { host: string; port: number; path: string; hostHeader: string } | null {
   if (!raw.startsWith("http://")) return null;
-  let url: URL;
   try {
-    url = new URL(raw);
-  } catch {
-    return null;
-  }
-  const port = url.port ? Number(url.port) : 80;
-  if (!Number.isInteger(port)) return null;
-  return { host: url.hostname, port, path: `${url.pathname}${url.search}`, hostHeader: url.host };
+    const url = new URL(raw);
+    if (url.username || url.password) return null;
+    return { host: url.hostname, port: url.port ? Number(url.port) : 80, path: `${url.pathname}${url.search}`, hostHeader: url.host };
+  } catch { return null; }
 }
 
 function parseAuthority(raw: string): { host: string; port: number } | null {
-  if (raw.startsWith("[")) {
-    const end = raw.indexOf("]");
-    if (end < 0 || raw[end + 1] !== ":") return null;
-    const port = Number(raw.slice(end + 2));
-    if (!Number.isInteger(port)) return null;
-    return { host: raw.slice(1, end), port };
-  }
-  const colon = raw.lastIndexOf(":");
-  if (colon <= 0) return null;
-  const port = Number(raw.slice(colon + 1));
-  if (!Number.isInteger(port)) return null;
-  return { host: raw.slice(0, colon), port };
+  const match = /^(\[[0-9a-fA-F:.]+\]|[^:/\s]+):([0-9]+)$/.exec(raw);
+  if (!match?.[1] || !match[2]) return null;
+  return { host: match[1].replace(/^\[|\]$/g, ""), port: Number(match[2]) };
 }
 
-function headerLines(req: http.IncomingMessage): string {
-  const lines: string[] = [];
-  for (let i = 0; i < req.rawHeaders.length; i += 2) {
-    const name = req.rawHeaders[i];
-    const value = req.rawHeaders[i + 1];
-    if (!name || value === undefined) continue;
-    if (HOP[name.toLowerCase()] || name.toLowerCase() === "host") continue;
-    lines.push(`${name}: ${value}\r\n`);
-  }
-  return lines.join("");
-}
-
-function writeRaw(socket: Duplex, status: number, message: string): void {
+function writeRaw(socket: Duplex, error: unknown): void {
+  if (socket.destroyed) return;
+  const status = error instanceof ProxyError ? error.status : 502;
   const reason = status === 403 ? "Forbidden" : status === 503 ? "Service Unavailable" : "Bad Gateway";
-  const body = Buffer.from(message);
-  socket.end(
-    `HTTP/1.1 ${status} ${reason}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body.toString("utf8")}`,
-  );
+  const body = error instanceof Error ? error.message : "连接失败";
+  socket.end(`HTTP/1.1 ${status} ${reason}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
 }
 
 export function proxyAddress(proxy: EgressProxy): AddressInfo {
