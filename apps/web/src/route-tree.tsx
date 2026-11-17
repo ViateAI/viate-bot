@@ -1,6 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRootRoute, createRoute, Link, Outlet } from "@tanstack/react-router";
+import { AdminApps } from "./admin-apps.js";
 import { AdminLayout, AdminMachines, AdminSettings, AdminTemplates, AdminUsers } from "./admin.js";
+import { AppsPage } from "./apps-page.js";
+import { AdminAudit, AdminMetrics } from "./admin-metrics.js";
+import { Approvals } from "./approval.js";
 import { api, rememberCsrf, type Me } from "./api.js";
 import { BotList } from "./bots.js";
 import { ChatPage } from "./chat.js";
@@ -22,6 +26,18 @@ const chatRoute = createRoute({
     const { botId } = chatRoute.useParams();
     return <ChatPage botId={botId} />;
   },
+});
+
+const approvalsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/approvals",
+  component: Approvals,
+});
+
+const appsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/apps",
+  component: AppsPage,
 });
 
 const adminRoute = createRoute({
@@ -54,10 +70,38 @@ const adminSettingsRoute = createRoute({
   component: AdminSettings,
 });
 
+const adminMetricsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "metrics",
+  component: AdminMetrics,
+});
+
+const adminAuditRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "audit",
+  component: AdminAudit,
+});
+
+const adminAppsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "apps",
+  component: AdminApps,
+});
+
 export const routeTree = rootRoute.addChildren([
   indexRoute,
   chatRoute,
-  adminRoute.addChildren([adminIndexRoute, adminMachinesRoute, adminTemplatesRoute, adminSettingsRoute]),
+  approvalsRoute,
+  appsRoute,
+  adminRoute.addChildren([
+    adminIndexRoute,
+    adminMachinesRoute,
+    adminTemplatesRoute,
+    adminSettingsRoute,
+    adminMetricsRoute,
+    adminAuditRoute,
+    adminAppsRoute,
+  ]),
 ]);
 
 function Shell() {
@@ -83,6 +127,12 @@ function Shell() {
       <header className="flex items-center justify-between border-b border-neutral-800 px-6 py-3 text-sm">
         <span className="flex items-center gap-4">
           viate-bot
+          <Link to="/approvals" className="text-neutral-300">
+            审批
+          </Link>
+          <Link to="/apps" className="text-neutral-300">
+            应用
+          </Link>
           {me.data?.isAdmin ? (
             <Link to="/admin" data-testid="admin-link" className="text-neutral-300">
               管理

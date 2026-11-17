@@ -26,7 +26,12 @@ export function createDriver(): DockerDriver {
   });
 }
 
-export function reconcileDeps(db: AppDatabase, driver: DockerDriver, probe: ActivityProbe = idleActivityProbe): ReconcileDeps {
+export function reconcileDeps(
+  db: AppDatabase,
+  driver: DockerDriver,
+  probe: ActivityProbe = idleActivityProbe,
+  reconcileApps?: ReconcileDeps["reconcileApps"],
+): ReconcileDeps {
   const config = loadConfig();
   return {
     driver,
@@ -35,6 +40,7 @@ export function reconcileDeps(db: AppDatabase, driver: DockerDriver, probe: Acti
     probe,
     idleStopMinutes: config.idleStopMinutes,
     key: loadOrCreateKey(config.secretKeyPath),
+    ...(reconcileApps ? { reconcileApps } : {}),
   };
 }
 

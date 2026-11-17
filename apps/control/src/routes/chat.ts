@@ -7,6 +7,8 @@ import { BotRejected, createBot, deleteBot } from "../bot-service.js";
 import type { ControlConfig } from "../config.js";
 import { botRepository } from "../db/bots.js";
 import { chatRepository } from "../db/chat.js";
+import { acceptRemoteRisk } from "../agent/remote-uncertain.js";
+import { remoteUncertain } from "../agent/remote-uncertain.js";
 import type { AppDatabase } from "../db/index.js";
 import { memoryRepository } from "../db/memories.js";
 import { quotaRepository } from "../db/quotas.js";
@@ -147,7 +149,12 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!scope) return;
     const rows = chat.listTasks(scope, request.params.id);
     if (!rows) return reply.code(404).send({ error: "找不到对话" });
-    return { tasks: rows.map(taskView) };
+    return {
+      tasks: rows.map((row) => ({
+        ...taskView(row),
+        remoteUncertain: row.error === "remote_unconfirmed" && remoteUncertain(deps.db, scope.userId),
+      })),
+    };
   });
 
   app.get<{ Params: { id: string } }>("/api/messages/:id", async (request, reply) => {
@@ -163,7 +170,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!scope) return;
     const row = chat.findTask(scope, request.params.id);
     if (!row) return reply.code(404).send({ error: "找不到任务" });
-    return { task: taskView(row) };
+    return { task: { ...taskView(row), remoteUncertain: remoteUncertain(deps.db, scope.userId) } };
   });
 
   app.get<{ Params: { id: string } }>("/api/tasks/:id/steps", async (request, reply) => {
@@ -223,6 +230,15 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!scope) return;
     const ok = deps.chat.stop(scope, request.params.id);
     if (!ok) return reply.code(404).send({ error: "找不到任务" });
+    return { ok: true };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/accept-remote-risk", async (request, reply) => {
+    const scope = scopeOf(request, reply);
+    if (!scope) return;
+    const task = chat.findTask(scope, request.params.id);
+    if (!task || task.error !== "remote_unconfirmed") return reply.code(404).send({ error: "找不到任务" });
+    if (!acceptRemoteRisk(deps.db, scope.userId, task.id)) return reply.code(409).send({ error: "没有未确认的远端执行" });
     return { ok: true };
   });
 

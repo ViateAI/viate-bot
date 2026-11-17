@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { api, taskLabel, type ChatMessage, type Conversation, type MemoryItem, type Step, type Task } from "./api.js";
+import { Computer } from "./computer.js";
+import { Routines } from "./routines.js";
 
 export function ChatPage({ botId }: { botId: string }) {
   const queryClient = useQueryClient();
@@ -42,7 +44,7 @@ export function ChatPage({ botId }: { botId: string }) {
     queryFn: () => api<{ tasks: Task[] }>(`/api/conversations/${conversationId}/tasks`),
     refetchInterval: (query) => {
       const latest = query.state.data?.tasks[0];
-      return latest && (latest.state === "queued" || latest.state === "running" || latest.state === "waiting_input") ? 1000 : false;
+      return latest && ["queued", "running", "waiting_input", "waiting_approval", "waiting_takeover"].includes(latest.state) ? 1000 : false;
     },
   });
   const task = tasks.data?.tasks[0];
@@ -55,10 +57,10 @@ export function ChatPage({ botId }: { botId: string }) {
     queryKey: ["steps", task?.id],
     enabled: Boolean(task?.id),
     queryFn: () => api<{ steps: Step[] }>(`/api/tasks/${task?.id}/steps`),
-    refetchInterval: task && (task.state === "queued" || task.state === "running" || task.state === "waiting_input") ? 1000 : false,
+    refetchInterval: task && ["queued", "running", "waiting_input", "waiting_approval", "waiting_takeover"].includes(task.state) ? 1000 : false,
   });
   const active = task?.state === "queued" || task?.state === "running";
-  const stoppable = active || task?.state === "waiting_input";
+  const stoppable = active || task?.state === "waiting_input" || task?.state === "waiting_approval" || task?.state === "waiting_takeover";
   const secret = task?.state === "waiting_input" ? pendingSecret(steps.data?.steps ?? []) : undefined;
 
   useEffect(() => {
@@ -113,6 +115,13 @@ export function ChatPage({ botId }: { botId: string }) {
     },
     onError: (caught: Error) => setError(caught.message),
   });
+  const acceptRemote = useMutation({
+    mutationFn: () => api(`/api/tasks/${task?.id}/accept-remote-risk`, { method: "POST" }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["tasks", conversationId] });
+    },
+    onError: (caught: Error) => setError(caught.message),
+  });
 
   function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -129,9 +138,11 @@ export function ChatPage({ botId }: { botId: string }) {
           <h1 className="text-xl font-semibold">{bot.data?.bot.name ?? "对话"}</h1>
         </div>
         <p data-testid="task-status" className="text-sm text-amber-200">
-          {taskLabel(task?.state ?? "", machine)}
+          {taskLabel(task?.state ?? "", machine, task?.error)}
         </p>
       </div>
+      <Computer botId={botId} />
+      <Routines botId={botId} />
       <div data-testid="transcript" className="mt-6 flex-1 space-y-4">
         <ol data-testid="message-list" className="space-y-3">
           {(messages.data?.messages ?? []).map((message) => (
@@ -163,7 +174,22 @@ export function ChatPage({ botId }: { botId: string }) {
             </li>
           ))}
         </ol>
-        {task?.error ? <pre className="overflow-auto rounded bg-red-950 p-3 text-sm text-red-100">{task.error}</pre> : null}
+        {task?.error === "remote_unconfirmed" ? (
+          <div className="rounded bg-red-950 p-3 text-sm text-red-100" data-testid="remote-unconfirmed">
+            <p>停止只结束了本地等待。远端可能仍在执行。继续写操作或接管可能并发或重复。这不是远端已停止。</p>
+            {task.remoteUncertain ? (
+              <button
+                type="button"
+                data-testid="accept-remote-risk"
+                className="mt-2 rounded border border-red-300 px-3 py-2"
+                disabled={acceptRemote.isPending}
+                onClick={() => acceptRemote.mutate()}
+              >
+                我知道远端可能仍在执行，仍要继续
+              </button>
+            ) : null}
+          </div>
+        ) : task?.error ? <pre className="overflow-auto rounded bg-red-950 p-3 text-sm text-red-100">{task.error}</pre> : null}
         {error ? <p className="text-sm text-red-300">{error}</p> : null}
       </div>
       <div data-testid="memory-list" className="mt-6 rounded border border-neutral-800 p-3">
@@ -218,7 +244,7 @@ export function ChatPage({ botId }: { botId: string }) {
             disabled={!stoppable || stop.isPending}
             onClick={() => stop.mutate()}
           >
-            停止
+            {task?.error === "remote_unconfirmed" ? "停止本地等待" : "停止"}
           </button>
         </div>
       </form>

@@ -1,9 +1,11 @@
 import { mkdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import Fastify, { type FastifyInstance } from "fastify";
 import { deleteCreatedMachine, dockerMachineControl } from "./admin/docker-control.js";
-import { createChatService, type ChatService } from "./agent/service.js";
+import { ChatError, createChatService, type ChatService } from "./agent/service.js";
 import type { MachineControl } from "./admin/service.js";
 import { registerAuth } from "./auth.js";
 import { createRuntime } from "./compose.js";
@@ -11,13 +13,26 @@ import { loadConfig, type ControlConfig } from "./config.js";
 import { decrypt, loadOrCreateKey } from "./crypto.js";
 import { openDatabase, type AppDatabase } from "./db/index.js";
 import { machineRepository } from "./db/machines.js";
-import { ensureDevUser } from "./db/users.js";
+import { ensureDevUser, userRepository } from "./db/users.js";
 import { createGateway, type GatewayTask } from "./gateway/stream.js";
 import { taskActivityProbe } from "./machines/activity.js";
 import { DockerDriver } from "./machines/docker.js";
 import { reconcileOnce } from "./machines/loop.js";
 import type { MachineSpec } from "./machines/policy.js";
-import { ensureUserMachine, prepareMachineEndpoint } from "./machines/ready.js";
+import { MachinedClient } from "./machines/client.js";
+import { ensureUserMachine, prepareMachineEndpoint, type MachineHost } from "./machines/ready.js";
+import { applyRetention, flushMinutes, opsMinutes } from "./ops/rollup.js";
+import { registerOpsRoutes } from "./ops/routes.js";
+import { reconcileMachineApps, registerCatalogRoutes } from "./apps/catalog.js";
+import { registerApprovalRoutes } from "./approvals/routes.js";
+import { createUserFlights, type UserFlights } from "./screen/flight.js";
+import { createScreenInputDrain } from "./screen/input-drain.js";
+import { createTakeoverLeases, type TakeoverLeases } from "./screen/leases.js";
+import { remoteUncertain } from "./agent/remote-uncertain.js";
+import { registerScreenGateway, registerScreenRoutes } from "./screen/gateway.js";
+import { notifyTaskSettled, registerNotificationRoutes } from "./notify/index.js";
+import { dispatchDue, RoutineError, usersToWake } from "./routines/service.js";
+import { registerRoutineRoutes as registerRoutineHttp } from "./routines/routes.js";
 import type { AppRuntime } from "./providers.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerChatRoutes } from "./routes/chat.js";
@@ -33,6 +48,8 @@ export interface ControlContext {
   driver: DockerDriver;
   config: ControlConfig;
   key: Buffer;
+  /** buildApp 写入。显式回调，不挂在数据库对象上。 */
+  reconcileApps?: NonNullable<MachineHost["reconcileApps"]>;
 }
 
 export interface AppOptions {
@@ -45,6 +62,9 @@ export interface AppOptions {
   deleteMachine?: (userId: string) => Promise<void>;
   machineControl?: MachineControl;
   retryDelays?: number[];
+  flights?: UserFlights;
+  leases?: TakeoverLeases;
+  https?: { key: Buffer; cert: Buffer };
 }
 
 const runtimes = new WeakMap<FastifyInstance, AppRuntime>();
@@ -58,7 +78,10 @@ export function openContext(config: ControlConfig = loadConfig()): ControlContex
 }
 
 export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
-  const app = Fastify({ logger: process.env.VITEST === "true" ? false : true });
+  const app = Fastify({
+    logger: process.env.VITEST === "true" ? false : true,
+    ...(options.https ? { https: options.https } : {}),
+  });
   const { db, driver, config, key } = ctx;
   const hub = createHub();
   const now = options.now ?? (() => new Date());
@@ -73,6 +96,28 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
   runtimes.set(app, runtime);
   registerAuth(app, { db, key, config, runtime, now });
   const tasks = new Map<string, GatewayTask>();
+  const flights = options.flights ?? createUserFlights();
+  const inputDrain = createScreenInputDrain();
+  const leases =
+    options.leases ??
+    createTakeoverLeases({
+    db,
+    secretWaitMs: config.secretWaitMs,
+    now,
+    flights,
+    writesBlocked: (userId) => remoteUncertain(db, userId),
+    drainInput: (botId) => inputDrain.revoke(botId),
+    onWaiting(taskId) {
+      const row = db.$client
+        .prepare("select t.trigger as trigger, t.bot_id as botId, b.user_id as userId from tasks t join bots b on b.id=t.bot_id where t.id=?")
+        .get(taskId) as { trigger: string; botId: string; userId: string } | undefined;
+      if (row?.trigger === "routine") notifyTaskSettled(db, { userId: row.userId, botId: row.botId, taskId, outcome: "needs_user" });
+    },
+    quiesce: async (botId) => {
+      const row = db.$client.prepare("select user_id as userId from bots where id=?").get(botId) as { userId: string } | undefined;
+      if (row) await flights.barrier(row.userId);
+    },
+  });
   const chat = createChatService({
     db,
     config,
@@ -91,6 +136,8 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
       options.prepareEndpoint ??
       ((userId, onPhase) => prepareMachineEndpoint(ctx, userId, onPhase, options.fetch ?? fetch)),
     now,
+    leases,
+    flights,
   });
   chats.set(app, chat);
   const ensureMachine = options.ensureMachine ?? ((userId: string, spec?: MachineSpec) => ensureUserMachine(ctx, userId, spec));
@@ -119,6 +166,102 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     now,
   });
   registerWebsocket(app, { db, key, config, runtime, hub, now });
+  const prepare =
+    options.prepareEndpoint ??
+    ((userId: string, onPhase: (phase: "starting" | "ready") => void) =>
+      prepareMachineEndpoint(ctx, userId, onPhase, options.fetch ?? fetch));
+  const screen = {
+    db,
+    key,
+    config,
+    runtime,
+    now,
+    leases,
+    inputDrain,
+    wake: async (userId: string) => {
+      await prepare(userId, () => {});
+    },
+    endpoint: async (userId: string, _botId: string) => ({
+      machine: await prepare(userId, () => {}),
+      display: 1,
+    }),
+  };
+  app.after(() => {
+    registerScreenGateway(app, screen);
+    registerScreenRoutes(app, screen);
+  });
+  registerOpsRoutes(app, { db, now, metricsToken: config.metricsToken });
+  registerApprovalRoutes(app, {
+    db,
+    gate: chat.approvalGate,
+  });
+  const enqueueRoutine = (work: { userId: string; botId: string; prompt: string; runId: string }) => {
+    try {
+      return chat.enqueueRoutine({ userId: work.userId, botId: work.botId, prompt: work.prompt, routineRunId: work.runId });
+    } catch (error) {
+      if (error instanceof ChatError) throw new RoutineError(error.message, error.statusCode);
+      throw error;
+    }
+  };
+  registerRoutineHttp(app, { db, enqueue: enqueueRoutine });
+  registerNotificationRoutes(app, { db });
+  const fetchImpl = options.fetch ?? fetch;
+  const reconcileAttempted = new Set<string>();
+  const reconcileInflight = new Map<string, Promise<void>>();
+  const catalogInstaller = {
+    async install(command: { userId: string; archivePath: string; name: string; version: string; sha256: string }) {
+      const archive = await readFile(archiveInside(config.dataDir, command.archivePath));
+      const endpoint = await prepare(command.userId, () => {});
+      const routines = await new MachinedClient(endpoint, fetchImpl).installApp({
+        name: command.name,
+        version: command.version,
+        sha256: command.sha256,
+        archive,
+      });
+      return { routines };
+    },
+    async uninstall(command: { userId: string; name: string }) {
+      const endpoint = await prepare(command.userId, () => {});
+      await new MachinedClient(endpoint, fetchImpl).uninstallApp(command.name);
+    },
+  };
+  ctx.reconcileApps = (input) => {
+    const attempt = `${input.machineId}:${input.containerId}`;
+    if (!input.force && reconcileAttempted.has(attempt)) return Promise.resolve();
+    const pending = reconcileInflight.get(attempt);
+    if (pending) return pending;
+    if (!input.force) reconcileAttempted.add(attempt);
+    const run = reconcileMachineApps(
+      {
+        db,
+        key,
+        dataDir: config.dataDir,
+        installer: catalogInstaller,
+        wake: async (userId) => {
+          await prepare(userId, () => {});
+        },
+      },
+      input.machineId,
+    ).then(
+      () => undefined,
+      (error: unknown) => {
+        console.error("应用对账失败", error instanceof Error ? error.message : "unknown");
+      },
+    ).finally(() => {
+      reconcileInflight.delete(attempt);
+    });
+    reconcileInflight.set(attempt, run);
+    return run;
+  };
+  registerCatalogRoutes(app, {
+    db,
+    key,
+    dataDir: config.dataDir,
+    installer: catalogInstaller,
+    wake: async (userId) => {
+      await prepare(userId, () => {});
+    },
+  });
   registerWeb(app);
   app.addHook("onClose", async () => {
     chat.shutdown();
@@ -180,7 +323,7 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
       };
     });
 
-    app.post("/dev/reconcile", async () => reconcileOnce(reconcileDeps(db, driver, taskActivityProbe(db))));
+    app.post("/dev/reconcile", async () => reconcileOnce(reconcileDeps(db, driver, taskActivityProbe(db), ctx.reconcileApps)));
   }
 
   return app;
@@ -198,12 +341,62 @@ export function chatService(app: FastifyInstance): ChatService {
 
 export function startReconcileLoop(ctx: ControlContext, intervalMs = 30_000): () => void {
   const timer = setInterval(() => {
-    reconcileOnce(reconcileDeps(ctx.db, ctx.driver, taskActivityProbe(ctx.db))).catch((error: unknown) => {
+    reconcileOnce(reconcileDeps(ctx.db, ctx.driver, taskActivityProbe(ctx.db), ctx.reconcileApps)).catch((error: unknown) => {
       console.error("对账失败", error);
     });
   }, intervalMs);
   timer.unref();
   return () => clearInterval(timer);
+}
+
+export function startRoutineLoop(app: FastifyInstance, ctx: ControlContext, intervalMs = 30_000): () => void {
+  const timer = setInterval(() => {
+    const chat = chats.get(app);
+    if (!chat) return;
+    const now = new Date();
+    for (const userId of usersToWake(ctx.db, now)) {
+      prepareMachineEndpoint(ctx, userId, () => {}).catch((error: unknown) => {
+        console.error("定时任务唤醒失败", error);
+      });
+    }
+    dispatchDue(ctx.db, now, {
+      userStatus: (userId) => userRepository(ctx.db).findById(userId)?.status ?? "unknown",
+      enqueue: (work) => {
+        try {
+          return chat.enqueueRoutine({
+            userId: work.userId,
+            botId: work.botId,
+            prompt: work.prompt,
+            routineRunId: work.runId,
+          });
+        } catch (error) {
+          if (error instanceof ChatError) throw new RoutineError(error.message, error.statusCode);
+          throw error;
+        }
+      },
+    }).catch((error: unknown) => {
+      console.error("定时任务调度失败", error);
+    });
+  }, intervalMs);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+export function startOpsMaintenance(ctx: ControlContext, intervalMs = 60 * 60 * 1000): () => void {
+  const timer = setInterval(() => {
+    flushMinutes(ctx.db, opsMinutes);
+    applyRetention(ctx.db, new Date());
+  }, intervalMs);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+function archiveInside(root: string, file: string): string {
+  const rootReal = resolve(root);
+  const fileReal = resolve(file);
+  const rel = relative(rootReal, fileReal);
+  if (rel.length === 0 || rel.startsWith("..") || rel.split(/[/\\]/).includes("..")) throw new Error("归档路径无效");
+  return fileReal;
 }
 
 function firstAddress(

@@ -15,7 +15,7 @@ import {
   type UserMessage,
 } from "@earendil-works/pi-ai";
 import type { ControlConfig } from "../config.js";
-import { eventRepository } from "../db/events.js";
+import { emitOps, opsMinutes } from "../ops/rollup.js";
 import type { AppDatabase } from "../db/index.js";
 import { settingsRepository } from "../db/settings.js";
 import { usageRepository } from "../db/usage.js";
@@ -552,7 +552,7 @@ function record(
     error,
   };
   try {
-    eventRepository(deps.db).insert({
+    emitOps(deps.db, opsMinutes, {
       id: ulid(now.getTime()),
       ts: now.toISOString(),
       userId: task.userId,

@@ -57,6 +57,9 @@ export function AdminLayout() {
         <Link to="/admin/machines" data-testid="admin-machines-link">机器</Link>
         <Link to="/admin/templates" data-testid="admin-templates-link">模板</Link>
         <Link to="/admin/settings" data-testid="admin-settings-link">设置</Link>
+        <Link to="/admin/metrics" data-testid="admin-metrics-link">看板</Link>
+        <Link to="/admin/audit" data-testid="admin-audit-link">审计</Link>
+        <Link to="/admin/apps" data-testid="admin-apps-link">应用</Link>
       </nav>
       <Outlet />
     </section>

@@ -1,4 +1,4 @@
-import { Agent, type AgentEvent, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
+import { Agent, type AfterToolCallContext, type AgentEvent, type AgentMessage, type AgentTool, type AgentToolResult, type BeforeToolCallContext, type StreamFn } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import type { ControlConfig } from "../config.js";
 import { decrypt } from "../crypto.js";
@@ -14,7 +14,19 @@ import { MachinedClient } from "../machines/client.js";
 import type { MachineEndpoint } from "@viate-bot/protocol";
 import { BrowserPool } from "./browser-session.js";
 import { browserScreenshotTool, browserTools } from "./browser-tools.js";
+import { approvalTools } from "./approval-tools.js";
+import { createApprovalGate } from "../approvals/gate.js";
+import { desktopTools } from "./desktop-tools.js";
+import { takeoverTool } from "./takeover-tool.js";
 import { memoryTools } from "./memory-tools.js";
+import type { TakeoverLeases } from "../screen/leases.js";
+import { trackExecution, type UserFlights } from "../screen/flight.js";
+import { M2_EVENTS, terminalErrorClass } from "../m2/events.js";
+import { READ_ONLY_TOOLS } from "../m2/risk.js";
+import { notifyTaskSettled } from "../notify/index.js";
+import { emitOps, opsMinutes } from "../ops/rollup.js";
+import { routineService } from "../routines/service.js";
+import { routineTools } from "./routine-tools.js";
 import { applyCompaction, COMPACT_STEP_LABEL, relayWithOverflowRetry } from "./compact.js";
 import { buildSystemPrompt, formatMemorySection, latestUserText, statusBlock } from "./prompt.js";
 import type { ChatHub } from "./events.js";
@@ -30,6 +42,10 @@ import {
   type SecretSubmission,
 } from "./secrets.js";
 import { maskDeep, maskSecrets } from "./text.js";
+import { appendMcpTools, MachinedMcpClient } from "./mcp-client.js";
+import { installsForModelContext, privateSkillStorage, resolveMcpLaunch, type CatalogDeps } from "../apps/catalog.js";
+import { markRemoteUncertain, remoteUncertain } from "./remote-uncertain.js";
+import { skillHttpMachine, skillPrompt, skillTools } from "./skill-tools.js";
 import { machineTools } from "./tools.js";
 import { assistantText, loadTranscript, loadTranscriptEntries, messageView, stepView, storedContent, taskView, withoutImages } from "./view.js";
 import { buildModel, type GatewayTask } from "../gateway/stream.js";
@@ -72,6 +88,8 @@ export interface ChatServiceDeps {
   prepareEndpoint: (userId: string, onPhase: (phase: "starting" | "ready") => void) => Promise<MachineEndpoint>;
   now?: () => Date;
   fetch?: typeof fetch;
+  leases?: TakeoverLeases;
+  flights?: UserFlights;
 }
 
 interface QueuedTask {
@@ -79,6 +97,8 @@ interface QueuedTask {
   botId: string;
   userId: string;
   conversationId: string;
+  /** 重启后要先把未完成的工具调用跑完，再 continue。 */
+  resume?: "approval" | "takeover";
 }
 
 interface Live extends QueuedTask {
@@ -89,6 +109,175 @@ interface Live extends QueuedTask {
   waitingInput: boolean;
   preserveWait: boolean;
   failReason?: string;
+  resumeAbort?: AbortController;
+  remoteUnconfirmed?: boolean;
+}
+
+function catalogDeps(deps: ChatServiceDeps): CatalogDeps {
+  return {
+    db: deps.db,
+    key: deps.key,
+    dataDir: deps.config.dataDir,
+    installer: {
+      async install() {
+        throw new Error("安装只能通过目录接口");
+      },
+      async uninstall() {
+        throw new Error("卸载只能通过目录接口");
+      },
+    },
+  };
+}
+
+async function installedMcpTools(
+  deps: ChatServiceDeps,
+  endpoint: MachineEndpoint,
+  userId: string,
+  taskId: string,
+  onUnconfirmed?: () => void,
+): Promise<{ tools: AgentTool[]; close: () => void }> {
+  const catalog = catalogDeps(deps);
+  let names: string[];
+  try {
+    names = installsForModelContext(catalog, userId).map((item) => item.name);
+  } catch {
+    return { tools: [], close: () => {} };
+  }
+  if (names.length === 0) return { tools: [], close: () => {} };
+  const files = new MachinedClient(endpoint, deps.fetch ?? fetch);
+  const fetchImpl = deps.fetch;
+  const client = new MachinedMcpClient({
+    endpoint,
+    ...(onUnconfirmed ? { onUnconfirmed: () => { onUnconfirmed(); } } : {}),
+    ...(fetchImpl
+      ? {
+          request: async (url: string, init: { method: string; headers: Record<string, string>; body?: string; redirect?: "manual"; signal?: AbortSignal }) => {
+            const response = await fetchImpl(url, init);
+            return { ok: response.ok, status: response.status, text: () => response.text() };
+          },
+        }
+      : {}),
+    resolveLaunch: (appName) => {
+      const launch = resolveMcpLaunch(catalog, userId, appName);
+      return { env: launch.env, headers: launch.headers };
+    },
+  });
+  const tools: AgentTool[] = [];
+  const used = new Set<string>();
+  let ready = false;
+  try {
+    for (const name of names) {
+      try {
+        const info = await files.inspectApp(name);
+        for (const server of info.mcpServers) {
+          const started = await client.launchApp(name, server, undefined, taskId);
+          const listed = await client.listTools(started.server);
+          tools.push(...appendMcpTools(used, client, started.server, listed.tools));
+        }
+      } catch {
+        continue;
+      }
+    }
+    ready = true;
+    return { tools, close: () => client.close() };
+  } finally {
+    if (!ready) client.close();
+  }
+}
+
+function parseStepRequest(json: string): { toolCallId?: string } {
+  try {
+    const value = JSON.parse(json) as { toolCallId?: unknown };
+    return typeof value.toolCallId === "string" ? { toolCallId: value.toolCallId } : {};
+  } catch {
+    return {};
+  }
+}
+
+/** 持久化的等待停在助手的工具调用上。先把这次调用跑完并写入结果，continue 才接得上。 */
+async function recoverOutstandingTools(input: {
+  transcript: AgentMessage[];
+  tools: AgentTool[];
+  resume: "approval" | "takeover";
+  signal?: AbortSignal;
+  guard: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<{ block?: boolean; reason?: string } | undefined>;
+  settle: (
+    context: BeforeToolCallContext,
+    result: AgentToolResult,
+    isError: boolean,
+    signal?: AbortSignal,
+  ) => Promise<{ content: ToolResultMessage["content"]; details: unknown; isError: boolean }>;
+  persist: (message: ToolResultMessage, text: string, isError: boolean) => void;
+  now: () => number;
+}): Promise<void> {
+  const answered = new Set(
+    input.transcript.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
+  );
+  const groups = new Map<number, Array<{ id: string; name: string; arguments: Record<string, unknown> }>>();
+  input.transcript.forEach((message, index) => {
+    if (message.role !== "assistant") return;
+    for (const block of message.content) {
+      if (block.type !== "toolCall" || answered.has(block.id)) continue;
+      const args = block.arguments && typeof block.arguments === "object" && !Array.isArray(block.arguments)
+        ? block.arguments as Record<string, unknown>
+        : {};
+      const list = groups.get(index) ?? [];
+      list.push({ id: block.id, name: block.name, arguments: args });
+      groups.set(index, list);
+    }
+  });
+  let shift = 0;
+  for (const [index, calls] of [...groups.entries()].sort((left, right) => left[0] - right[0])) {
+    const assistant = input.transcript[index + shift];
+    if (!assistant || assistant.role !== "assistant") continue;
+    let cursor = index + shift + 1;
+    for (const call of calls) {
+      const tool = input.tools.find((item) => item.name === call.name);
+      const hookContext = {
+        assistantMessage: assistant,
+        toolCall: { type: "toolCall", id: call.id, name: call.name, arguments: call.arguments },
+        args: call.arguments,
+        context: { messages: input.transcript, tools: input.tools },
+      } as BeforeToolCallContext;
+      const directTakeover = input.resume === "takeover" && call.name === "request_takeover";
+      let blocked: string | undefined;
+      if (!directTakeover) {
+        const decision = await input.guard(hookContext, input.signal);
+        if (decision?.block) blocked = decision.reason || "已拒绝";
+      }
+      let result: AgentToolResult;
+      let isError = false;
+      if (blocked) {
+        result = { content: [{ type: "text", text: blocked }], details: {} };
+        isError = true;
+      } else if (!tool) {
+        result = { content: [{ type: "text", text: `找不到工具 ${call.name}` }], details: {} };
+        isError = true;
+      } else {
+        try {
+          result = await tool.execute(call.id, call.arguments as never, input.signal, undefined);
+          isError = result.isError === true;
+        } catch (error) {
+          result = { content: [{ type: "text", text: error instanceof Error ? error.message : "工具失败" }], details: {} };
+          isError = true;
+        }
+      }
+      const settled = await input.settle(hookContext, result, isError, input.signal);
+      const text = settled.content.filter((block) => block.type === "text").map((block) => block.text).join("");
+      const toolResult: ToolResultMessage = {
+        role: "toolResult",
+        toolCallId: call.id,
+        toolName: call.name,
+        content: settled.content,
+        isError: settled.isError,
+        timestamp: input.now(),
+      };
+      input.persist(toolResult, text, settled.isError);
+      input.transcript.splice(cursor, 0, toolResult);
+      cursor += 1;
+      shift += 1;
+    }
+  }
 }
 
 export function recoverInterruptedTasks(db: AppDatabase, now = new Date()): number {
@@ -103,6 +292,8 @@ export function recoverInterruptedTasks(db: AppDatabase, now = new Date()): numb
         transcript.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
       );
       const last = transcript.findLast((message) => message.role === "assistant");
+      const unconfirmed = chat.findTask(scope, meta.id)?.error === "remote_unconfirmed";
+      const text = unconfirmed ? "远端是否已停止未确认" : INTERRUPTED_TOOL;
       if (last?.role === "assistant") {
         for (const block of last.content) {
           if (block.type !== "toolCall" || answered.has(block.id)) continue;
@@ -110,7 +301,7 @@ export function recoverInterruptedTasks(db: AppDatabase, now = new Date()): numb
             role: "toolResult",
             toolCallId: block.id,
             toolName: block.name,
-            content: [{ type: "text", text: INTERRUPTED_TOOL }],
+            content: [{ type: "text", text }],
             isError: true,
             timestamp: now.getTime(),
           };
@@ -118,7 +309,7 @@ export function recoverInterruptedTasks(db: AppDatabase, now = new Date()): numb
             id: ulid(),
             conversationId: meta.conversationId,
             role: "toolResult",
-            contentJson: storedContent(toolResult, INTERRUPTED_TOOL),
+            contentJson: storedContent(toolResult, text),
             taskId: meta.id,
           });
         }
@@ -132,7 +323,8 @@ export function recoverInterruptedTasks(db: AppDatabase, now = new Date()): numb
         }
       }
     }
-    chat.updateTask(scope, meta.id, { state: "interrupted", endedAt: now.toISOString(), error: null });
+    const unconfirmed = chat.findTask(scope, meta.id)?.error === "remote_unconfirmed";
+    chat.updateTask(scope, meta.id, { state: "interrupted", endedAt: now.toISOString(), error: unconfirmed ? "remote_unconfirmed" : null });
     count += 1;
   }
   return count;
@@ -159,6 +351,34 @@ export function createChatService(deps: ChatServiceDeps) {
     onResume: resumeWaiting,
     onFail: failWaiting,
   });
+  const approvalGate = createApprovalGate({
+    db: deps.db,
+    waitMs: deps.config.secretWaitMs,
+    riskyToolNames(botId: string) {
+      const owner = deps.db.$client.prepare("select user_id as userId from bots where id=? and deleted_at is null").get(botId) as { userId: string } | undefined;
+      const names = new Set<string>();
+      if (!owner) return names;
+      for (const install of installsForModelContext(catalogDeps(deps), owner.userId)) {
+        for (const tool of install.riskyTools) names.add(tool);
+      }
+      return names;
+    },
+    onWaiting(taskId) {
+      const live = running.get(taskId);
+      if (!live) return;
+      const task = chat.findTask(userScope(live.userId), taskId);
+      if (!task?.conversationId) return;
+      publishTask(live.userId, task.conversationId, taskId);
+      if (task.trigger === "routine") notifyTaskSettled(deps.db, { userId: live.userId, botId: live.botId, taskId, outcome: "needs_user" });
+    },
+    onRearm(taskId) {
+      const meta = chat.systemTaskMeta(["waiting_approval"]).find((item) => item.id === taskId);
+      if (!meta?.conversationId) return;
+      queue.push({ id: taskId, botId: meta.botId, userId: meta.userId, conversationId: meta.conversationId, resume: "approval" });
+      remember(meta.userId);
+      publishTask(meta.userId, meta.conversationId, taskId);
+    },
+  });
   let lastStarted: string | undefined;
   let pumping = false;
   let pumpAgain = false;
@@ -175,9 +395,39 @@ export function createChatService(deps: ChatServiceDeps) {
     remember(meta.userId);
   }
   broker.arm(chat.systemWaiting());
+  approvalGate.arm();
+  deps.leases?.arm();
+  for (const meta of chat.systemTaskMeta(["waiting_takeover"])) {
+    if (!meta.conversationId) continue;
+    queue.push({ id: meta.id, botId: meta.botId, userId: meta.userId, conversationId: meta.conversationId, resume: "takeover" });
+    remember(meta.userId);
+    publishTask(meta.userId, meta.conversationId, meta.id);
+  }
   pump();
 
   return {
+    approvalGate,
+    enqueueRoutine(input: { userId: string; botId: string; prompt: string; routineRunId: string }): string {
+      if (chat.systemBotBusy(input.botId)) throw new ChatError("这个 bot 还有未完成的任务", 409);
+      const scope = userScope(input.userId);
+      const bot = botRepository(deps.db).findById(scope, input.botId);
+      if (!bot) throw new ChatError("找不到 bot", 404);
+      const conversation = resolveConversation(scope, bot, undefined, input.prompt);
+      const task = chat.insertTask(scope, {
+        id: ulid(),
+        botId: bot.id,
+        conversationId: conversation.id,
+        trigger: "routine",
+        routineRunId: input.routineRunId,
+      });
+      if (!task) throw new ChatError("找不到 bot", 404);
+      persistUser(scope, conversation.id, userMessage(input.prompt, now()), task.id);
+      queue.push({ id: task.id, botId: bot.id, userId: input.userId, conversationId: conversation.id });
+      remember(input.userId);
+      publishTask(input.userId, conversation.id, task.id);
+      pump();
+      return task.id;
+    },
     send(input: SendInput): Promise<SendResult> {
       return exclusive(input.botId, () => sendLocked(input));
     },
@@ -187,12 +437,28 @@ export function createChatService(deps: ChatServiceDeps) {
       const live = running.get(taskId);
       if (live) {
         live.stopRequested = true;
+        live.resumeAbort?.abort();
         if (live.waitingInput) broker.settle(taskId, "stopped");
         else live.agent?.abort();
+        deps.leases?.stop(live.botId);
+        return true;
+      }
+      if (task.state === "waiting_takeover") {
+        deps.leases?.stop(task.botId);
+        chat.updateTask(scope, taskId, { state: "cancelled", endedAt: now().toISOString(), error: null });
+        if (task.conversationId) publishTask(scope.userId, task.conversationId, taskId);
         return true;
       }
       if (task.state === "waiting_input") {
         cancelWaiting(scope, task);
+        return true;
+      }
+      if (task.state === "waiting_approval") {
+        chat.updateTask(scope, taskId, { state: "cancelled", endedAt: now().toISOString(), error: null });
+        deps.db.$client
+          .prepare("update approvals set state='stopped', decided_at=? where task_id=? and state='pending'")
+          .run(now().toISOString(), taskId);
+        if (task.conversationId) publishTask(scope.userId, task.conversationId, taskId);
         return true;
       }
       if (task.state !== "queued") return false;
@@ -213,6 +479,10 @@ export function createChatService(deps: ChatServiceDeps) {
       if (queued) this.stop(scope, queued.id);
       const waiting = chat.findActiveByBot(scope, botId, "waiting_input");
       if (waiting) this.stop(scope, waiting.id);
+      const approving = chat.findActiveByBot(scope, botId, "waiting_approval");
+      if (approving) this.stop(scope, approving.id);
+      const takeover = chat.findActiveByBot(scope, botId, "waiting_takeover");
+      if (takeover) this.stop(scope, takeover.id);
     },
     /** 等正在跑的任务结束。排队但因名额开不了工的会留下。 */
     async idle(): Promise<void> {
@@ -234,9 +504,10 @@ export function createChatService(deps: ChatServiceDeps) {
     },
     shutdown(): void {
       for (const live of running.values()) {
-        if (live.waitingInput) {
+        const task = chat.findTask(userScope(live.userId), live.id);
+        if (live.waitingInput || task?.state === "waiting_approval" || task?.state === "waiting_takeover") {
           live.preserveWait = true;
-          broker.settle(live.id, "detached");
+          if (live.waitingInput) broker.settle(live.id, "detached");
         } else {
           live.agent?.abort();
         }
@@ -382,6 +653,8 @@ export function createChatService(deps: ChatServiceDeps) {
     const scope = userScope(live.userId);
     let seq = 0;
     const openSteps = new Map<string, string>();
+    let closeMcp = () => {};
+    live.resumeAbort = new AbortController();
     try {
       chat.updateTask(scope, live.id, { state: "running", startedAt: now().toISOString(), error: null });
       publishTask(live.userId, live.conversationId, live.id);
@@ -418,6 +691,7 @@ export function createChatService(deps: ChatServiceDeps) {
       const recent = memoryStore.recent(scope, bot.id, 10) ?? [];
       const matched = query ? (memoryStore.search(scope, bot.id, query, 5) ?? []) : [];
       const bound = browsers.bind(live.userId, live.botId, endpoint);
+      const inputLock = browsers.lock(live.userId);
       const secretTool = createSecretTool(async (request) => {
         live.waitingInput = true;
         try {
@@ -428,11 +702,69 @@ export function createChatService(deps: ChatServiceDeps) {
           live.waitingInput = false;
         }
       });
+      const files = new MachinedClient(endpoint, deps.fetch ?? fetch);
+      const catalog = catalogDeps(deps);
+      const skillMachine = skillHttpMachine(endpoint);
+      let skillText = "";
+      try {
+        skillText = await skillPrompt({ machine: skillMachine, knownSecrets: () => broker.known(live.userId, live.id) });
+      } catch {
+        skillText = "";
+      }
+      const installedMcp = await installedMcpTools(deps, endpoint, live.userId, live.id, () => {
+        live.remoteUnconfirmed = true;
+        chat.updateTask(scope, live.id, { error: "remote_unconfirmed" });
+        markRemoteUncertain(deps.db, { userId: live.userId, botId: live.botId, taskId: live.id });
+        publishTask(live.userId, live.conversationId, live.id);
+      });
+      closeMcp = installedMcp.close;
+      const mcpTools = installedMcp.tools;
       const rawTools = [
-        ...machineTools(new MachinedClient(endpoint, deps.fetch ?? fetch)),
+        ...machineTools(files),
+        ...approvalTools({ delete: (path, signal) => files.removeFile(path, signal) }),
+        ...routineTools({
+          propose: (input) => routineService(deps.db).propose(live.userId, live.botId, input, now()),
+        }),
+        ...(deps.leases
+          ? desktopTools({
+              isActive: () => deps.leases?.isActive(live.botId) ?? false,
+              input: async (input, signal) => {
+                await inputLock.run(async () => {
+                  await files.ensureDisplay(1, signal);
+                  await files.displayInput(1, input, signal);
+                });
+              },
+              screenshot: async (signal) => {
+                return inputLock.run(async () => {
+                  await files.ensureDisplay(1, signal);
+                  return files.displayShot(1, signal);
+                });
+              },
+            })
+          : []),
+        ...(deps.leases
+          ? [
+              takeoverTool({
+                request: (signal) =>
+                  deps.leases!.request({
+                    botId: live.botId,
+                    userId: live.userId,
+                    taskId: live.id,
+                    ...(signal ? { signal } : {}),
+                  }),
+              }),
+            ]
+          : []),
         ...browserTools(bound),
         ...(deps.config.visionModels.includes(bot.model) ? [browserScreenshotTool(bound)] : []),
         secretTool,
+        ...skillTools({
+          ownerUserId: live.userId,
+          machine: skillMachine,
+          knownSecrets: () => broker.known(live.userId, live.id),
+          apps: privateSkillStorage(catalog, live.userId),
+        }),
+        ...mcpTools,
         ...memoryTools({
           knownSecrets: () => broker.known(live.userId, live.id),
           save: (content) => memoryStore.save(scope, bot.id, { id: ulid(), content, sourceTaskId: live.id }),
@@ -441,6 +773,24 @@ export function createChatService(deps: ChatServiceDeps) {
         }),
       ];
       seq = chat.maxSeq(scope, live.id);
+      const guardedTools = rawTools.map((tool) => {
+        if (tool.name !== "shell_exec") return tool;
+        const execute = tool.execute.bind(tool);
+        tool.execute = async (toolCallId, params, signal, onUpdate) => {
+          try {
+            return await execute(toolCallId, params, signal, onUpdate);
+          } catch (error) {
+            if (error instanceof Error && error.message === "remote_unconfirmed") {
+              live.remoteUnconfirmed = true;
+              chat.updateTask(scope, live.id, { error: "remote_unconfirmed" });
+              markRemoteUncertain(deps.db, { userId: live.userId, botId: live.botId, taskId: live.id });
+              publishTask(live.userId, live.conversationId, live.id);
+            }
+            throw error;
+          }
+        };
+        return tool;
+      });
       const model = buildModel(deps.config, bot.model);
       const compactLive = (next: AgentMessage[], force: boolean, signal?: AbortSignal) =>
         applyCompaction(
@@ -485,23 +835,94 @@ export function createChatService(deps: ChatServiceDeps) {
           },
           { force, ...(signal ? { signal } : {}) },
         );
+      const executable = bindSecrets(
+        deps.flights ? guardedTools.map((tool) => trackExecution(live.userId, tool, deps.flights!)) : guardedTools,
+        (name) => broker.lookup(live.userId, live.id, name),
+      );
+      const guard = async (context: BeforeToolCallContext, signal?: AbortSignal) => {
+        if (
+          context.toolCall.name !== "request_takeover" &&
+          !READ_ONLY_TOOLS[context.toolCall.name] &&
+          remoteUncertain(deps.db, live.userId)
+        ) {
+          return { block: true, reason: "远端可能仍在执行。停止只结束了本地等待，需要单独确认后才能继续写操作。" };
+        }
+        if (
+          context.toolCall.name !== "request_takeover" &&
+          !READ_ONLY_TOOLS[context.toolCall.name] &&
+          deps.flights?.paused(live.userId)
+        ) {
+          return { block: true, reason: "用户正在接管，已拒绝执行" };
+        }
+        const decision = await approvalGate.bind(live.id).beforeToolCall?.(context, signal);
+        if (decision) return decision;
+        return getToolHooks().beforeToolCall?.(context, signal);
+      };
+      if (live.resume) {
+        await recoverOutstandingTools({
+          transcript,
+          tools: executable,
+          resume: live.resume,
+          signal: live.resumeAbort?.signal,
+          guard,
+          settle: async (context, result, isError, signal) => {
+            const hooked = await getToolHooks().afterToolCall?.({ ...context, result, isError } as AfterToolCallContext, signal);
+            const content = hooked?.content ?? result.content;
+            const details = hooked?.details !== undefined ? hooked.details : result.details;
+            const secrets = broker.known(live.userId, live.id);
+            return {
+              content: maskToolContent(content, secrets),
+              details: maskDetails(details, secrets),
+              isError: hooked?.isError ?? isError,
+            };
+          },
+          persist: (message, text, isError) => {
+            const row = chat.insertMessage(scope, {
+              id: ulid(),
+              conversationId: live.conversationId,
+              role: "toolResult",
+              contentJson: storedContent(message, text),
+              taskId: live.id,
+            });
+            if (row) {
+              messageIds.set(message, row.id);
+              publishMessage(live.conversationId, row.id, scope);
+            }
+            for (const step of chat.listSteps(scope, live.id) ?? []) {
+              if (step.kind !== "tool" || step.status !== "running") continue;
+              const request = parseStepRequest(step.requestJson);
+              if (request.toolCallId !== message.toolCallId) continue;
+              const responseJson = JSON.stringify({ text, isError });
+              chat.finishStep(scope, step.id, { status: isError ? "failed" : "succeeded", responseJson });
+              const current = chat.listSteps(scope, live.id)?.find((item) => item.id === step.id);
+              if (current) publishStep(live.conversationId, current);
+            }
+          },
+          now: () => now().getTime(),
+        });
+        if (live.preserveWait) return;
+        if (live.stopRequested) {
+          finish(scope, live, "cancelled", null, seq);
+          return;
+        }
+      }
       const agent = new Agent({
         initialState: {
-          systemPrompt: buildSystemPrompt(
+          systemPrompt: [buildSystemPrompt(
             platform,
             bot.instructions,
             formatMemorySection(recent, matched),
             statusBlock(now(), "运行中", broker.names(live.userId)),
-          ),
+          ), skillText].filter((part) => part.length > 0).join("\n\n"),
           model,
-          tools: bindSecrets(rawTools, (name) => broker.lookup(live.userId, live.id, name)),
+          tools: executable,
           messages: transcript,
         },
         streamFn: relayWithOverflowRetry(deps.streamFn, deps.config.modelContextTokens, (next, overflowSignal) =>
           compactLive(next, true, overflowSignal),
         ),
         transformContext: (next, signal) => compactLive(next, false, signal),
-        beforeToolCall: async (context, signal) => getToolHooks().beforeToolCall?.(context, signal),
+        beforeToolCall: guard,
         afterToolCall: async (context, signal) => {
           const hooked = await getToolHooks().afterToolCall?.(context, signal);
           const content = hooked?.content ?? context.result.content;
@@ -535,7 +956,7 @@ export function createChatService(deps: ChatServiceDeps) {
       if (live.failReason) {
         finish(scope, live, "failed", live.failReason, seq, usage);
       } else if (live.stopRequested || (last && last.stopReason === "aborted")) {
-        finish(scope, live, "cancelled", null, seq, usage);
+        finish(scope, live, "cancelled", live.remoteUnconfirmed ? "remote_unconfirmed" : null, seq, usage);
       } else if (last && last.stopReason === "error") {
         finish(scope, live, "failed", last.errorMessage ?? "模型请求失败", seq, usage);
       } else {
@@ -545,6 +966,7 @@ export function createChatService(deps: ChatServiceDeps) {
       const message = error instanceof Error ? error.message : "任务失败";
       finish(scope, live, "failed", live.failReason ?? message, seq);
     } finally {
+      closeMcp();
       deps.tasks.delete(live.id);
       running.delete(live.id);
       if (liveByBot.get(live.botId) === live) liveByBot.delete(live.botId);
@@ -652,11 +1074,68 @@ export function createChatService(deps: ChatServiceDeps) {
     if (live.preserveWait) return;
     chat.updateTask(scope, live.id, {
       state,
-      error,
+      error: live.remoteUnconfirmed ? "remote_unconfirmed" : error,
       endedAt: now().toISOString(),
       stepCount,
       ...(usage !== undefined ? { usageJson: usage } : {}),
     });
+    const settled = chat.findTask(scope, live.id);
+    const errorClass = terminalErrorClass(error);
+    const ts = now().toISOString();
+    if (state === "failed") {
+      emitOps(deps.db, opsMinutes, {
+        id: ulid(),
+        ts,
+        userId: live.userId,
+        botId: live.botId,
+        type: M2_EVENTS.taskFailed,
+        attrs: { errorClass, taskId: live.id },
+      });
+    } else if (state === "succeeded") {
+      emitOps(deps.db, opsMinutes, {
+        id: ulid(),
+        ts,
+        userId: live.userId,
+        botId: live.botId,
+        type: M2_EVENTS.taskFinished,
+        attrs: { taskId: live.id },
+      });
+    } else if (state === "cancelled" || state === "interrupted") {
+      emitOps(deps.db, opsMinutes, {
+        id: ulid(),
+        ts,
+        userId: live.userId,
+        botId: live.botId,
+        type: M2_EVENTS.taskCancelled,
+        attrs: { taskId: live.id },
+      });
+    }
+    if (settled?.trigger === "routine" && (state === "succeeded" || state === "failed" || state === "cancelled" || state === "interrupted")) {
+      deps.db.$client.prepare("update routine_runs set state=? where task_id=? and state='claimed'").run(state === "succeeded" ? "succeeded" : "failed", live.id);
+      const routine = deps.db.$client
+        .prepare(
+          `select routine_id as routineId from routine_runs
+           where task_id=? or id=(select routine_run_id from tasks where id=?)
+           limit 1`,
+        )
+        .get(live.id, live.id) as { routineId: string } | undefined;
+      if (state === "failed" && routine?.routineId) {
+        emitOps(deps.db, opsMinutes, {
+          id: ulid(),
+          ts,
+          userId: live.userId,
+          botId: live.botId,
+          type: M2_EVENTS.routineFailed,
+          attrs: { errorClass, routineId: routine.routineId, taskId: live.id },
+        });
+      }
+      notifyTaskSettled(deps.db, {
+        userId: live.userId,
+        botId: live.botId,
+        taskId: live.id,
+        outcome: state === "succeeded" || state === "cancelled" || state === "interrupted" ? state : "failed",
+      });
+    }
   }
 
   function markWaiting(userId: string, taskId: string): void {

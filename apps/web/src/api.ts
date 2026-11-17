@@ -74,6 +74,7 @@ export interface Task {
   state: string;
   error: string | null;
   conversationId: string | null;
+  remoteUncertain?: boolean;
 }
 
 export interface Step {
@@ -85,7 +86,8 @@ export interface Step {
   response: unknown;
 }
 
-export function taskLabel(state: string, machine: "starting" | "ready" | "idle"): string {
+export function taskLabel(state: string, machine: "starting" | "ready" | "idle", error?: string | null): string {
+  if (error === "remote_unconfirmed") return "本地等待已结束，远端未确认";
   if (machine === "starting" && (state === "queued" || state === "running")) return "机器启动中";
   switch (state) {
     case "queued":
@@ -103,7 +105,7 @@ export function taskLabel(state: string, machine: "starting" | "ready" | "idle")
     case "failed":
       return "失败";
     case "cancelled":
-      return "已停止";
+      return "本地已停止";
     case "interrupted":
       return "已中断";
     default:

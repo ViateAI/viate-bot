@@ -207,7 +207,11 @@ export function chatRepository(db: AppDatabase) {
         .all()
         .map(toTask);
     },
-    findActiveByBot(scope: UserScope, botId: string, state: "running" | "queued" | "waiting_input"): TaskRecord | undefined {
+    findActiveByBot(
+      scope: UserScope,
+      botId: string,
+      state: "running" | "queued" | "waiting_input" | "waiting_approval" | "waiting_takeover",
+    ): TaskRecord | undefined {
       if (!ownsBot(db, scope, botId)) return undefined;
       const row = db
         .select()
