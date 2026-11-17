@@ -174,10 +174,18 @@ export interface AppInstallRequest {
   sha256: string;
 }
 
+/** 应用包声明的定时任务。安装后只生成草稿，用户确认前不运行。 */
+export interface AppRoutineTemplate {
+  cron: string;
+  timezone: string;
+  prompt: string;
+}
+
 export interface AppInstallResponse {
   name: string;
   version: string;
   state: "installed";
+  routines: AppRoutineTemplate[];
 }
 
 export interface AppListEntry {
@@ -207,3 +215,5 @@ export interface McpStartResponse {
   server: string;
   running: true;
 }
+
+export { parseSkillMarkdown, type SkillFrontmatter } from "./skill-markdown.js";
