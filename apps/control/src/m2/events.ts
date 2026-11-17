@@ -26,6 +26,16 @@ export const M2_EVENTS = {
 
 export type M2EventType = (typeof M2_EVENTS)[keyof typeof M2_EVENTS];
 
+/** 终端事件只记类别，不记错误原文。原文可能含命令、路径或密钥。 */
+export function terminalErrorClass(error: string | null): string {
+  const text = error ?? "";
+  if (/timeout|timed out|超时/i.test(text)) return "timeout";
+  if (/rate.?limit|429|过于频繁/i.test(text)) return "rate_limit";
+  if (text.includes("审批")) return "approval";
+  if (text.includes("接管")) return "takeover";
+  return text.length === 0 ? "unknown" : "error";
+}
+
 export const AUDIT_ACTIONS = {
   approvalDecided: "approval.decided",
   takeover: "takeover",
