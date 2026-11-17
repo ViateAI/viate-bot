@@ -315,6 +315,10 @@ export const appInstalls = sqliteTable("app_installs", {
   configJson: text("config_json").notNull().default("{}"),
   error: text("error"),
   updatedAt: text("updated_at").notNull(),
+  /** bot 安装时记下当时的名字。用户在应用页看到「由 bot〈名称〉安装」。 */
+  installedByBotId: text("installed_by_bot_id"),
+  installedByBotName: text("installed_by_bot_name"),
+  resolvedVersion: text("resolved_version"),
 });
 
 export const events = sqliteTable(

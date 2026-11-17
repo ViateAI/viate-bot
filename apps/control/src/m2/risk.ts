@@ -22,6 +22,7 @@ export const READ_ONLY_TOOLS: Record<string, true> = {
   browser_screenshot: true,
   desktop_screenshot: true,
   memory_search: true,
+  search_apps: true,
 };
 
 /**
@@ -67,7 +68,17 @@ const ALWAYS: Record<string, true> = {
   risky_tool: true,
 };
 
-export function approvalClass(name: string, risky?: ReadonlySet<string>): AlwaysAllow | undefined {
+export type ApprovalCategory = AlwaysAllow | "app_install";
+
+/** app_install 不是 alwaysAllow 的合法值。数组里即使有这个字符串也不跳过审批。 */
+export function skipsApproval(category: ApprovalCategory | undefined, settings: BotRuntimeSettings): boolean {
+  if (!category) return true;
+  if (category === "app_install") return false;
+  return settings.alwaysAllow.includes(category);
+}
+
+export function approvalClass(name: string, risky?: ReadonlySet<string>): ApprovalCategory | undefined {
+  if (name === "install_mcp") return "app_install";
   if (READ_ONLY_TOOLS[name] || CONTROL_PLANE_TOOLS[name]) return undefined;
   const named = GATED_TOOLS[name];
   if (named) return named;

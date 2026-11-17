@@ -8,9 +8,9 @@ export function registerApprovalRoutes(app: FastifyInstance, deps: { db: AppData
   app.get("/api/approvals", async (request, reply) => {
     const auth = authenticated.get(request);
     if (!auth) return reply.code(401).send({ error: "未登录" });
-    const rows = deps.db.$client.prepare(`select a.id, a.task_id as taskId, a.tool, a.args_json as argsJson
+    const rows = deps.db.$client.prepare(`select a.id, a.task_id as taskId, a.tool, a.summary, a.args_json as argsJson
       from approvals a join tasks t on t.id=a.task_id join bots b on b.id=t.bot_id
-      where b.user_id=? and a.state='pending'`).all(auth.user.id) as Array<{ id: string; taskId: string; tool: string; argsJson: string }>;
+      where b.user_id=? and a.state='pending'`).all(auth.user.id) as Array<{ id: string; taskId: string; tool: string; summary: string; argsJson: string }>;
     return { approvals: rows.map(({ argsJson, ...row }) => ({ ...row, args: JSON.parse(argsJson) as unknown })) };
   });
   app.post<{ Params: { id: string } }>("/api/approvals/:id/decide", async (request, reply) => {

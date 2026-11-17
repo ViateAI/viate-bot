@@ -5,7 +5,7 @@ import { emitOps, opsMinutes } from "../ops/rollup.js";
 import type { AppDatabase } from "../db/index.js";
 import { ulid } from "../id.js";
 import { AUDIT_ACTIONS, M2_EVENTS } from "../m2/events.js";
-import { approvalClass, argsHash, canonicalJson, READ_ONLY_TOOLS, readBotSettings } from "../m2/risk.js";
+import { approvalClass, argsHash, canonicalJson, READ_ONLY_TOOLS, readBotSettings, skipsApproval } from "../m2/risk.js";
 import { adminScope } from "../scope.js";
 
 interface ApprovalRow {
@@ -19,6 +19,8 @@ export interface ApprovalGateOptions {
   riskyToolNames?: ReadonlySet<string> | ((botId: string) => ReadonlySet<string>);
   onRearm?: (taskId: string, approvalId: string) => void;
   onWaiting?: (taskId: string) => void;
+  /** 审批卡片用。不能改执行参数，也不能写入配置值。 */
+  summarize?: (taskId: string, tool: string, args: unknown) => string;
 }
 
 export interface ApprovalGate {
@@ -89,7 +91,7 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
       if (!READ_ONLY_TOOLS[name] && (takeover || task?.state === "waiting_takeover")) {
         return { block: true, reason: "用户正在接管，已拒绝执行" };
       }
-      if (!category || settings.alwaysAllow.includes(category)) return undefined;
+      if (skipsApproval(category, settings)) return undefined;
       const input = context.args as Record<string, unknown>;
       const args = name === "shell_exec" ? { cmd: input.cmd, cwd: input.cwd, env: input.env } : context.args;
       const json = canonicalJson(args);
@@ -113,8 +115,15 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
         const created = db.transaction(() => {
           const changed = db.prepare("update tasks set state='waiting_approval' where id=? and state='running'").run(taskId).changes;
           if (!changed) return false;
+          let summary = name;
+          try {
+            const described = options.summarize?.(taskId, name, args);
+            if (described && described.length > 0) summary = described;
+          } catch {
+            summary = name;
+          }
           db.prepare("insert into approvals (id,task_id,tool,summary,args_json,state,args_hash) values (?,?,?,?,?,'pending',?)")
-            .run(id, taskId, name, name, json, hash);
+            .run(id, taskId, name, summary, json, hash);
           return true;
         })();
         if (!created) return { block: true, reason: "任务不在运行中" };
@@ -136,12 +145,17 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
       }
       signal?.removeEventListener("abort", abort);
       db.prepare("update tasks set state='running' where id=? and state='waiting_approval'").run(taskId);
+      if (name === "install_mcp" && argsHash(name, context.args) !== hash) {
+        return { block: true, reason: "批准后的安装参数已改变，请重新申请审批" };
+      }
       if (state === "allowed" && !signal?.aborted) {
         const consumed = db.prepare("update approvals set consumed_at=? where id=? and state='allowed' and consumed_at is null and args_hash=?")
           .run(new Date().toISOString(), approvalId, hash).changes;
         if (consumed) return undefined;
       }
-      return { block: true, reason: state === "denied" ? "用户拒绝了审批" : "审批未完成或已失效" };
+      const denied = state === "denied";
+      const reason = denied && name === "install_mcp" ? "用户拒绝安装" : denied ? "用户拒绝了审批" : "审批未完成或已失效";
+      return { block: true, reason };
     } };
   }
   return { bind, arm, decide };

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { and, eq, isNull } from "drizzle-orm";
@@ -58,8 +59,8 @@ const SOURCE_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
 export class CatalogRejected extends Error {
   readonly statusCode: number;
-  constructor(message: string, statusCode: number) {
-    super(message);
+  constructor(message: string, statusCode: number, options?: ErrorOptions) {
+    super(message, options);
     this.name = "CatalogRejected";
     this.statusCode = statusCode;
   }
@@ -74,6 +75,7 @@ export interface CatalogMachineInstall {
   version: string;
   sha256: string;
   archivePath: string;
+  signal?: AbortSignal;
 }
 
 /** launchMcp 当次使用的值。stdio 用 env，HTTP/SSE 的初始 origin 用 headers。调用方不得落盘或交给模型。 */
@@ -196,6 +198,8 @@ export interface InstallView {
   state: string;
   config: RedactedConfig;
   error: string | null;
+  /** 由 bot 安装时是当时的 bot 名称。 */
+  installedByBot: string | null;
 }
 
 export interface InstallContextView {
@@ -211,6 +215,9 @@ export interface InstallContextView {
 export interface UserInstallInput {
   version?: string;
   config?: ConfigInput;
+  /** Bot installs may not replace or reconfigure an existing live installation. */
+  onlyIfAbsent?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface PushInput {
@@ -276,6 +283,9 @@ interface InstallRow {
   configJson: string;
   error: string | null;
   updatedAt: string;
+  installedByBotId: string | null;
+  installedByBotName: string | null;
+  resolvedVersion: string | null;
 }
 
 const installGates = new Map<string, Promise<void>>();
@@ -462,6 +472,98 @@ export function listUserCatalog(deps: CatalogDeps, userId: string): UserCatalogE
   return entries;
 }
 
+export interface AppSearchHit {
+  name: string;
+  version: string;
+  description: string;
+  installed: boolean;
+  mcpServers: Array<{ name: string; type: string; command?: string; args?: string[]; url?: string }>;
+  config: Array<{ key: string; description: string; secret: boolean }>;
+  riskyTools: string[];
+}
+
+/** 精确名称。别人的私有应用返回 undefined。 */
+export function findVisibleApp(deps: CatalogDeps, userId: string, name: string, selectedVersion?: string): {
+  version: string; versions: string[]; config: AppSearchHit["config"]; mcpServers: AppSearchHit["mcpServers"]; riskyTools: string[]; runsInstallScript: boolean;
+} | undefined {
+  for (const item of groupApps(deps.db).values()) {
+    if (item.app.name !== name) continue;
+    const visibility = visibilityFor(item.app, item.visibility, userId);
+    if (visibility !== "private" && visibility !== "all" && visibility !== "user") return undefined;
+    const active = item.versions.filter((version) => version.status === VERSION_ACTIVE);
+    const preferred = selectedVersion ? active.find((item) => item.version === selectedVersion) : preferredActive(item.versions);
+    if (!preferred) return undefined;
+    const declared = readManifestConfig(preferred.manifestJson);
+    return {
+      version: preferred.version, versions: active.map((version) => version.version),
+      config: [...declared.keys].map((key) => ({ key, description: configDescription(preferred.manifestJson, key), secret: declared.secret.has(key) || /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|x-access-token)$/i.test(declared.header.get(key) ?? "") })),
+      mcpServers: serversFromArchive(preferred.archivePath),
+      riskyTools: riskyToolsFromManifest(preferred.manifestJson),
+      runsInstallScript: /"setup"\s*:/.test(preferred.manifestJson),
+    };
+  }
+  return undefined;
+}
+
+/** 只查这个用户能看见的目录应用和他自己的私有应用。不访问网络，不调用机器。 */
+export function searchApps(deps: CatalogDeps, userId: string, query: string): AppSearchHit[] {
+  const needle = query.trim().toLowerCase();
+  const installed = new Set(
+    loadUserInstalls(deps.db, userId)
+      .filter((item) => item.install.desired === DESIRED_PRESENT && item.install.state === "installed")
+      .map((item) => item.app.name),
+  );
+  const hits: AppSearchHit[] = [];
+  for (const item of groupApps(deps.db).values()) {
+    const visibility = visibilityFor(item.app, item.visibility, userId);
+    if (visibility !== "private" && visibility !== "all" && visibility !== "user") continue;
+    const version = preferredActive(item.versions);
+    if (!version) continue;
+    const description = manifestDescription(version.manifestJson);
+    const declared = readManifestConfig(version.manifestJson);
+    const config = [...declared.keys].sort().map((key) => ({
+      key,
+      description: configDescription(version.manifestJson, key),
+      secret: declared.secret.has(key),
+    }));
+    const riskyTools = riskyToolsFromManifest(version.manifestJson);
+    const mcpServers = serversFromArchive(version.archivePath);
+    const haystack = [item.app.name, description, ...mcpServers.map((server) => server.name), ...config.map((item) => item.key)]
+      .join("\n")
+      .toLowerCase();
+    if (needle && !haystack.includes(needle)) continue;
+    hits.push({
+      name: item.app.name,
+      version: version.version,
+      description,
+      installed: installed.has(item.app.name),
+      mcpServers,
+      config,
+      riskyTools,
+    });
+    if (hits.length >= 40) break;
+  }
+  hits.sort((left, right) => left.name.localeCompare(right.name));
+  return hits;
+}
+
+export function noteBotInstall(deps: CatalogDeps, installId: string, bot: { id: string; name: string }): void {
+  const name = bot.name.replace(/[\r\n\0]/g, " ").trim().slice(0, 80);
+  if (!name) return;
+  deps.db.update(appInstalls).set({
+    installedByBotId: bot.id,
+    installedByBotName: name,
+  }).where(eq(appInstalls.id, installId)).run();
+}
+
+/** 实际包版本属于安装记录；不能改审批绑定的归档版本标识。 */
+export function recordResolvedVersion(deps: CatalogDeps, versionId: string, resolved: string): string {
+  const version = resolved.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9.!_+-]{0,63}$/.test(version) || version.includes("..")) throw new CatalogRejected("实际版本无效", 400);
+  deps.db.update(appInstalls).set({ resolvedVersion: version }).where(eq(appInstalls.appVersionId, versionId)).run();
+  return version;
+}
+
 export function listUserInstalls(deps: CatalogDeps, userId: string): InstallView[] {
   return loadUserInstalls(deps.db, userId).map(toInstallView);
 }
@@ -489,11 +591,12 @@ export async function installForUser(
   name: string,
   input: UserInstallInput = {},
 ): Promise<InstallView> {
+  input.signal?.throwIfAborted();
   const resolved = resolveForUser(deps.db, userId, name);
   const picked = pickVersion(resolved.versions, input.version);
   const machine = requireMachine(deps.db, userId);
   const config = input.config;
-  const plan = planUserInstall(deps, machine.id, resolved.app.id, picked, config !== undefined);
+  const plan = planUserInstall(deps, machine.id, resolved.app.id, picked, config !== undefined, input.onlyIfAbsent);
   if (plan.action !== "dispatch") return mustInstallView(deps.db, plan.id);
   const ran = await runLocked(plan.id, "join", async () => {
     if (config) {
@@ -515,6 +618,7 @@ export async function installForUser(
       versionId: picked.id,
       sha256: picked.sha256,
       archivePath: picked.archivePath,
+      ...(input.signal ? { signal: input.signal } : {}),
     });
   });
   if (!ran) return mustInstallView(deps.db, plan.id);
@@ -816,7 +920,7 @@ export async function ingestCatalogSource(
   throw new CatalogRejected("无法获取应用包", 400);
 }
 
-async function publishValidatedPackage(
+export async function publishValidatedPackage(
   deps: CatalogDeps,
   actorUserId: string,
   pkg: ValidatedPackage,
@@ -1155,9 +1259,13 @@ function planUserInstall(
   appId: string,
   version: VersionRow,
   configChanged: boolean,
+  onlyIfAbsent = false,
 ): { id: string; action: "dispatch" | "ready" | "wait" } {
   return deps.db.transaction(() => {
     const row = findInstallForApp(deps.db, machineId, appId);
+    if (onlyIfAbsent && row?.desired === DESIRED_PRESENT && (row.state === "installed" || row.state === "installing" || installGates.has(row.id))) {
+      throw new CatalogRejected("应用已安装或正在安装；修改配置请使用应用页", 409);
+    }
     if (row?.forced && row.appVersionId !== version.id) throw new CatalogRejected("管理员推送的应用不能更换版本", 403);
     if (row && installGates.has(row.id)) return { id: row.id, action: "wait" };
     if (
@@ -1188,6 +1296,7 @@ function planUserInstall(
         appVersionId: version.id,
         desired: DESIRED_PRESENT,
         state: "installing",
+        resolvedVersion: null,
         error: null,
         updatedAt: stamp,
       }).where(eq(appInstalls.id, id)).run();
@@ -1241,6 +1350,7 @@ async function performInstall(deps: CatalogDeps, input: {
   versionId: string;
   sha256: string;
   archivePath: string;
+  signal?: AbortSignal;
 }): Promise<void> {
   try {
     materializeInjection(deps, input.userId, input.installId);
@@ -1259,13 +1369,14 @@ async function performInstall(deps: CatalogDeps, input: {
       version: storageVersion(input.version, input.sha256),
       sha256: input.sha256,
       archivePath: input.archivePath,
+      ...(input.signal ? { signal: input.signal } : {}),
     });
     if (installed?.routines) routines = installed.routines;
   } catch (error) {
     const code = installFailureCode(error);
-    markInstall(deps, input.installId, "failed", code, DESIRED_PRESENT);
+    markInstall(deps, input.installId, "failed", code, input.signal?.aborted ? DESIRED_ABSENT : DESIRED_PRESENT);
     emitFailure(deps, input, code);
-    throw new CatalogRejected("安装失败", 502);
+    throw new CatalogRejected("安装失败", 502, { cause: error });
   }
   markInstall(deps, input.installId, "installed", null, DESIRED_PRESENT);
   linkBots(deps.db, input.userId, input.installId);
@@ -1643,6 +1754,9 @@ function findInstallForApp(db: AppDatabase, machineId: string, appId: string): I
       configJson: appInstalls.configJson,
       error: appInstalls.error,
       updatedAt: appInstalls.updatedAt,
+      installedByBotId: appInstalls.installedByBotId,
+      installedByBotName: appInstalls.installedByBotName,
+      resolvedVersion: appInstalls.resolvedVersion,
       appId: appVersions.appId,
     })
     .from(appInstalls)
@@ -1682,13 +1796,14 @@ function toInstallView(item: OwnedInstall): InstallView {
     appId: item.app.id,
     name: item.app.name,
     versionId: item.version.id,
-    version: item.version.version,
+    version: item.install.resolvedVersion ?? item.version.version,
     machineId: item.install.machineId,
     forced: item.install.forced,
     desired: item.install.desired,
     state: item.install.state,
     config: toRedacted(item.install.configJson),
     error: item.install.error,
+    installedByBot: item.install.installedByBotName,
   };
 }
 
@@ -1832,6 +1947,55 @@ function configNode(parsed: unknown): unknown {
   const via = extensions["ai.viate.bot"];
   if (!isRecord(via)) return undefined;
   return via.config;
+}
+
+function manifestDescription(manifestJson: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(manifestJson) as unknown;
+  } catch {
+    return "";
+  }
+  if (!isRecord(parsed) || typeof parsed.description !== "string") return "";
+  return parsed.description.slice(0, 500);
+}
+
+function configDescription(manifestJson: string, key: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(manifestJson) as unknown;
+  } catch {
+    return "";
+  }
+  const node = configNode(parsed);
+  if (!Array.isArray(node)) return "";
+  for (const item of node) {
+    if (!isRecord(item) || item.key !== key) continue;
+    return typeof item.description === "string" ? item.description.slice(0, 200) : "";
+  }
+  return "";
+}
+
+function serversFromArchive(archivePath: string): AppSearchHit["mcpServers"] {
+  try {
+    const files = readTar(readFileSync(archivePath));
+    const mcp = files.find((file) => file.path === "mcp.json");
+    if (!mcp) return [];
+    const parsed = JSON.parse(mcp.data.toString("utf8")) as unknown;
+    if (!isRecord(parsed) || !isRecord(parsed.mcpServers)) return [];
+    const servers: AppSearchHit["mcpServers"] = [];
+    for (const [name, value] of Object.entries(parsed.mcpServers)) {
+      if (!isRecord(value) || typeof value.type !== "string") continue;
+      const server: AppSearchHit["mcpServers"][number] = { name, type: value.type };
+      if (typeof value.command === "string") server.command = value.command;
+      if (Array.isArray(value.args)) server.args = value.args.filter((arg): arg is string => typeof arg === "string");
+      if (typeof value.url === "string") server.url = value.url;
+      servers.push(server);
+    }
+    return servers;
+  } catch {
+    return [];
+  }
 }
 
 function riskyToolsFromManifest(manifestJson: string): string[] {

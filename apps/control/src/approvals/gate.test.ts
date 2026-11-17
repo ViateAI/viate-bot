@@ -35,6 +35,28 @@ function pending(db: AppDatabase) {
 }
 
 describe("approval gate", () => {
+  it("rejects mutation of the approved install arguments during the wait", async () => {
+    const { db } = fixture();
+    const gate = createApprovalGate({ db, waitMs: 5000 });
+    const args = { remote: { name: "demo", url: "https://approved.example/mcp" }, reason: "install" };
+    const waiting = gate.bind("task").beforeToolCall!(context("install_mcp", args));
+    const id = pending(db).id;
+    args.remote.url = "https://different.example/mcp";
+    gate.decide("a", id, "allow");
+    expect((await waiting)?.block).toBe(true);
+    expect(db.$client.prepare("select consumed_at from approvals where id=?").get(id)).toEqual({ consumed_at: null });
+  });
+
+  it("preserves a complete install summary instead of truncating its JSON", async () => {
+    const { db } = fixture();
+    const summary = JSON.stringify({ source: "remote", title: "https://approved.example/mcp", reason: "x".repeat(4500) });
+    const gate = createApprovalGate({ db, waitMs: 5000, summarize: () => summary });
+    const waiting = gate.bind("task").beforeToolCall!(context("install_mcp", { reason: "install" }));
+    expect(db.$client.prepare("select summary from approvals where id=?").get(pending(db).id)).toEqual({ summary });
+    gate.decide("a", pending(db).id, "deny");
+    await waiting;
+  });
+
   it("expires a waiting approval and refuses a late decision", async () => {
     const { db } = fixture();
     vi.useFakeTimers();
@@ -200,5 +222,42 @@ describe("approval gate", () => {
     const allowed = await app.inject({ method: "POST", url: "/api/approvals/old/decide", headers: { "x-test-user": "a" }, payload: { decision: "allow" } });
     expect(allowed.statusCode).toBe(200); expect(await wait).toBeUndefined();
     expect(db.$client.prepare("select consumed_at from approvals where id='old'").get()).toEqual({ consumed_at: expect.any(String) });
+  });
+
+  it("still prompts for install_mcp when alwaysAllow contains app_install, and a different hash cannot reuse the approval", async () => {
+    const { db } = fixture();
+    db.$client.prepare("update bots set settings_json=? where id='bot'").run(JSON.stringify({ alwaysAllow: ["app_install", "mcp", "shell"] }));
+    const secret = "vb-mcpinst-plaintext-should-not-appear";
+    const args = {
+      package: { name: "demo", ecosystem: "npm", package: "left-pad", version: "1.2.3" },
+      config: { API_TOKEN: "{{secret:api_token}}" },
+      secretKeys: ["API_TOKEN"],
+      reason: "需要这个包",
+    };
+    const gate = createApprovalGate({
+      db,
+      waitMs: 5000,
+      summarize: (_taskId, tool, value) => tool === "install_mcp"
+        ? JSON.stringify({ source: "package", title: "npm left-pad 1.2.3", command: "./bin/mcp", config: [{ key: "API_TOKEN", display: "已填写的密钥" }], reason: "需要这个包", riskyTools: [], runsInstallScript: true })
+        : tool,
+    });
+    const hook = gate.bind("task").beforeToolCall!;
+    const waiting = hook(context("install_mcp", args));
+    await Promise.resolve();
+    const row = db.$client.prepare("select id, summary, args_json, args_hash from approvals where state='pending'").get() as { id: string; summary: string; args_json: string; args_hash: string };
+    expect(row.summary).toContain("已填写的密钥");
+    expect(row.summary).not.toContain(secret);
+    expect(row.args_json).toContain("{{secret:api_token}}");
+    expect(row.args_json).not.toContain(secret);
+    expect(row.args_hash).toBe(argsHash("install_mcp", args));
+    expect((await hook(context("install_mcp", { ...args, reason: "换成别的理由" })))?.reason).toBe("待审批的参数与当前调用不一致");
+    gate.decide("a", row.id, "allow");
+    expect(await waiting).toBeUndefined();
+    const changed = hook(context("install_mcp", { ...args, reason: "换成别的理由" }));
+    await Promise.resolve();
+    expect(db.$client.prepare("select id from approvals where state='pending'").get()).toBeDefined();
+    expect(db.$client.prepare("select consumed_at is not null as consumed from approvals where id=?").get(row.id)).toEqual({ consumed: 1 });
+    gate.decide("a", pending(db).id, "deny");
+    expect((await changed)?.reason).toBe("用户拒绝安装");
   });
 });

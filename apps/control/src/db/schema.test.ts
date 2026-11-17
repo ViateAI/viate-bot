@@ -89,6 +89,7 @@ describe("schema migration", () => {
     expect(columnNames(db, "routines")).toContain("state");
     expect(columnNames(db, "approvals")).toEqual(expect.arrayContaining(["args_hash", "consumed_at"]));
     expect(columnNames(db, "app_versions")).toContain("recommended");
+    expect(columnNames(db, "app_installs")).toEqual(expect.arrayContaining(["installed_by_bot_id", "installed_by_bot_name"]));
     const viateColumns = db.$client
       .prepare(
         `select m.name as tbl, p.name as col

@@ -437,6 +437,9 @@ describe("machined MCP client", () => {
     expect(JSON.stringify(result)).not.toContain("shell_exec");
     const refused = [
       { name: "fs_read" },
+      { name: "bulk_delete_action" },
+      { name: "install_mcp" },
+      { name: "search_apps" },
       { name: "memory_save" },
       { name: "skill_read" },
       { name: "save_skill" },

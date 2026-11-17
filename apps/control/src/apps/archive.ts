@@ -216,7 +216,7 @@ export function validatePackage(input: PackageFile[]): ValidatedPackage {
     if (!Array.isArray(extension.setup)) throw new Error("Invalid setup");
     for (const step of extension.setup) {
       if (!object(step) || typeof step.type !== "string") throw new Error("Invalid setup step");
-      if (["apt", "npm", "pip"].includes(step.type)) { if (Object.keys(step).some(k => !["type", "packages"].includes(k)) || !strings(step.packages) || !step.packages.length || step.packages.some(p => !p || p.startsWith("-")) || step.type === "apt" && step.packages.some(p => !/^[a-z0-9][a-z0-9+.-]{0,63}$/.test(p))) throw new Error("Invalid setup packages"); }
+      if (["apt", "npm", "pip"].includes(step.type)) { if (Object.keys(step).some(k => !["type", "packages", ...(step.type === "pip" ? ["isolated"] : [])].includes(k)) || step.isolated !== undefined && typeof step.isolated !== "boolean" || !strings(step.packages) || !step.packages.length || step.packages.some(p => !p || p.startsWith("-")) || step.type === "apt" && step.packages.some(p => !/^[a-z0-9][a-z0-9+.-]{0,63}$/.test(p))) throw new Error("Invalid setup packages"); }
       else if (step.type === "exec") { if (Object.keys(step).some(k => !["type", "argv"].includes(k)) || !strings(step.argv) || !step.argv.length || !step.argv[0] || step.argv.some(arg => arg.includes("\0")) || /^(?:sh|bash|sudo)$/.test(posix.basename(step.argv[0]))) throw new Error("Invalid setup command"); }
       else throw new Error("Invalid setup type");
     }

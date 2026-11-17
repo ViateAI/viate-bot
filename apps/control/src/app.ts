@@ -121,12 +121,27 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
       if (row) await flights.barrier(row.userId);
     },
   });
+  let machineInstaller: {
+    install(command: { userId: string; archivePath: string; name: string; version: string; sha256: string; signal?: AbortSignal }): Promise<{ routines?: ReadonlyArray<{ cron: string; timezone: string; prompt: string }> } | void>;
+    uninstall(command: { userId: string; name: string }): Promise<void>;
+  } | undefined;
+  const catalogInstaller = {
+    install(command: { userId: string; archivePath: string; name: string; version: string; sha256: string; signal?: AbortSignal }) {
+      if (!machineInstaller) throw new Error("安装器尚未就绪");
+      return machineInstaller.install(command);
+    },
+    uninstall(command: { userId: string; name: string }) {
+      if (!machineInstaller) throw new Error("安装器尚未就绪");
+      return machineInstaller.uninstall(command);
+    },
+  };
   const chat = createChatService({
     db,
     config,
     key,
     hub,
     tasks,
+    installer: catalogInstaller,
     streamFn: createGateway({
       db,
       config,
@@ -211,8 +226,8 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
   const fetchImpl = options.fetch ?? fetch;
   const reconcileAttempted = new Set<string>();
   const reconcileInflight = new Map<string, Promise<void>>();
-  const catalogInstaller = {
-    async install(command: { userId: string; archivePath: string; name: string; version: string; sha256: string }) {
+  machineInstaller = {
+    async install(command: { userId: string; archivePath: string; name: string; version: string; sha256: string; signal?: AbortSignal }) {
       const archive = await readFile(archiveInside(config.dataDir, command.archivePath));
       const endpoint = await prepare(command.userId, () => {});
       const routines = await new MachinedClient(endpoint, fetchImpl).installApp({
@@ -220,7 +235,7 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
         version: command.version,
         sha256: command.sha256,
         archive,
-      });
+      }, command.signal);
       return { routines };
     },
     async uninstall(command: { userId: string; name: string }) {

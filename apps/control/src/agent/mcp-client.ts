@@ -54,7 +54,10 @@ const APPROVAL_SKIP_NAMES: Record<string, true> = {
   [SAVE_SKILL_TOOL_NAME]: true,
   shell_exec: true,
   fs_write: true,
+  bulk_delete_action: true,
   request_takeover: true,
+  search_apps: true,
+  install_mcp: true,
   browser_open: true,
   browser_click: true,
   browser_type: true,
@@ -66,6 +69,14 @@ const APPROVAL_SKIP_NAMES: Record<string, true> = {
   desktop_key: true,
   desktop_type: true,
 };
+
+/** 任务步骤只记类别，不记可能夹带命令或密钥的原文。 */
+export function mcpFailureCategory(error: unknown): "启动失败" | "超时" | "协议错误" {
+  const message = error instanceof Error ? error.message : "";
+  if (/timeout|timed out|超时|ETIMEDOUT|abort/i.test(message)) return "超时";
+  if (error instanceof McpRpcError || /协议|JSON-RPC|tools\/list|返回无效/i.test(message)) return "协议错误";
+  return "启动失败";
+}
 
 export class McpRpcError extends Error {
   readonly code: number;

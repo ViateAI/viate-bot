@@ -260,6 +260,8 @@ export function bindSecrets(tools: AgentTool[], lookup: (name: string) => string
   return tools.map((tool) => ({
     ...tool,
     execute: async (toolCallId, params, signal, onUpdate) => {
+      // install_mcp 自己解析占位符。这里替换会让步骤里的原文变成明文。
+      if (tool.name === "install_mcp") return tool.execute(toolCallId, params, signal, onUpdate);
       const prepared = substituteArgs(tool.name, params, lookup);
       if (prepared.missing) {
         return {

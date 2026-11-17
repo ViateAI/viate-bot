@@ -65,6 +65,7 @@ export interface InstallView {
   state: string;
   config: RedactedConfig;
   error: string | null;
+  installedByBot?: string | null;
 }
 
 export interface AdminVersion {
@@ -842,6 +843,7 @@ function cardSubtitle(row: UserAppRow): string {
   if (row.version) parts.push(row.version.recommended ? `${row.version.version} 推荐` : row.version.version);
   if (row.install) {
     parts.push(installStateText(row.install));
+    if (row.install.installedByBot) parts.push(`由 bot〈${row.install.installedByBot}〉安装`);
     if (row.install.forced) parts.push("强制安装");
   }
   return parts.join(" · ");
@@ -1209,6 +1211,7 @@ function AppDetail({
       {install ? (
         <div className="rounded border border-neutral-800 p-3 text-sm">
           <p>{installStateText(install)} · 版本 {install.version}</p>
+          {install.installedByBot ? <p data-testid="installed-by-bot">由 bot〈{install.installedByBot}〉安装</p> : null}
           {install.forced ? <p id="forced-install-note" className="mt-1 text-neutral-300">管理员强制安装，不能卸载。</p> : null}
           {appErrorText(install.error) ? <p className="mt-1 text-red-300">失败原因：{appErrorText(install.error)}</p> : null}
         </div>

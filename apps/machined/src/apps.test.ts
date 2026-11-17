@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, watch } from "node:fs";
 import { lstat, readFile, readdir, readlink, rename, symlink, unlink } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -190,6 +190,29 @@ function tarBytes(entries: { name: string; data: Buffer; type?: number; link?: s
 }
 
 describe("machine apps", () => {
+  it("stops cancelled setup before promoting the app", async () => {
+    const home = temp();
+    const ready = join(home, "ready");
+    const marker = join(home, "late-write");
+    const packed = fixture("cancel", "Not promoted", [{ type: "exec", argv: [process.execPath, "-e", `require('node:fs').writeFileSync(${JSON.stringify(ready)}, 'ready'); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'late'), 700)`] }]);
+    const runtime = createAppRuntime({ homeDir: home, setupTimeoutMs: 1000 });
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const watcher = watch(home, (_event, name) => { if (name === "ready") started.resolve(); });
+    try {
+      // The subprocess has its own clock; fake timers cannot drive its delayed side effect.
+      const installing = runtime.install({ name: "fixture", version: "cancel", ...packed }, controller.signal);
+      const rejected = expect(installing).rejects.toThrow(/取消/);
+      await Promise.race([started.promise, installing.then(() => { throw new Error("setup exited before readiness"); })]);
+      controller.abort();
+      await rejected;
+    } finally {
+      watcher.close();
+    }
+    expect(existsSync(marker)).toBe(false);
+    expect(await runtime.listApps()).toEqual([{ name: "fixture", version: null, state: "absent" }]);
+  });
+
   it("stops timed-out setup before rolling back the installation", async () => {
     const home = temp();
     const marker = join(home, "late-write");

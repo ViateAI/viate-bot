@@ -22,7 +22,7 @@ import { memoryTools } from "./memory-tools.js";
 import type { TakeoverLeases } from "../screen/leases.js";
 import { trackExecution, type UserFlights } from "../screen/flight.js";
 import { M2_EVENTS, terminalErrorClass } from "../m2/events.js";
-import { READ_ONLY_TOOLS } from "../m2/risk.js";
+import { argsHash, READ_ONLY_TOOLS } from "../m2/risk.js";
 import { notifyTaskSettled } from "../notify/index.js";
 import { emitOps, opsMinutes } from "../ops/rollup.js";
 import { routineService } from "../routines/service.js";
@@ -42,8 +42,9 @@ import {
   type SecretSubmission,
 } from "./secrets.js";
 import { maskDeep, maskSecrets } from "./text.js";
-import { appendMcpTools, MachinedMcpClient } from "./mcp-client.js";
-import { installsForModelContext, privateSkillStorage, resolveMcpLaunch, type CatalogDeps } from "../apps/catalog.js";
+import { appendMcpTools, MachinedMcpClient, mcpFailureCategory } from "./mcp-client.js";
+import { describeInstall, installMcpBlock, installMcpTool, scrubInstallPlaintext, searchAppsTool, type InstallMcpBinding } from "./app-tools.js";
+import { installsForModelContext, privateSkillStorage, resolveMcpLaunch, type CatalogDeps, type CatalogInstaller } from "../apps/catalog.js";
 import { markRemoteUncertain, remoteUncertain } from "./remote-uncertain.js";
 import { skillHttpMachine, skillPrompt, skillTools } from "./skill-tools.js";
 import { machineTools } from "./tools.js";
@@ -90,6 +91,8 @@ export interface ChatServiceDeps {
   fetch?: typeof fetch;
   leases?: TakeoverLeases;
   flights?: UserFlights;
+  /** 真正把包装进机器。缺省时 install_mcp 无法安装。 */
+  installer?: CatalogInstaller;
 }
 
 interface QueuedTask {
@@ -118,7 +121,7 @@ function catalogDeps(deps: ChatServiceDeps): CatalogDeps {
     db: deps.db,
     key: deps.key,
     dataDir: deps.config.dataDir,
-    installer: {
+    installer: deps.installer ?? {
       async install() {
         throw new Error("安装只能通过目录接口");
       },
@@ -129,21 +132,27 @@ function catalogDeps(deps: ChatServiceDeps): CatalogDeps {
   };
 }
 
+function scrubToolArgs(name: string, args: unknown, catalog: CatalogDeps, userId: string): unknown {
+  if (name === "install_mcp") scrubInstallPlaintext(args, catalog, userId);
+  return args;
+}
+
 async function installedMcpTools(
   deps: ChatServiceDeps,
   endpoint: MachineEndpoint,
   userId: string,
   taskId: string,
+  used: Set<string>,
   onUnconfirmed?: () => void,
-): Promise<{ tools: AgentTool[]; close: () => void }> {
+  signal?: AbortSignal,
+): Promise<{
+  tools: AgentTool[];
+  close: () => void;
+  client: MachinedMcpClient;
+  failures: Array<{ name: string; category: "启动失败" | "超时" | "协议错误" }>;
+  unavailable: string[];
+}> {
   const catalog = catalogDeps(deps);
-  let names: string[];
-  try {
-    names = installsForModelContext(catalog, userId).map((item) => item.name);
-  } catch {
-    return { tools: [], close: () => {} };
-  }
-  if (names.length === 0) return { tools: [], close: () => {} };
   const files = new MachinedClient(endpoint, deps.fetch ?? fetch);
   const fetchImpl = deps.fetch;
   const client = new MachinedMcpClient({
@@ -162,27 +171,47 @@ async function installedMcpTools(
       return { env: launch.env, headers: launch.headers };
     },
   });
-  const tools: AgentTool[] = [];
-  const used = new Set<string>();
-  let ready = false;
+  let names: string[] = [];
   try {
-    for (const name of names) {
-      try {
-        const info = await files.inspectApp(name);
-        for (const server of info.mcpServers) {
-          const started = await client.launchApp(name, server, undefined, taskId);
-          const listed = await client.listTools(started.server);
-          tools.push(...appendMcpTools(used, client, started.server, listed.tools));
-        }
-      } catch {
-        continue;
-      }
-    }
-    ready = true;
-    return { tools, close: () => client.close() };
-  } finally {
-    if (!ready) client.close();
+    names = installsForModelContext(catalog, userId).map((item) => item.name);
+  } catch (error) {
+    return {
+      tools: [],
+      close: () => client.close(),
+      client,
+      failures: [{ name: "已安装应用", category: mcpFailureCategory(error) }],
+      unavailable: ["已安装应用"],
+    };
   }
+  const tools: AgentTool[] = [];
+  const failures: Array<{ name: string; category: "启动失败" | "超时" | "协议错误" }> = [];
+  const unavailable: string[] = [];
+  for (const name of names) {
+    if (signal?.aborted) break;
+    const loading = signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
+    let added = 0;
+    let failed = false;
+    try {
+      const info = await files.inspectApp(name, loading);
+      for (const server of info.mcpServers) {
+        try {
+          const started = await client.launchApp(name, server, loading, taskId);
+          const listed = await client.listTools(started.server, loading);
+          const next = appendMcpTools(used, client, started.server, listed.tools);
+          tools.push(...next);
+          added += next.length;
+        } catch (error) {
+          failed = true;
+          failures.push({ name, category: mcpFailureCategory(error) });
+        }
+      }
+    } catch (error) {
+      failed = true;
+      failures.push({ name, category: mcpFailureCategory(error) });
+    }
+    if (failed && added === 0) unavailable.push(name);
+  }
+  return { tools, close: () => client.close(), client, failures, unavailable };
 }
 
 function parseStepRequest(json: string): { toolCallId?: string } {
@@ -370,6 +399,15 @@ export function createChatService(deps: ChatServiceDeps) {
       if (!task?.conversationId) return;
       publishTask(live.userId, task.conversationId, taskId);
       if (task.trigger === "routine") notifyTaskSettled(deps.db, { userId: live.userId, botId: live.botId, taskId, outcome: "needs_user" });
+    },
+    summarize(taskId, tool, args) {
+      if (tool !== "install_mcp") return tool;
+      const owner = deps.db.$client.prepare(
+        "select b.user_id as userId from tasks t join bots b on b.id=t.bot_id where t.id=?",
+      ).get(taskId) as { userId: string } | undefined;
+      if (!owner) return tool;
+      const card = describeInstall(catalogDeps(deps), owner.userId, args);
+      return card ? JSON.stringify(card) : tool;
     },
     onRearm(taskId) {
       const meta = chat.systemTaskMeta(["waiting_approval"]).find((item) => item.id === taskId);
@@ -711,14 +749,77 @@ export function createChatService(deps: ChatServiceDeps) {
       } catch {
         skillText = "";
       }
-      const installedMcp = await installedMcpTools(deps, endpoint, live.userId, live.id, () => {
+      const usedToolNames = new Set<string>();
+      const pendingMcp: AgentTool[] = [];
+      const installedMcp = await installedMcpTools(deps, endpoint, live.userId, live.id, usedToolNames, () => {
         live.remoteUnconfirmed = true;
         chat.updateTask(scope, live.id, { error: "remote_unconfirmed" });
         markRemoteUncertain(deps.db, { userId: live.userId, botId: live.botId, taskId: live.id });
         publishTask(live.userId, live.conversationId, live.id);
-      });
+      }, live.resumeAbort?.signal);
       closeMcp = installedMcp.close;
+      if (live.stopRequested) {
+        finish(scope, live, "cancelled", null, seq);
+        return;
+      }
       const mcpTools = installedMcp.tools;
+      const dress = (incoming: AgentTool[]): AgentTool[] => {
+        const guarded = incoming.map((tool) => {
+          const execute = tool.execute.bind(tool);
+          tool.execute = async (toolCallId, params, signal, onUpdate) => {
+            if (tool.name !== "request_takeover" && !READ_ONLY_TOOLS[tool.name] && remoteUncertain(deps.db, live.userId)) {
+              throw new Error("远端可能仍在执行。需要单独确认后才能继续写操作。");
+            }
+            try {
+              return await execute(toolCallId, params, signal, onUpdate);
+            } catch (error) {
+              if (tool.name === "shell_exec" && error instanceof Error && error.message === "remote_unconfirmed") {
+                live.remoteUnconfirmed = true;
+                chat.updateTask(scope, live.id, { error: "remote_unconfirmed" });
+                markRemoteUncertain(deps.db, { userId: live.userId, botId: live.botId, taskId: live.id });
+                publishTask(live.userId, live.conversationId, live.id);
+              }
+              throw error;
+            }
+          };
+          return tool;
+        });
+        const tracked = deps.flights ? guarded.map((item) => trackExecution(live.userId, item, deps.flights!)) : guarded;
+        return bindSecrets(tracked, (name) => broker.lookup(live.userId, live.id, name));
+      };
+      const installBinding: InstallMcpBinding = {
+        userId: live.userId,
+        botId: bot.id,
+        botName: bot.name,
+        taskId: live.id,
+        catalog: catalog,
+        lookup: (name) => broker.lookup(live.userId, live.id, name),
+        readFile: async (path) => {
+          try {
+            const file = await files.read(path, 128);
+            return file.content;
+          } catch {
+            return undefined;
+          }
+        },
+        onUnconfirmed: () => {
+          live.remoteUnconfirmed = true;
+          chat.updateTask(scope, live.id, { error: "remote_unconfirmed" });
+          markRemoteUncertain(deps.db, { userId: live.userId, botId: live.botId, taskId: live.id });
+        },
+        launch: async (appName, signal) => {
+          const loading = signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
+          const info = await files.inspectApp(appName, loading);
+          const added: AgentTool[] = [];
+          for (const server of info.mcpServers) {
+            const started = await installedMcp.client.launchApp(appName, server, loading, live.id);
+            const listed = await installedMcp.client.listTools(started.server, loading);
+            added.push(...appendMcpTools(usedToolNames, installedMcp.client, started.server, listed.tools));
+          }
+          pendingMcp.push(...dress(added));
+          return added.map((tool) => tool.name);
+        },
+      };
       const rawTools = [
         ...machineTools(files),
         ...approvalTools({ delete: (path, signal) => files.removeFile(path, signal) }),
@@ -758,6 +859,8 @@ export function createChatService(deps: ChatServiceDeps) {
         ...browserTools(bound),
         ...(deps.config.visionModels.includes(bot.model) ? [browserScreenshotTool(bound)] : []),
         secretTool,
+        searchAppsTool(catalog, live.userId),
+        installMcpTool(installBinding),
         ...skillTools({
           ownerUserId: live.userId,
           machine: skillMachine,
@@ -773,6 +876,25 @@ export function createChatService(deps: ChatServiceDeps) {
         }),
       ];
       seq = chat.maxSeq(scope, live.id);
+      for (const failure of installedMcp.failures) {
+        seq += 1;
+        const notice = `应用 ${failure.name} 的工具当前不可用（${failure.category}）`;
+        const step = chat.insertStep(scope, {
+          id: ulid(),
+          taskId: live.id,
+          seq,
+          kind: "mcp",
+          status: "failed",
+          requestJson: JSON.stringify({ name: "mcp_load", app: failure.name, category: failure.category }),
+        });
+        if (!step) continue;
+        chat.finishStep(scope, step.id, {
+          status: "failed",
+          responseJson: JSON.stringify({ text: notice }),
+        });
+        const current = chat.listSteps(scope, live.id)?.find((item) => item.id === step.id);
+        if (current) publishStep(live.conversationId, current);
+      }
       const guardedTools = rawTools.map((tool) => {
         const execute = tool.execute.bind(tool);
         tool.execute = async (toolCallId, params, signal, onUpdate) => {
@@ -842,7 +964,13 @@ export function createChatService(deps: ChatServiceDeps) {
         deps.flights ? guardedTools.map((tool) => trackExecution(live.userId, tool, deps.flights!)) : guardedTools,
         (name) => broker.lookup(live.userId, live.id, name),
       );
+      for (const tool of executable) usedToolNames.add(tool.name);
       const guard = async (context: BeforeToolCallContext, signal?: AbortSignal) => {
+        const installHash = context.toolCall.name === "install_mcp" ? argsHash("install_mcp", context.args) : undefined;
+        if (context.toolCall.name === "install_mcp") {
+          const problem = installMcpBlock(catalog, live.userId, context.args);
+          if (problem) return { block: true, reason: problem };
+        }
         if (
           context.toolCall.name !== "request_takeover" &&
           !READ_ONLY_TOOLS[context.toolCall.name] &&
@@ -859,7 +987,11 @@ export function createChatService(deps: ChatServiceDeps) {
         }
         const decision = await approvalGate.bind(live.id).beforeToolCall?.(context, signal);
         if (decision) return decision;
-        return getToolHooks().beforeToolCall?.(context, signal);
+        const hooked = await getToolHooks().beforeToolCall?.(context, signal);
+        if (installHash && (context.toolCall.name !== "install_mcp" || argsHash("install_mcp", context.args) !== installHash)) {
+          return { block: true, reason: "批准后的安装参数已改变，请重新申请审批" };
+        }
+        return hooked;
       };
       if (live.resume) {
         await recoverOutstandingTools({
@@ -909,6 +1041,9 @@ export function createChatService(deps: ChatServiceDeps) {
           return;
         }
       }
+      const unavailableNotice = installedMcp.unavailable
+        .map((name) => `应用 ${name} 的工具当前不可用`)
+        .join("\n");
       const agent = new Agent({
         initialState: {
           systemPrompt: [buildSystemPrompt(
@@ -916,10 +1051,15 @@ export function createChatService(deps: ChatServiceDeps) {
             bot.instructions,
             formatMemorySection(recent, matched),
             statusBlock(now(), "运行中", broker.names(live.userId)),
-          ), skillText].filter((part) => part.length > 0).join("\n\n"),
+          ), skillText, unavailableNotice].filter((part) => part.length > 0).join("\n\n"),
           model,
           tools: executable,
           messages: transcript,
+        },
+        prepareNextTurnWithContext: (turn) => {
+          if (pendingMcp.length === 0) return undefined;
+          const tools = [...(turn.context.tools ?? []), ...pendingMcp.splice(0)];
+          return { context: { ...turn.context, tools } };
         },
         streamFn: relayWithOverflowRetry(deps.streamFn, deps.config.modelContextTokens, (next, overflowSignal) =>
           compactLive(next, true, overflowSignal),
@@ -996,6 +1136,11 @@ export function createChatService(deps: ChatServiceDeps) {
     if (event.type === "message_end") {
       // 系统消息是当次运行的提示词和工具声明，下次启动会按 bot 重新生成，不写入对话。
       if (event.message.role === "system") return seq;
+      if (event.message.role === "assistant") {
+        for (const block of event.message.content) {
+          if (block.type === "toolCall" && block.name === "install_mcp") scrubInstallPlaintext(block.arguments, catalogDeps(deps), live.userId);
+        }
+      }
       if (saved.has(event.message)) return seq;
       saved.add(event.message);
       const source = event.message.role === "toolResult" ? withoutImages(event.message) : event.message;
@@ -1045,7 +1190,11 @@ export function createChatService(deps: ChatServiceDeps) {
         seq,
         kind: "tool",
         status: "running",
-        requestJson: json({ name: event.toolName, args: event.args, toolCallId: event.toolCallId }),
+        requestJson: json({
+          name: event.toolName,
+          args: scrubToolArgs(event.toolName, event.args, catalogDeps(deps), live.userId),
+          toolCallId: event.toolCallId,
+        }),
       });
       if (step) {
         openSteps.set(event.toolCallId, step.id);

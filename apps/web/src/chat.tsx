@@ -595,8 +595,14 @@ function pendingSecret(steps: Step[]): SecretRequestView | undefined {
 
 function stepTitle(step: Step): string {
   if (step.kind === "compact") return "已压缩较早的上下文";
+  if (step.kind === "mcp") return mcpTitle(step);
   if (step.kind === "tool") return toolTitle(step);
   return "模型";
+}
+
+function mcpTitle(step: Step): string {
+  const request = step.request as { app?: string } | null;
+  return request?.app ? `应用 ${request.app} 的工具当前不可用` : "MCP 加载失败";
 }
 
 function toolTitle(step: Step): string {
@@ -606,6 +612,11 @@ function toolTitle(step: Step): string {
 
 function stepBody(step: Step): string {
   if (step.kind === "compact") return "较早的对话已收成摘要，原文仍留在记录里。";
+  if (step.kind === "mcp") {
+    const request = step.request as { category?: string } | null;
+    const response = step.response as { text?: string } | null;
+    return response?.text ?? (request?.category ? `（${request.category}）` : "启动失败");
+  }
   const request = step.request as { name?: string; args?: unknown } | null;
   const response = step.response as { text?: string } | null;
   if (request?.name === "browser_screenshot") return response?.text ?? "截图";

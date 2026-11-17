@@ -106,7 +106,7 @@ export interface AppInspection {
 export type SetupStep =
   | { type: "apt"; packages: string[] }
   | { type: "npm"; packages: string[] }
-  | { type: "pip"; packages: string[] }
+  | { type: "pip"; packages: string[]; isolated?: boolean }
   | { type: "exec"; argv: string[] };
 
 export interface SetupContext {
@@ -115,6 +115,7 @@ export interface SetupContext {
   homeDir: string;
   timeoutMs: number;
   env: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 export interface AppRuntimeOptions {
@@ -131,7 +132,7 @@ export interface AppRouteOptions {
 }
 
 export interface AppRuntime {
-  install(request: InstallRequest): Promise<InstallResult>;
+  install(request: InstallRequest, signal?: AbortSignal): Promise<InstallResult>;
   uninstall(name: string, options?: { purge?: boolean }): Promise<{ name: string; state: "absent" }>;
   listApps(): Promise<AppListEntry[]>;
   listSkills(): Promise<SkillListResponse>;
@@ -232,7 +233,8 @@ export function createAppRuntime(options: AppRuntimeOptions = {}): AppRuntime {
     return join(layout.apps, name);
   };
 
-  async function install(request: InstallRequest): Promise<InstallResult> {
+  async function install(request: InstallRequest, signal?: AbortSignal): Promise<InstallResult> {
+    if (signal?.aborted) throw new AppError("安装已取消", "setup");
     assertAppName(request.name);
     assertVersion(request.version);
     if (!/^[a-f0-9]{64}$/i.test(request.sha256)) throw new AppError("\u5f52\u6863\u6821\u9a8c\u5931\u8d25", "invalid");
@@ -245,6 +247,7 @@ export function createAppRuntime(options: AppRuntimeOptions = {}): AppRuntime {
     const manifest = readManifest(files);
     if (manifest.name !== request.name) throw new AppError("\u63d2\u4ef6\u540d\u79f0\u4e0d\u5339\u914d", "invalid");
     return lock(request.name, async () => {
+      if (signal?.aborted) throw new AppError("安装已取消", "setup");
       await mkdir(layout.apps, { recursive: true });
       await mkdir(layout.bin, { recursive: true });
       const dir = appDir(request.name);
@@ -277,10 +280,12 @@ export function createAppRuntime(options: AppRuntimeOptions = {}): AppRuntime {
           homeDir,
           timeoutMs,
           env: baseEnv(homeDir, layout.bin, incoming, dataDir),
+          ...(signal ? { signal } : {}),
         };
         for (const step of loaded.steps) {
           if (options.runSetup) await options.runSetup(step, context);
           else await runSetupStep(step, context, identity);
+          if (signal?.aborted) throw new AppError("安装已取消", "setup");
         }
         for (const name of new Set([...oldBins, ...loaded.bins.map((bin) => bin.name)])) {
           const path = join(layout.bin, name);
@@ -531,9 +536,16 @@ export function registerAppRoutes(app: FastifyInstance, runtime: AppRuntime, opt
     // server.ts 已把同一类型注册为流。
   }
 
-  app.post("/apps/install", { bodyLimit: ARCHIVE_BYTE_LIMIT }, async (request): Promise<AppInstallResponse> => {
-    const result = await runtime.install(await readInstallRequest(request));
-    return { name: result.name, version: result.version, state: "installed", routines: result.routines };
+  app.post("/apps/install", { bodyLimit: ARCHIVE_BYTE_LIMIT }, async (request, reply): Promise<AppInstallResponse> => {
+    const controller = new AbortController();
+    const disconnect = () => { if (!reply.raw.writableFinished) controller.abort(); };
+    reply.raw.on("close", disconnect);
+    try {
+      const result = await runtime.install(await readInstallRequest(request), controller.signal);
+      return { name: result.name, version: result.version, state: "installed", routines: result.routines };
+    } finally {
+      reply.raw.off("close", disconnect);
+    }
   });
 
   app.get("/apps", async (): Promise<AppListResponse> => ({ apps: await runtime.listApps() }));
@@ -622,6 +634,7 @@ export function setupCommand(step: Extract<SetupStep, { type: "apt" }>, context:
       cwd: "/",
       env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", DEBIAN_FRONTEND: "noninteractive", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
       timeoutMs: context.timeoutMs,
+      ...(context.signal ? { signal: context.signal } : {}),
       ...userIds(setupSpawnIdentity(step, identity)),
     },
   };
@@ -644,6 +657,7 @@ async function runSetupStep(step: SetupStep, context: SetupContext, identity: { 
         NPM_CONFIG_AUDIT: "false",
       },
       timeoutMs: context.timeoutMs,
+      ...(context.signal ? { signal: context.signal } : {}),
       ...owner,
     });
     return;
@@ -655,8 +669,10 @@ async function runSetupStep(step: SetupStep, context: SetupContext, identity: { 
         ...context.env,
         PIP_CACHE_DIR: join(context.dataDir, ".pip-cache"),
         PIP_DISABLE_PIP_VERSION_CHECK: "1",
+        ...(step.isolated ? { PYTHONUSERBASE: join(context.dataDir, "python") } : {}),
       },
       timeoutMs: context.timeoutMs,
+      ...(context.signal ? { signal: context.signal } : {}),
       ...owner,
     });
     return;
@@ -668,6 +684,7 @@ async function runSetupStep(step: SetupStep, context: SetupContext, identity: { 
     cwd: context.root,
     env: context.env,
     timeoutMs: context.timeoutMs,
+    ...(context.signal ? { signal: context.signal } : {}),
     ...owner,
   });
 }
@@ -683,9 +700,11 @@ interface RunOptions {
   timeoutMs: number;
   uid?: number;
   gid?: number;
+  signal?: AbortSignal;
 }
 
 function runProcess(command: string, args: string[], options: RunOptions): Promise<void> {
+  if (options.signal?.aborted) return Promise.reject(new AppError("安装已取消", "setup"));
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -694,10 +713,15 @@ function runProcess(command: string, args: string[], options: RunOptions): Promi
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", cancel);
       if (error) reject(error);
       else resolve();
     };
     let child: ChildProcess;
+    const cancel = () => {
+      failure = new AppError("安装已取消", "setup");
+      void killProcessGroup(child.pid).catch(() => finish(new AppError("安装进程停止未确认", "setup")));
+    };
     try {
       child = spawn(command, args, {
         cwd: options.cwd,
@@ -713,6 +737,7 @@ function runProcess(command: string, args: string[], options: RunOptions): Promi
     }
     child.stdout?.resume();
     child.stderr?.resume();
+    options.signal?.addEventListener("abort", cancel, { once: true });
     timer = setTimeout(() => {
       failure = new AppError("\u5b89\u88c5\u6b65\u9aa4\u8d85\u65f6", "timeout");
       void killProcessGroup(child.pid).catch(() => finish(new AppError("安装进程停止未确认", "setup")));
@@ -1161,13 +1186,14 @@ function parseSetup(value: unknown): SetupStep[] {
     if (!isObject(step) || typeof step.type !== "string") throw new AppError("\u5b89\u88c5\u6b65\u9aa4\u65e0\u6548", "invalid");
     if (step.type === "apt" || step.type === "npm" || step.type === "pip") {
       const packages = step.packages;
-      if (Object.keys(step).some((key) => key !== "type" && key !== "packages") || !isStringArray(packages)) {
+      if (Object.keys(step).some((key) => key !== "type" && key !== "packages" && !(step.type === "pip" && key === "isolated")) || (step.isolated !== undefined && typeof step.isolated !== "boolean") || !isStringArray(packages)) {
         throw new AppError("\u5b89\u88c5\u5305\u65e0\u6548", "invalid");
       }
       if (packages.length === 0 || packages.some((pkg) => !pkg || pkg.startsWith("-") || pkg.includes("\0"))) {
         throw new AppError("\u5b89\u88c5\u5305\u65e0\u6548", "invalid");
       }
       if (step.type === "apt" && packages.some((pkg) => !APT_PACKAGE.test(pkg))) throw new AppError("\u5b89\u88c5\u5305\u65e0\u6548", "invalid");
+      if (step.type === "pip" && typeof step.isolated === "boolean") return { type: "pip", packages, isolated: step.isolated };
       return { type: step.type, packages };
     }
     if (step.type === "exec") {
