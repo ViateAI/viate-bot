@@ -103,6 +103,50 @@ Rancher Desktop 防火墙脚本不封锁公网 IPv4 的 UDP/TCP 53；公网 DNS 
 
 用户电脑也建议使用真实 DNS。确实需要 fake-ip 时，可运行 `viate-egress run --base https://bot.example --allow-fake-ip`：只额外放行 `198.18.0.0/15`，其它私网仍拒绝。**fake-ip 会隐藏真实目标；必须确保代理软件不会把这些连接直连进内网。** 每次启用启动都会打印风险提示。选择持久化在 `~/.viate-bot/egress.json`（`{"allowFakeIp":true}`；可用 `--config <path>` 指定路径）；使用 `--no-allow-fake-ip` 或把值改为 `false` 关闭。默认没有配置文件时关闭。控制面只在用户设备列表显示“允许 fake-ip”，不改变中继规则，管理端不显示该标记。machined direct 不提供此例外。
 
+## 桌面客户端
+
+托盘程序在 `apps/desktop`，隧道、拨号、目标检查和绑定仍用 `packages/egress-client`。内测不做代码签名，也不做自动更新。设置 `VB_DESKTOP_DOWNLOAD_URL` 后，用户端「网络出口」页显示这个下载地址；留空则继续显示命令行说明。
+
+### 构建
+
+macOS arm64 在 Mac 上构建：
+
+```sh
+pnpm install --frozen-lockfile
+pnpm --filter @viate-bot/desktop dist:mac
+```
+
+产物在 `apps/desktop/release/`，有 zip 和 dmg。脚本设置 `CSC_IDENTITY_AUTO_DISCOVERY=false`，避免把钥匙串里的开发证书拿去签名。
+
+Windows x64 的 NSIS 安装包：
+
+```sh
+pnpm install --frozen-lockfile
+pnpm --filter @viate-bot/desktop dist:win
+```
+
+产物在 `apps/desktop/release/`，文件名是 `viate-bot-<version>-win-x64.exe`。electron-builder 26 会自己下载 NSIS，macOS 上这条命令不需要 Wine。Windows 上用同一条命令。
+
+`dist:mac:test` 是验收用的开发构建：允许 `http://127.0.0.1` 和 `http://localhost`，并包含环境变量 `VB_EGRESS_ALLOW_PRIVATE` 这条测试入口。不要分发它。发布构建不引用这段代码；`apps/desktop/scripts/build.mjs` 会在发布产物出现 `VB_EGRESS_ALLOW_PRIVATE` 时失败。
+
+### 安装
+
+macOS Gatekeeper 会拦截未签名应用。在 Finder 里对 `viate-bot.app` 按住 Control 点按，选择「打开」，再确认打开。系统设置 → 隐私与安全性里也可能出现「仍要打开」。只对你核对过的这份安装包，可以去掉下载隔离标记：`xattr -dr com.apple.quarantine /Applications/viate-bot.app`。
+
+Windows SmartScreen 会提示已保护你的电脑。点「更多信息」，再点「仍要运行」。这是因为安装包没有代码签名。
+
+### 绑定
+
+首次打开填写 viate-bot 地址。发布版只接受 `https://`。开发构建另外接受 `http://127.0.0.1` 和 `http://localhost`。客户端在本机随机端口等待回调，并用系统浏览器打开这个站点的 `/client/link`。网页上点「允许」后，浏览器回到 `http://127.0.0.1:<端口>/callback`。设备令牌只用 Electron `safeStorage` 加密后放在用户数据目录。系统加密不可用时拒绝保存，不会退回明文。托盘里的「退出登录」删除这份密文。
+
+托盘显示在线、离线、已暂停或未绑定，以及今日流量。暂停会断开出口并且不再重连，机器侧按离线策略处理。开机自启动默认关闭。
+
+### fake-ip
+
+托盘里的「允许 fake-ip」默认不勾选。勾选前会要求确认：只额外放行 `198.18.0.0/15`，其它私网仍然拒绝。fake-ip 会隐藏真实目标，必须确保代理软件不会把这些连接直连进内网。取消勾选后立即恢复拒绝。客户端重连时把开关报给控制面，用户设备列表显示「允许 fake-ip」。
+
+命令行的 `--allow-fake-ip` 仍然写 `~/.viate-bot/egress.json`，和桌面客户端的用户数据目录互不影响。
+
 ## 升级
 
 新的 machined 只存在于新建的容器里。只构建镜像、不重建已有机器的容器，跑着的仍是旧进程。

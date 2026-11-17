@@ -37,6 +37,7 @@ export interface Me {
   isAdmin: boolean;
   provisioned: boolean;
   csrf: string;
+  desktopDownloadUrl: string | null;
 }
 
 export interface MemoryItem {

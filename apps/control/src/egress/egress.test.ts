@@ -22,9 +22,10 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-function boot() {
+function boot(extra: NodeJS.ProcessEnv = {}) {
   const dir = mkdtempSync(join(tmpdir(), "vb-egress-"));
   const config = loadConfig({
+    ...extra,
     VB_DATA_DIR: dir,
     VB_PUBLIC_URL: "http://127.0.0.1:4418",
     VB_MODEL_API_KEY: "secret",
@@ -296,6 +297,15 @@ describe("egress control plane", () => {
     const row = db.$client.prepare("select state from tasks where id='task-a'").get();
     if (!row || typeof row !== "object" || !("state" in row)) throw new Error("没有任务");
     expect(row.state).toBe("waiting_egress");
+  });
+
+  it("returns the configured desktop download url to the signed-in user", async () => {
+    const missing = boot();
+    const absent = await missing.app.inject({ method: "GET", url: "/api/me", headers: { cookie: cookie(missing.alice.token) } });
+    expect(absent.json().desktopDownloadUrl).toBeNull();
+    const configured = boot({ VB_DESKTOP_DOWNLOAD_URL: "https://example.test/viate-bot.zip" });
+    const present = await configured.app.inject({ method: "GET", url: "/api/me", headers: { cookie: cookie(configured.alice.token) } });
+    expect(present.json().desktopDownloadUrl).toBe("https://example.test/viate-bot.zip");
   });
 });
 

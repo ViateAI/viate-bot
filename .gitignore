@@ -13,3 +13,7 @@ coverage/
 .DS_Store
 images/machine/machined.mjs
 images/machine/fs-worker.mjs
+apps/desktop/release/
+apps/desktop/release-test/
+apps/desktop/stage/
+apps/desktop/build/

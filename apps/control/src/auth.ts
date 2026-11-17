@@ -154,6 +154,7 @@ export function registerAuth(app: FastifyInstance, deps: AuthDeps): void {
       isAdmin: user.isAdmin,
       provisioned: quotaRepository(deps.db).find(userScope(user.id)) !== undefined,
       csrf: resolved.session.csrf,
+      desktopDownloadUrl: deps.config.desktopDownloadUrl || null,
     };
   });
 }

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+  <title>viate-bot</title>
+  <link rel="stylesheet" href="setup.css">
+</head>
+<body>
+  <main>
+    <h1>连接 viate-bot</h1>
+    <p id="hint"></p>
+    <form id="form">
+      <label for="base">地址</label>
+      <input id="base" name="base" autocomplete="off" spellcheck="false">
+      <button id="submit" type="submit">绑定</button>
+    </form>
+    <p id="error" role="alert"></p>
+  </main>
+  <script src="setup.js"></script>
+</body>
+</html>

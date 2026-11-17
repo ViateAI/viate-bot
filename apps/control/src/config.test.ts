@@ -25,6 +25,14 @@ describe("loadConfig", () => {
     expect(config.oidcIssuer).toBe("");
     expect(config.modelBaseUrl).toBe("");
     expect(config.serviceCredentials).toBeUndefined();
+    expect(config.desktopDownloadUrl).toBe("");
+  });
+
+  it("accepts an http(s) desktop download url and rejects anything else", () => {
+    expect(loadConfig({ VB_DESKTOP_DOWNLOAD_URL: " https://example.test/viate-bot.zip " }).desktopDownloadUrl).toBe("https://example.test/viate-bot.zip");
+    expect(() => loadConfig({ VB_DESKTOP_DOWNLOAD_URL: "ftp://example.test/a" })).toThrow(/VB_DESKTOP_DOWNLOAD_URL/);
+    expect(() => loadConfig({ VB_DESKTOP_DOWNLOAD_URL: "not a url" })).toThrow(/VB_DESKTOP_DOWNLOAD_URL/);
+    expect(() => loadConfig({ VB_DESKTOP_DOWNLOAD_URL: "https://user:pass@example.test/a" })).toThrow(/VB_DESKTOP_DOWNLOAD_URL/);
   });
 
   it("rejects a non-integer idle timeout", () => {

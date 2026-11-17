@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
-import { api } from "./api.js";
+import { api, rememberCsrf, type Me } from "./api.js";
 
 interface Device {
   id: string;
@@ -22,6 +22,15 @@ interface EgressView {
 
 export function EgressSettings() {
   const queryClient = useQueryClient();
+  const me = useQuery({
+    queryKey: ["me"],
+    retry: false,
+    queryFn: async () => {
+      const user = await api<Me>("/api/me");
+      rememberCsrf(user.csrf);
+      return user;
+    },
+  });
   const egress = useQuery({ queryKey: ["egress"], queryFn: () => api<EgressView>("/api/egress"), retry: false });
   const devices = useQuery({ queryKey: ["client-devices"], queryFn: () => api<{ devices: Device[] }>("/api/client/devices") });
   const [error, setError] = useState("");
@@ -67,16 +76,25 @@ export function EgressSettings() {
 
   const current = egress.data;
   const rows = devices.data?.devices ?? current?.devices ?? [];
+  const download = httpUrl(me.data?.desktopDownloadUrl);
   return (
     <section className="mx-auto grid max-w-3xl gap-6 px-6 py-8">
       <h1 className="text-2xl font-semibold">网络出口</h1>
-      <p className="text-sm text-neutral-400">
-        选择用户网络后，电脑里的浏览器流量从你自己的网络出去。桌面安装包在下一阶段提供。现在用命令行客户端：
-        <code className="mx-1 text-neutral-200">viate-egress link</code>
-        然后
-        <code className="mx-1 text-neutral-200">viate-egress run</code>
-        。不认代理环境变量的 shell 程序仍可能直连。
-      </p>
+      {download ? (
+        <p className="text-sm text-neutral-400">
+          选择用户网络后，电脑里的浏览器流量从你自己的网络出去。
+          <a className="mx-1 text-neutral-200 underline" href={download} rel="noreferrer" target="_blank">下载桌面客户端</a>
+          ，安装后填写这个站点的地址并完成绑定。不认代理环境变量的 shell 程序仍可能直连。
+        </p>
+      ) : (
+        <p className="text-sm text-neutral-400">
+          选择用户网络后，电脑里的浏览器流量从你自己的网络出去。现在用命令行客户端：
+          <code className="mx-1 text-neutral-200">viate-egress link</code>
+          然后
+          <code className="mx-1 text-neutral-200">viate-egress run</code>
+          。不认代理环境变量的 shell 程序仍可能直连。
+        </p>
+      )}
       {egress.isError ? <p className="text-sm text-neutral-400">还没有电脑，开通之后才能切换出口。</p> : null}
       {current ? (
         <form data-testid="egress-form" className="grid gap-3 rounded border border-neutral-800 p-4" onSubmit={onSave}>
@@ -130,4 +148,15 @@ export function EgressSettings() {
       {error ? <p className="text-sm text-red-300">{error}</p> : null}
     </section>
   );
+}
+
+function httpUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }

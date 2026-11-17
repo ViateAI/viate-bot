@@ -52,6 +52,8 @@ export interface ControlConfig {
   dev: boolean;
   databasePath: string;
   secretKeyPath: string;
+  /** 空字符串表示设置页继续显示命令行说明。 */
+  desktopDownloadUrl: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig {
@@ -95,6 +97,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig 
     dev: env.VB_DEV === "1",
     databasePath: join(dataDir, "viate-bot.sqlite"),
     secretKeyPath: join(dataDir, "secret.key"),
+    desktopDownloadUrl: desktopDownloadUrl(env.VB_DESKTOP_DOWNLOAD_URL),
   };
   if (integration === "viate") {
     config.serviceCredentials = {
@@ -149,6 +152,21 @@ function optional(env: NodeJS.ProcessEnv, name: string, fallback: string): strin
   const value = env[name];
   if (value === undefined || value.trim() === "") return fallback;
   return value.trim();
+}
+
+function desktopDownloadUrl(raw: string | undefined): string {
+  const value = raw?.trim() ?? "";
+  if (value === "") return "";
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`VB_DESKTOP_DOWNLOAD_URL 不是合法地址，收到 "${raw}"`);
+  }
+  if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username !== "" || url.password !== "") {
+    throw new Error(`VB_DESKTOP_DOWNLOAD_URL 必须是不带账号的 http 或 https 地址，收到 "${raw}"`);
+  }
+  return url.toString();
 }
 
 function integer(env: NodeJS.ProcessEnv, name: string, fallback: number): number {

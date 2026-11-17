@@ -1,0 +1,39 @@
+appId: bot.viate.desktop
+productName: viate-bot
+asar: true
+npmRebuild: false
+nodeGypRebuild: false
+directories:
+  app: stage
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - package.json
+mac:
+  category: public.app-category.utilities
+  identity: null
+  gatekeeperAssess: false
+  hardenedRuntime: false
+  target:
+    - target: zip
+      arch:
+        - arm64
+    - target: dmg
+      arch:
+        - arm64
+  extendInfo:
+    LSUIElement: true
+win:
+  signAndEditExecutable: false
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  differentialPackage: false
+artifactName: viate-bot-${version}-${os}-${arch}.${ext}
+publish: null
