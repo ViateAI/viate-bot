@@ -22,6 +22,11 @@ export class BrowserPool {
     };
   }
 
+  /** 与这个用户的浏览器工具同一把锁。调用方不能在锁内再等接管排空。 */
+  lock(userId: string): UserBrowserLock {
+    return this.lockFor(userId);
+  }
+
   async close(): Promise<void> {
     const clients = [...this.clients.values()];
     this.clients.clear();
