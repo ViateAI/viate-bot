@@ -43,6 +43,7 @@ import {
   type CatalogMachineInstall,
 } from "./catalog.js";
 import { readTar, wrapMcpUrl } from "./archive.js";
+import { applyBotProfile } from "../agent/profile-tool.js";
 
 const dirs: string[] = [];
 const closers: Array<() => void> = [];
@@ -337,6 +338,17 @@ describe("catalog", () => {
     expect(ctx.uninstalled).toEqual([]);
     expect(listUserInstalls(ctx.deps, "alice")[0]).toMatchObject({ desired: "present", forced: true });
     expect(listUserCatalog(ctx.deps, "alice").map((entry) => entry.name)).not.toContain("relay");
+  });
+
+  it("removes disabled applications from a bot's model tools without affecting other bots", async () => {
+    const ctx = boot();
+    const pkg = publish(ctx.deps, "switchable", "1.0.0");
+    setVisibility(ctx.deps, adminScope("admin"), pkg.appId, { scope: "all" });
+    await installForUser(ctx.deps, "alice", "switchable");
+    botRepository(ctx.db).insert(userScope("alice"), { id: "other-alice", name: "Other", model: "fake" });
+    await applyBotProfile({ db: ctx.db, dataDir: ctx.dir, userId: "alice", botId: "bot-alice", taskId: "task", allowModel: () => true, readFile: async () => { throw new Error("not needed"); } }, { enabledAppIds: [] });
+    expect(installsForModelContext(ctx.deps, "alice", "bot-alice")).toEqual([]);
+    expect(installsForModelContext(ctx.deps, "alice", "other-alice").map((app) => app.name)).toEqual(["switchable"]);
   });
 
   it("stores secret config as ciphertext and keeps values out of rows, events, and http", async () => {

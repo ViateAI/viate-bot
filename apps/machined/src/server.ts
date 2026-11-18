@@ -108,7 +108,8 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     resolveConfined(body.path);
     const requestedMax = typeof body.maxBytes === "number" ? body.maxBytes : MAX_READ_BYTES;
     const maxBytes = Math.min(requestedMax, MAX_READ_BYTES);
-    const result = await filesystem().read(body.path, maxBytes);
+    const encoding = body.encoding === "base64" ? "base64" : "utf8";
+    const result = await filesystem().read(body.path, maxBytes, encoding);
     const response: FsReadResponse = result;
     return response;
   });

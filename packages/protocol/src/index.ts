@@ -54,6 +54,8 @@ export interface FsReadRequest {
   path: string;
   /** 最多读取的字节数。缺省由 machined 取默认值。 */
   maxBytes?: number;
+  /** 缺省 utf8。头像等二进制文件用 base64，避免按文本解码损坏。 */
+  encoding?: "utf8" | "base64";
 }
 
 export interface FsReadResponse {

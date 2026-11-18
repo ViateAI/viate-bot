@@ -58,6 +58,8 @@ const APPROVAL_SKIP_NAMES: Record<string, true> = {
   request_takeover: true,
   search_apps: true,
   install_mcp: true,
+  update_bot_profile: true,
+  propose_approval_rule: true,
   browser_open: true,
   browser_click: true,
   browser_type: true,

@@ -16,6 +16,8 @@ export const users = sqliteTable("users", {
   name: text("name").notNull(),
   status: text("status").notNull(),
   isAdmin: integer("is_admin", { mode: "boolean" }).notNull().default(false),
+  /** 关闭时服务端不返回工具参数、结果、中间回复、推理和截图。 */
+  showProcess: integer("show_process", { mode: "boolean" }).notNull().default(false),
   lastSyncedAt: text("last_synced_at"),
   createdAt: text("created_at").notNull(),
 });
@@ -89,6 +91,7 @@ export const bots = sqliteTable("bots", {
     .references(() => users.id),
   name: text("name").notNull(),
   avatar: text("avatar"),
+  bio: text("bio").notNull().default(""),
   instructions: text("instructions").notNull().default(""),
   model: text("model").notNull(),
   modelCredentialId: text("model_credential_id").references((): AnySQLiteColumn => modelCredentials.id),
@@ -137,6 +140,8 @@ export const quotas = sqliteTable("quotas", {
   specJson: text("spec_json").notNull(),
   maxConcurrentTasks: integer("max_concurrent_tasks").notNull(),
   maxRoutines: integer("max_routines").notNull(),
+  /** null 表示沿用全局预算。0 表示不限制。 */
+  taskTokenBudget: integer("task_token_budget"),
 });
 
 export const settings = sqliteTable("settings", {
@@ -216,6 +221,26 @@ export const approvals = sqliteTable("approvals", {
   decidedBy: text("decided_by"),
   decidedAt: text("decided_at"),
 });
+
+export const approvalRules = sqliteTable(
+  "approval_rules",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id),
+    category: text("category").notNull(),
+    matchJson: text("match_json").notNull(),
+    expiresAt: text("expires_at"),
+    hitCount: integer("hit_count").notNull().default(0),
+    lastHitAt: text("last_hit_at"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [index("approval_rules_bot_idx").on(table.botId)],
+);
 
 export const memories = sqliteTable("memories", {
   id: text("id").primaryKey(),

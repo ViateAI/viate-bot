@@ -145,6 +145,76 @@ async function idleScreen() {
 }
 
 describe("task runner", () => {
+  it("does not execute the tool batch returned by an already exhausted model call", async () => {
+    let execs = 0;
+    const machinePort = await listen(async (req, res) => {
+      if (req.url === "/exec") execs += 1;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(`data: ${JSON.stringify({ type: "exit", code: 0, signal: null, timedOut: false })}\n\n`);
+    });
+    const modelPort = await listen(async (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(toolSse(JSON.stringify({ cmd: "touch /tmp/no-budget" })));
+    });
+    const { config, ctx } = await opened({ VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`, VB_TASK_TOKEN_BUDGET: "1" });
+    const { service, runtime } = await appFor(ctx, config, { host: "127.0.0.1", port: machinePort, token: "machine" });
+    const bot = await createBot({ db: ctx.db, key: ctx.key, credentials: runtime.credentials, providerId: runtime.identity.id }, userScope("user-a"), { name: "Budget tools", model: "gpt-test" });
+    ctx.db.$client.prepare("update bots set settings_json=? where id=?").run(JSON.stringify({ approveNone: true }), bot.id);
+    const sent = await service.send({ userId: "user-a", botId: bot.id, text: "run", mode: "queue" });
+    await service.idle();
+    expect(chatRepository(ctx.db).findTask(userScope("user-a"), sent.taskId)?.state).toBe("failed");
+    expect(execs).toBe(0);
+  });
+
+  it.each(["text", "tools", "mixed"])("bounds length continuation for %s without executing truncated tools", async (mode) => {
+    let calls = 0;
+    let execs = 0;
+    const bodies: string[] = [];
+    const machinePort = await listen(async (req, res) => {
+      if (req.url === "/exec") execs += 1;
+      res.writeHead(404);
+      res.end();
+    });
+    const modelPort = await listen(async (_req, res, body) => {
+      bodies.push(body);
+      calls += 1;
+      const tool = mode === "tools" || (mode === "mixed" && calls === 1);
+      let response = tool ? toolSse(JSON.stringify({ cmd: "touch /tmp/must-not-run" })) : textSse("part");
+      if (mode !== "mixed" || calls < 3) response = response.replace('"finish_reason":"tool_calls"', '"finish_reason":"length"').replace('"finish_reason":"stop"', '"finish_reason":"length"');
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(response);
+    });
+    const { config, ctx } = await opened({ VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1` });
+    const { service, runtime } = await appFor(ctx, config, { host: "127.0.0.1", port: machinePort, token: "machine" });
+    const bot = await createBot({ db: ctx.db, key: ctx.key, credentials: runtime.credentials, providerId: runtime.identity.id }, userScope("user-a"), { name: "Length", model: "gpt-test" });
+    const sent = await service.send({ userId: "user-a", botId: bot.id, text: "finish", mode: "queue" });
+    await service.idle();
+    const task = chatRepository(ctx.db).findTask(userScope("user-a"), sent.taskId);
+    expect(calls).toBe(3);
+    expect(execs).toBe(0);
+    expect(task?.state).toBe(mode === "mixed" ? "succeeded" : "failed");
+    expect(task?.error).toBe(mode === "mixed" ? null : "模型输出达到上限");
+    if (mode !== "text") expect(bodies[1]).toContain("上一条输出被截断，工具参数不完整，请缩短后重试");
+    if (mode !== "tools") expect(bodies[2]).toContain("继续");
+  });
+
+  it.each([0, 2])("settles a normal stop against budget %i and resets budget for a new task", async (budget) => {
+    const modelPort = await listen(async (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(textSse("done"));
+    });
+    const { config, ctx } = await opened({ VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`, VB_TASK_TOKEN_BUDGET: String(budget) });
+    const { service, runtime } = await appFor(ctx, config, { host: "127.0.0.1", port: 9, token: "machine" });
+    const bot = await createBot({ db: ctx.db, key: ctx.key, credentials: runtime.credentials, providerId: runtime.identity.id }, userScope("user-a"), { name: "Budget", model: "gpt-test" });
+    for (let i = 0; i < 2; i += 1) {
+      const sent = await service.send({ userId: "user-a", botId: bot.id, text: "finish", mode: "queue" });
+      await service.idle();
+      const task = chatRepository(ctx.db).findTask(userScope("user-a"), sent.taskId);
+      expect(task?.state).toBe(budget ? "failed" : "succeeded");
+      expect(task?.error).toBe(budget ? "已达到单任务 token 预算（已用 2 / 上限 2）" : null);
+    }
+  });
+
   it.each(["logout", "disable"])("closes an idle screen viewer after %s", async (mode) => {
     const fixture = await idleScreen();
     if (mode === "logout") {

@@ -52,12 +52,12 @@ function sse(lines: string[], status = 200): Response {
   return new Response(stream, { status, headers: { "content-type": "text/event-stream" } });
 }
 
-function textSse(text: string, prompt = 1, completion = 1): Response {
+function textSse(text: string, prompt = 1, completion = 1, cached = 0): Response {
   return sse([
     JSON.stringify({ choices: [{ index: 0, delta: { content: text }, finish_reason: null }] }),
     JSON.stringify({
       choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-      usage: { prompt_tokens: prompt, completion_tokens: completion },
+      usage: { prompt_tokens: prompt, completion_tokens: completion, prompt_tokens_details: { cached_tokens: cached } },
     }),
     "[DONE]",
   ]);
@@ -72,6 +72,30 @@ async function finish(stream: AssistantMessageEventStream | Promise<AssistantMes
 }
 
 describe("model gateway", () => {
+  it.each(["steps", "duration"])("does not synthesize a successful conclusion after reaching %s limit", async (limit) => {
+    const db = database();
+    try {
+      const config = loadConfig({ VB_MODEL_BASE_URL: "http://model.test/v1" });
+      const current = task();
+      if (limit === "steps") current.modelCalls = config.maxTaskSteps;
+      else current.startedAt = Date.now() - (config.maxTaskDurationSec + 1) * 1000;
+      const gateway = createGateway({ db, config, tasks: new Map([["task-1", current]]), fetch: async () => { throw new Error("must not call upstream"); } });
+      const message = await finish(gateway(buildModel(config, "gpt-test"), { messages: [] }, { sessionId: "task-1" }));
+      expect(message.stopReason).toBe("error");
+      expect(message.errorMessage).toContain(limit === "steps" ? "步数上限" : "时长上限");
+    } finally { db.$client.close(); }
+  });
+
+  it("rejects a stream that closes without a finish reason instead of inventing normal stop", async () => {
+    const db = database();
+    try {
+      const config = loadConfig({ VB_MODEL_BASE_URL: "http://model.test/v1" });
+      const gateway = createGateway({ db, config, tasks: new Map([["task-1", task()]]), fetch: async () => sse([JSON.stringify({ choices: [{ delta: { content: "unfinished" }, finish_reason: null }] }), "[DONE]"]) });
+      const message = await finish(gateway(buildModel(config, "gpt-test"), { messages: [] }, { sessionId: "task-1" }));
+      expect(message.stopReason).toBe("error");
+    } finally { db.$client.close(); }
+  });
+
   it("rejects a model outside the whitelist without calling upstream", async () => {
     const db = database();
     let calls = 0;
@@ -237,9 +261,29 @@ describe("model gateway", () => {
     const second = await finish(gateway(model, context, { sessionId: "task-1" }));
     expect(first.stopReason).toBe("stop");
     expect(calls).toBe(1);
-    expect(second.stopReason).toBe("stop");
-    expect(second.content[0]).toMatchObject({ type: "text" });
-    expect((second.content[0] as { text: string }).text).toContain("token 预算");
+    expect(second.stopReason).toBe("error");
+    expect(second.errorMessage).toBe("已达到单任务 token 预算（已用 12 / 上限 10）");
+    db.$client.close();
+  });
+
+  it("does not charge cached prompt tokens against the task budget", async () => {
+    const db = database();
+    const current = task();
+    current.tokenBudget = 10;
+    const tasks = new Map([["task-1", current]]);
+    const config = loadConfig({ VB_MODEL_BASE_URL: "http://model.test/v1", VB_TASK_TOKEN_BUDGET: "10" });
+    const gateway = createGateway({
+      db,
+      config,
+      tasks,
+      retryDelays: [0, 0],
+      fetch: async () => textSse("ok", 20, 3, 16),
+    });
+    const message = await finish(gateway(buildModel(config, "gpt-test"), { messages: [{ role: "user", content: "hi", timestamp: 1 }] }, { sessionId: "task-1" }));
+    expect(message.stopReason).toBe("stop");
+    expect(current.inputTokens).toBe(20);
+    expect(current.cacheReadTokens).toBe(16);
+    expect(current.tokensUsed).toBe(7);
     db.$client.close();
   });
 

@@ -48,6 +48,8 @@ export interface MemoryItem {
 export interface Bot {
   id: string;
   name: string;
+  bio: string;
+  avatar: string | null;
   model: string;
   instructions: string;
 }

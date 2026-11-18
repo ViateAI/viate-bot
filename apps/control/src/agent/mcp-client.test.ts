@@ -439,6 +439,8 @@ describe("machined MCP client", () => {
       { name: "fs_read" },
       { name: "bulk_delete_action" },
       { name: "install_mcp" },
+      { name: "update_bot_profile" },
+      { name: "propose_approval_rule" },
       { name: "search_apps" },
       { name: "memory_save" },
       { name: "skill_read" },

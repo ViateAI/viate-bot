@@ -13,6 +13,11 @@ interface AdminUser {
   botCount: number;
   tasks7d: number;
   subject: string | null;
+  maxBots: number | null;
+  maxConcurrentTasks: number | null;
+  maxRoutines: number | null;
+  taskTokenBudget: number | null;
+  showProcess: boolean;
 }
 
 interface Template {
@@ -120,10 +125,25 @@ export function AdminUsers() {
     },
   });
   const quota = useMutation({
-    mutationFn: (input: { id: string; maxBots: number }) =>
+    mutationFn: (input: { id: string; maxBots: number; maxConcurrentTasks: number; maxRoutines: number; taskTokenBudget: number | null }) =>
       api(`/api/admin/users/${input.id}/quota`, {
         method: "PATCH",
-        body: JSON.stringify({ maxBots: input.maxBots }),
+        body: JSON.stringify({
+          maxBots: input.maxBots,
+          maxConcurrentTasks: input.maxConcurrentTasks,
+          maxRoutines: input.maxRoutines,
+          taskTokenBudget: input.taskTokenBudget,
+        }),
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+    },
+  });
+  const processDetail = useMutation({
+    mutationFn: (input: { id: string; enabled: boolean }) =>
+      api(`/api/admin/users/${input.id}/process-detail`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: input.enabled }),
       }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["admin-users"] });
@@ -211,7 +231,11 @@ export function AdminUsers() {
                 <td>{user.tasks7d}</td>
                 <td>
                   {user.id && user.provisioned ? (
-                    <QuotaEditor userId={user.id} onSave={(maxBots) => quota.mutate({ id: user.id ?? "", maxBots })} />
+                    <QuotaEditor
+                      user={user}
+                      onSave={(values) => quota.mutate({ id: user.id ?? "", ...values })}
+                      onProcess={(enabled) => processDetail.mutate({ id: user.id ?? "", enabled })}
+                    />
                   ) : null}
                 </td>
               </tr>
@@ -223,19 +247,45 @@ export function AdminUsers() {
   );
 }
 
-function QuotaEditor({ userId, onSave }: { userId: string; onSave: (maxBots: number) => void }) {
-  const [maxBots, setMaxBots] = useState("5");
+function QuotaEditor({
+  user,
+  onSave,
+  onProcess,
+}: {
+  user: AdminUser;
+  onSave: (values: { maxBots: number; maxConcurrentTasks: number; maxRoutines: number; taskTokenBudget: number | null }) => void;
+  onProcess: (enabled: boolean) => void;
+}) {
+  const [maxBots, setMaxBots] = useState(String(user.maxBots ?? 5));
+  const [maxConcurrentTasks, setMaxConcurrentTasks] = useState(String(user.maxConcurrentTasks ?? 2));
+  const [maxRoutines, setMaxRoutines] = useState(String(user.maxRoutines ?? 10));
+  const [taskTokenBudget, setTaskTokenBudget] = useState(user.taskTokenBudget === null || user.taskTokenBudget === undefined ? "" : String(user.taskTokenBudget));
   return (
+    <div className="grid gap-2">
     <form
-      className="flex gap-2"
+      data-testid="quota-editor"
+      className="flex flex-wrap gap-2"
       onSubmit={(event) => {
         event.preventDefault();
-        onSave(Number(maxBots));
+        onSave({
+          maxBots: Number(maxBots),
+          maxConcurrentTasks: Number(maxConcurrentTasks),
+          maxRoutines: Number(maxRoutines),
+          taskTokenBudget: taskTokenBudget.trim() === "" ? null : Number(taskTokenBudget),
+        });
       }}
     >
-      <input data-testid={`quota-${userId}`} className={`${field} w-20`} value={maxBots} onChange={(event) => setMaxBots(event.target.value)} />
+      <label className="text-xs text-neutral-400">bot <input data-testid="quota-bots" className={`${field} w-16`} value={maxBots} onChange={(event) => setMaxBots(event.target.value)} /></label>
+      <label className="text-xs text-neutral-400">并发 <input data-testid="quota-tasks" className={`${field} w-16`} value={maxConcurrentTasks} onChange={(event) => setMaxConcurrentTasks(event.target.value)} /></label>
+      <label className="text-xs text-neutral-400">定时 <input data-testid="quota-routines" className={`${field} w-16`} value={maxRoutines} onChange={(event) => setMaxRoutines(event.target.value)} /></label>
+      <label className="text-xs text-neutral-400">预算 <input data-testid="quota-budget" className={`${field} w-24`} placeholder="沿用全局" value={taskTokenBudget} onChange={(event) => setTaskTokenBudget(event.target.value)} /></label>
       <button className="text-sm text-neutral-300" type="submit">保存</button>
     </form>
+    <label className="flex items-center gap-2 text-xs text-neutral-300">
+      <input data-testid="process-detail" type="checkbox" checked={user.showProcess} onChange={(event) => onProcess(event.target.checked)} />
+      显示详细过程
+    </label>
+    </div>
   );
 }
 
@@ -387,7 +437,15 @@ export function AdminTemplates() {
 export function AdminSettings() {
   const settings = useQuery({
     queryKey: ["admin-settings"],
-    queryFn: () => api<{ integration: string; defaultChannel: string | null; platformPrompt: { version: number; text: string } }>("/api/admin/settings"),
+    queryFn: () => api<{
+      integration: string;
+      defaultChannel: string | null;
+      platformPrompt: { version: number; text: string };
+      modelLimits: Record<string, { contextTokens: number; maxTokens: number }>;
+      modelDefaults: { contextTokens: number; maxTokens: number };
+      taskTokenBudget: number;
+      models: string[];
+    }>("/api/admin/settings"),
   });
   const [prompt, setPrompt] = useState("");
   const [channel, setChannel] = useState("");
@@ -405,6 +463,7 @@ export function AdminSettings() {
   });
 
   return (
+    <>
     <form
       className="mx-auto grid max-w-3xl gap-4 px-6 py-8"
       onSubmit={(event) => {
@@ -428,5 +487,67 @@ export function AdminSettings() {
       <button className={button} type="submit">保存</button>
       {saved ? <p className="text-sm text-emerald-300">{saved}</p> : null}
     </form>
+    <ModelLimits settings={settings.data} />
+    </>
+  );
+}
+
+function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { contextTokens: number; maxTokens: number }>; modelDefaults: { contextTokens: number; maxTokens: number }; taskTokenBudget?: number; models: string[] } | undefined }) {
+  const client = useQueryClient();
+  const [model, setModel] = useState("");
+  const [contextTokens, setContextTokens] = useState("");
+  const [maxTokens, setMaxTokens] = useState("");
+  const [budget, setBudget] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const loadedBudget = settings?.taskTokenBudget;
+  const draft = budget !== null ? budget : loadedBudget === undefined ? "" : String(loadedBudget);
+  const budgetReady = loadedBudget !== undefined && /^\d+$/.test(draft);
+  const save = useMutation({
+    mutationFn: (clear: boolean) => api("/api/admin/model-limits", {
+      method: "PUT",
+      body: JSON.stringify(clear ? { model, clear: true } : { model, contextTokens: Number(contextTokens), maxTokens: Number(maxTokens) }),
+    }),
+    onSuccess: async () => {
+      setError("");
+      await client.invalidateQueries({ queryKey: ["admin-settings"] });
+    },
+    onError: (caught: Error) => setError(caught.message),
+  });
+  const defaults = settings?.modelDefaults;
+  return (
+    <section data-testid="model-settings" className="mx-auto grid max-w-3xl gap-3 px-6 pb-10">
+      <h2 className="text-xl font-semibold">模型设置</h2>
+      <p className="text-sm text-neutral-400">未单独设置的模型使用环境默认值：上下文 {defaults?.contextTokens ?? ""}，单次输出 {defaults?.maxTokens ?? ""}。只影响之后开始的任务。输出上限不能超过上下文窗口。</p>
+      <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => {
+        event.preventDefault();
+        if (!budgetReady) {
+          setError("token 预算必须是非负整数");
+          return;
+        }
+        void api("/api/admin/task-token-budget", { method: "PUT", body: JSON.stringify({ value: Number(draft) }) }).then(async () => {
+          setError("");
+          await client.invalidateQueries({ queryKey: ["admin-settings"] });
+        }).catch((caught: Error) => setError(caught.message));
+      }}>
+        <label className="grid gap-1 text-sm">单任务 token 预算（0 表示不限制，计入输入和输出，不计缓存）
+          <input data-testid="task-token-budget" className={field} value={draft} onChange={(event) => setBudget(event.target.value)} />
+        </label>
+        <button className={button} type="submit" disabled={!budgetReady}>保存预算</button>
+      </form>
+      <ul className="grid gap-1 text-sm">
+        {Object.entries(settings?.modelLimits ?? {}).map(([name, limit]) => (
+          <li key={name}>{name}：上下文 {limit.contextTokens}，输出 {limit.maxTokens}</li>
+        ))}
+        {Object.keys(settings?.modelLimits ?? {}).length === 0 ? <li className="text-neutral-500">还没有单独设置</li> : null}
+      </ul>
+      <form className="grid gap-2 md:grid-cols-4" onSubmit={(event) => { event.preventDefault(); save.mutate(false); }}>
+        <input data-testid="model-limit-name" list="known-models" className={field} placeholder="模型 ID" value={model} onChange={(event) => setModel(event.target.value)} required />
+        <datalist id="known-models">{(settings?.models ?? []).map((name) => <option key={name} value={name} />)}</datalist>
+        <input data-testid="model-context" className={field} placeholder="上下文窗口" value={contextTokens} onChange={(event) => setContextTokens(event.target.value)} required />
+        <input data-testid="model-output" className={field} placeholder="单次输出上限" value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} required />
+        <button className={button} type="submit">保存</button>
+      </form>
+      {error ? <p className="text-sm text-red-300">{error}</p> : null}
+    </section>
   );
 }

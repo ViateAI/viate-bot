@@ -12,6 +12,7 @@ import { authenticated } from "../auth.js";
 import { openDatabase, type AppDatabase } from "../db/index.js";
 import { argsHash, canonicalJson } from "../m2/risk.js";
 import { createApprovalGate } from "./gate.js";
+import { applyProposedRule, proposalSummary } from "./propose-tool.js";
 import { registerApprovalRoutes } from "./routes.js";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -35,6 +36,20 @@ function pending(db: AppDatabase) {
 }
 
 describe("approval gate", () => {
+  it("rejects changed profile edits and a takeover acquired during approval", async () => {
+    const { db } = fixture();
+    const gate = createApprovalGate({ db, waitMs: 5000 });
+    const args = { instructions: "approved prompt" };
+    const edit = gate.bind("task").beforeToolCall!(context("update_bot_profile", args));
+    args.instructions = "unapproved prompt";
+    gate.decide("a", pending(db).id, "allow");
+    expect((await edit)?.block).toBe(true);
+    const shell = gate.bind("task").beforeToolCall!(context("shell_exec", { cmd: "echo ok" }));
+    db.$client.prepare("insert into takeover_leases(id,bot_id,user_id,state,created_at,updated_at) values ('lease','bot','a','active','now','now')").run();
+    gate.decide("a", pending(db).id, "allow");
+    expect((await shell)?.reason).toBe("用户正在接管，已拒绝执行");
+  });
+
   it("rejects mutation of the approved install arguments during the wait", async () => {
     const { db } = fixture();
     const gate = createApprovalGate({ db, waitMs: 5000 });
@@ -259,5 +274,99 @@ describe("approval gate", () => {
     expect(db.$client.prepare("select consumed_at is not null as consumed from approvals where id=?").get(row.id)).toEqual({ consumed: 1 });
     gate.decide("a", pending(db).id, "deny");
     expect((await changed)?.reason).toBe("用户拒绝安装");
+  });
+
+  it("auto-approves a matching shell rule, still asks for metacharacters, and refuses during takeover", async () => {
+    const { db } = fixture();
+    db.$client.prepare("insert into approval_rules(id,user_id,bot_id,category,match_json,hit_count,created_at) values ('rule','a','bot','shell',?,0,'now')")
+      .run(JSON.stringify({ prefix: ["echo", "ok"] }));
+    const gate = createApprovalGate({ db, waitMs: 5000 });
+    const hook = gate.bind("task").beforeToolCall!;
+    expect(await hook(context("shell_exec", { cmd: "echo ok" }))).toBeUndefined();
+    expect((db.$client.prepare("select hit_count as hitCount from approval_rules where id='rule'").get() as { hitCount: number }).hitCount).toBe(1);
+    const install = hook(context("install_mcp", { reason: "no" }));
+    expect(db.$client.prepare("select tool from approvals where state='pending'").get()).toEqual({ tool: "install_mcp" });
+    gate.decide("a", pending(db).id, "deny");
+    expect((await install)?.block).toBe(true);
+    const blocked = hook(context("shell_exec", { cmd: "echo ok; rm" }));
+    expect(db.$client.prepare("select id from approvals where state='pending'").get()).toBeDefined();
+    gate.decide("a", pending(db).id, "deny");
+    expect((await blocked)?.block).toBe(true);
+    db.$client.prepare("insert into takeover_leases(id,bot_id,user_id,state,created_at,updated_at) values ('lease','bot','a','active','now','now')").run();
+    expect((await hook(context("shell_exec", { cmd: "echo ok" })))?.reason).toBe("用户正在接管，已拒绝执行");
+    db.$client.prepare("update bots set settings_json=? where id='bot'").run(JSON.stringify({ alwaysAllow: ["shell", "bot_profile"] }));
+    db.$client.prepare("delete from takeover_leases").run();
+    const profile = hook(context("update_bot_profile", { instructions: "新的提示词" }));
+    expect(db.$client.prepare("select tool from approvals where state='pending'").get()).toEqual({ tool: "update_bot_profile" });
+    gate.decide("a", pending(db).id, "deny");
+    expect((await profile)?.block).toBe(true);
+    const app = Fastify();
+    app.addHook("preHandler", async (request) => { authenticated.set(request, { user: { id: String(request.headers["x-test-user"]) } } as never); });
+    registerApprovalRoutes(app, { db, gate });
+    cleanups.push(() => app.close());
+    const foreign = await app.inject({ method: "GET", url: "/api/bots/bot/approval-rules", headers: { "x-test-user": "b" } });
+    expect(foreign.statusCode).toBe(404);
+    const own = await app.inject({ method: "GET", url: "/api/bots/bot/approval-rules", headers: { "x-test-user": "a" } });
+    expect(own.statusCode).toBe(200);
+    expect(own.json().rules).toHaveLength(1);
+  });
+
+  it("lets the master switch skip install and prompt edits, but not rule proposals or takeover", async () => {
+    const { db } = fixture();
+    db.$client.prepare("update bots set settings_json=? where id='bot'").run(JSON.stringify({ approveNone: true }));
+    const gate = createApprovalGate({ db, waitMs: 5000 });
+    const hook = gate.bind("task").beforeToolCall!;
+    expect(await hook(context("install_mcp", { reason: "skip" }))).toBeUndefined();
+    expect(await hook(context("update_bot_profile", { instructions: "新提示" }))).toBeUndefined();
+    expect(db.$client.prepare("select id from approvals").get()).toBeUndefined();
+    const notes = db.$client.prepare("select attrs_json as attrs from audit_log where action='approval.skip_all'").all() as Array<{ attrs: string }>;
+    expect(notes.some((row) => row.attrs.includes("全部免审批"))).toBe(true);
+    const proposed = hook(context("propose_approval_rule", { category: "shell", match: { prefix: "echo ok" } }));
+    expect(db.$client.prepare("select tool from approvals where state='pending'").get()).toEqual({ tool: "propose_approval_rule" });
+    gate.decide("a", pending(db).id, "deny");
+    expect((await proposed)?.block).toBe(true);
+    expect((await hook(context("update_bot_profile", { approveNone: false, name: "不能关" })))?.block).toBe(true);
+    const stored = db.$client.prepare("select settings_json as settingsJson from bots where id='bot'").get() as { settingsJson: string };
+    expect(JSON.parse(stored.settingsJson).approveNone).toBe(true);
+    db.$client.prepare("insert into takeover_leases(id,bot_id,user_id,state,created_at,updated_at) values ('lease2','bot','a','active','now','now')").run();
+    expect((await hook(context("shell_exec", { cmd: "echo ok" })))?.reason).toBe("用户正在接管，已拒绝执行");
+  });
+
+  it("applies a proposed rule only after approval and refuses a changed payload", async () => {
+    const { db } = fixture();
+    const gate = createApprovalGate({
+      db,
+      waitMs: 5000,
+      summarize: (_taskId, tool, args) => (tool === "propose_approval_rule" ? proposalSummary(args) : tool),
+    });
+    const hook = gate.bind("task").beforeToolCall!;
+    const denied = hook(context("propose_approval_rule", { category: "shell", match: { prefix: "echo no" } }));
+    gate.decide("a", pending(db).id, "deny");
+    expect((await denied)?.block).toBe(true);
+    expect(db.$client.prepare("select id from approval_rules").get()).toBeUndefined();
+    const args = { category: "shell", match: { prefix: "echo ok" } };
+    const waiting = hook(context("propose_approval_rule", args));
+    const id = pending(db).id;
+    expect((db.$client.prepare("select summary from approvals where id=?").get(id) as { summary: string }).summary).toContain("echo ok");
+    args.match.prefix = "echo changed";
+    gate.decide("a", id, "allow");
+    expect((await waiting)?.block).toBe(true);
+    expect(db.$client.prepare("select consumed_at from approvals where id=?").get(id)).toEqual({ consumed_at: null });
+    expect(db.$client.prepare("select id from approval_rules").get()).toBeUndefined();
+    const other = hook(context("propose_approval_rule", { category: "shell", match: { prefix: "echo other" } }));
+    const otherId = pending(db).id;
+    expect(otherId).not.toBe(id);
+    gate.decide("a", otherId, "deny");
+    expect((await other)?.block).toBe(true);
+    expect(db.$client.prepare("select id from approval_rules").get()).toBeUndefined();
+    db.$client.prepare("insert into tasks(id,bot_id,state,trigger) values ('task2','bot','running','user')").run();
+    const fresh = gate.bind("task2").beforeToolCall!;
+    const again = { category: "shell", match: { prefix: "echo ok" } };
+    const approved = fresh(context("propose_approval_rule", again));
+    gate.decide("a", pending(db).id, "allow");
+    expect(await approved).toBeUndefined();
+    expect(applyProposedRule({ db, userId: "a", botId: "bot" }, again)).toBeTruthy();
+    expect(await fresh(context("shell_exec", { cmd: "echo ok" }))).toBeUndefined();
+    expect(db.$client.prepare("select expires_at as expiresAt from approval_rules").get()).toEqual({ expiresAt: null });
   });
 });

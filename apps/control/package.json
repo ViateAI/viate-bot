@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx src/main.ts",
     "build": "tsc -p tsconfig.json",
+    "check:dist": "node scripts/check-dist.mjs",
     "typecheck": "pnpm --filter @viate-bot/protocol build && pnpm --filter @viate-bot/integration-viate build && pnpm --filter @viate-bot/browser build && tsc -p tsconfig.json --noEmit",
     "test": "pnpm --filter @viate-bot/protocol build && pnpm --filter @viate-bot/integration-viate build && pnpm --filter @viate-bot/browser build && vitest run",
     "machine": "tsx src/dev-machine.ts"

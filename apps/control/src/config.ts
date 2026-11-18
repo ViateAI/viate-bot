@@ -33,6 +33,7 @@ export interface ControlConfig {
   maxTaskDurationSec: number;
   defaultMaxBots: number;
   defaultMaxConcurrentTasks: number;
+  defaultMaxRoutines: number;
   integration: IntegrationName;
   serviceCredentials?: ServiceCredentials;
   adminEmails: string[];
@@ -67,15 +68,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig 
     models: list(env, "VB_MODELS"),
     modelApi: modelApiName(env),
     modelMaxTokens: positive(env, "VB_MODEL_MAX_TOKENS", 4096),
-    modelContextTokens: positive(env, "VB_MODEL_CONTEXT_TOKENS", 128_000),
+    modelContextTokens: positive(env, "VB_MODEL_CONTEXT_TOKENS", 256_000),
     summaryMaxTokens: positive(env, "VB_SUMMARY_MAX_TOKENS", 2_000),
-    taskTokenBudget: positive(env, "VB_TASK_TOKEN_BUDGET", 100_000),
+    taskTokenBudget: integer(env, "VB_TASK_TOKEN_BUDGET", 2_000_000),
     modelRateUserPerMin: positive(env, "VB_MODEL_RATE_USER", 30),
     modelRateBotPerMin: positive(env, "VB_MODEL_RATE_BOT", 20),
     maxTaskSteps: positive(env, "VB_MAX_TASK_STEPS", 16),
     maxTaskDurationSec: positive(env, "VB_MAX_TASK_DURATION_SEC", 600),
     defaultMaxBots: positive(env, "VB_DEFAULT_MAX_BOTS", 5),
     defaultMaxConcurrentTasks: positive(env, "VB_DEFAULT_MAX_CONCURRENT_TASKS", 2),
+    defaultMaxRoutines: integer(env, "VB_DEFAULT_MAX_ROUTINES", 10),
     integration,
     adminEmails: (env.VB_ADMIN_EMAILS ?? "")
       .split(",")

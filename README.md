@@ -36,6 +36,10 @@ PowerShell 没有仓库里的导入脚本。在 Windows 上按下表逐项设置
 
 开发时浏览器走 Vite（4420）的话，`VB_PUBLIC_URL` 必须是浏览器打开的源，`VB_CONTROL_PORT` 必须和 `VITE_CONTROL_ORIGIN` 的端口一致。例如控制面 `4418`、公开地址 `http://127.0.0.1:4420`、`VITE_CONTROL_ORIGIN=http://127.0.0.1:4418`。控制面自己提供构建好的网页时，公开地址和控制面端口用同一个源。
 
+控制面构建会把 `src` 中的 JavaScript（包括 `apps/link-mcp.mjs`）一并输出到 `dist`。部署前执行 `pnpm --filter @viate-bot/control build && pnpm --filter @viate-bot/control check:dist`，检查编译后的安装模块可直接加载，不依赖 `src`。部署仍需 `apps/control/drizzle` 迁移文件、工作区依赖和构建好的网页。
+
+任务预算、用量和 length 续写次数在等待用户时也会持久化；重启恢复同一个任务不会重新获得预算。预算耗尽后不执行该轮返回的工具，任务失败且显示原因。缺少正常结束标记的模型响应，以及步数/时长耗尽，都不能伪造正常 `stop`。shell 自动规则只匹配可静态解析的字面词，含展开、环境变量覆盖或非默认工作目录时转人工审批；`fs_write` 不跟随路径中的符号链接。bot 禁用应用后，新任务不再加载该应用的 MCP 工具。
+
 ## 配置
 
 只读进程环境。缺省值是 `apps/control/src/config.ts` 里变量未设置或空字符串时的值。`.env.example` 把 `VB_DATA_DIR` 设成 `./data`，代码缺省是 `/data`。
@@ -53,15 +57,16 @@ PowerShell 没有仓库里的导入脚本。在 Windows 上按下表逐项设置
 | `VB_MODELS` | 空 | 逗号分隔的模型白名单。空表示不额外限制 |
 | `VB_MODEL_API` | `openai-completions` | `openai-completions` 或 `openai-responses` |
 | `VB_MODEL_MAX_TOKENS` | `4096` | 单次生成上限，正整数 |
-| `VB_MODEL_CONTEXT_TOKENS` | `128000` | 上下文窗口，正整数 |
+| `VB_MODEL_CONTEXT_TOKENS` | `256000` | 上下文窗口，正整数。管理员可按模型覆盖；只影响之后开始的任务 |
 | `VB_SUMMARY_MAX_TOKENS` | `2000` | 上下文摘要单次输出上限，正整数 |
-| `VB_TASK_TOKEN_BUDGET` | `100000` | 单任务 token 预算，正整数 |
+| `VB_TASK_TOKEN_BUDGET` | `2000000` | 单任务 token 预算。`0` 表示不限制。管理员可在模型设置改全局值，在配额里按用户覆盖。计入输入和输出，不计缓存读写 |
 | `VB_MODEL_RATE_USER` | `30` | 每用户每分钟模型请求上限，正整数 |
 | `VB_MODEL_RATE_BOT` | `20` | 每 bot 每分钟模型请求上限，正整数 |
 | `VB_MAX_TASK_STEPS` | `16` | 单任务步数上限，正整数 |
 | `VB_MAX_TASK_DURATION_SEC` | `600` | 单任务时长上限（秒），正整数 |
 | `VB_DEFAULT_MAX_BOTS` | `5` | 管理员开通时写入配额的 bot 上限。已有配额行不会被这个值改写 |
 | `VB_DEFAULT_MAX_CONCURRENT_TASKS` | `2` | 开通时写入配额的单用户并发任务上限 |
+| `VB_DEFAULT_MAX_ROUTINES` | `10` | 开通时写入配额的定时任务上限。已有配额为 0 的用户不会被改写 |
 | `VB_INTEGRATION` | `none` | `none` 或 `viate` |
 | `VB_VIATE_URL` | 空 | 只在 `VB_INTEGRATION=viate` 时读。调服务接口时三项都必须有值 |
 | `VB_VIATE_CLIENT_ID` | 空 | viate 服务客户端 id |
@@ -132,3 +137,70 @@ VB_ADMIN_EMAILS=admin@example.com
 ```
 
 提供方要有 `openid` scope、`id_token`、JWKS 和 `/.well-known/openid-configuration`。回调地址是 `{VB_PUBLIC_URL}/auth/callback`。`id_token` 缺邮箱、姓名或 `email_verified` 时，控制面用 access token 调 userinfo 补。管理员只能来自 `VB_ADMIN_EMAILS` 里的可信邮箱。
+
+## 端到端测试
+
+`apps/e2e` 的浏览器套件不进 `pnpm test`（脚本是 `e2e` 和 `e2e:local`）。`pnpm test` 只跑域名解析参数的单元测试。浏览器套件用本机已安装的 Chrome 或 Edge（`channel`，或 `VB_E2E_BROWSER_PATH` 指向可执行文件），不下载 Playwright 自带浏览器。
+
+本地冒烟（假模型、假机器、内置 OIDC，不碰 Docker）：
+
+```sh
+pnpm --filter @viate-bot/e2e e2e:local
+```
+
+默认端口 4418、4420–4423。被占用时改用 4430–4434。截图目录默认 `/tmp/vb-polish1-shots`，可用 `VB_E2E_SHOTS` 改。
+
+对着已部署环境时，单独准备登录模块和控制面地址：
+
+```sh
+VB_E2E_BASE_URL=https://bot.example \
+VB_E2E_LOGIN_MODULE=./login.js \
+VB_E2E_ALLOW_ACCOUNT_MUTATION=1 \
+VB_E2E_MODEL=deepseek-flash \
+VB_E2E_AVATAR_PATH=/home/bot/e2e-avatar.png \
+VB_E2E_BROWSER_CHANNEL=chrome \
+pnpm --filter @viate-bot/e2e e2e
+```
+
+登录模块导出 `login({ browser, baseURL, role })`，返回内存里的 Playwright `storageState`，不要写登录态文件。本地实现是 `apps/e2e/src/login-local.ts`。`VB_E2E_LOGIN_MODULE` 用绝对文件路径，或相对于命令发起目录的路径。截图不包含登录表单。
+
+接 viate OIDC 的部署（下例中 viate 在 `https://viate.example.com`，登录页是 `/portal/oauth-login`）用 viate 登录模块。实现是 `apps/e2e/src/login-viate.ts`，邮箱和密码只从环境变量读，不写进仓库：
+
+```sh
+VB_E2E_BASE_URL=https://bot.example.com \
+VB_E2E_LOGIN_MODULE=apps/e2e/src/login-viate.ts \
+VB_E2E_ADMIN_EMAIL=admin@example.com \
+VB_E2E_ADMIN_PASSWORD=... \
+VB_E2E_USER_EMAIL=user@example.com \
+VB_E2E_USER_PASSWORD=... \
+VB_E2E_ALLOW_ACCOUNT_MUTATION=1 \
+VB_E2E_MODEL=deepseek-flash \
+VB_E2E_AVATAR_PATH=/home/bot/e2e-avatar.png \
+VB_E2E_HOST_RESOLVER_RULES="MAP bot.example.com 127.0.0.1,MAP viate.example.com 127.0.0.1" \
+pnpm --filter @viate-bot/e2e e2e
+```
+
+本地冒烟用 `fake`；真实部署默认 `deepseek-flash`，可用 `VB_E2E_MODEL` 指定白名单内模型。真实部署必须使用已开通的专用普通测试账号（机器已存在），并显式设置 `VB_E2E_ALLOW_ACCOUNT_MUTATION=1`。头像场景需要该账号机器上预先准备好的 PNG 文件，路径由 `VB_E2E_AVATAR_PATH` 提供。套件只删除自己新建的 bot、规则和定时任务，并卸载唯一测试名的新安装；临时用户配额/详细过程开关在 finally 恢复。模型设置测试使用独立随机模型名，不改正在使用的模型。审计和软删除历史保留。Windows/真实模型验收需要另外运行，不能以本地假模型结果替代。
+
+Clash 的 fake-ip 会把部署域名指到错误地址。二选一：`VB_E2E_HOST_RESOLVER_RULES` 传给 Chromium 的 `--host-resolver-rules`；或 curl 形式的 `VB_E2E_RESOLVE=host:port:address`（逗号分隔），套件转成 `MAP host ip`。端口只为对齐 curl。交给 Chromium 的地址必须是 IPv4。设了这条规则后，接口请求改在页面里 `fetch`，因为 Playwright 自己的 HTTP 客户端不走这条规则。给了 `VB_E2E_BROWSER_PATH` 时不再使用 `channel`。
+
+Windows 宿主机是 Node 22，且没有 pnpm。`apps/e2e/docker-run.sh` 在 `mcr.microsoft.com/playwright:v1.49.1-noble` 里装 Node 24，再跑部署验收（镜像自带与 `playwright-core` 1.49 匹配的 Chromium）：
+
+```sh
+VB_E2E_BASE_URL=https://bot.example.com \
+VB_E2E_ADMIN_EMAIL=admin@example.com \
+VB_E2E_ADMIN_PASSWORD=... \
+VB_E2E_USER_EMAIL=user@example.com \
+VB_E2E_USER_PASSWORD=... \
+VB_E2E_ALLOW_ACCOUNT_MUTATION=1 \
+VB_E2E_MODEL=deepseek-flash \
+VB_E2E_AVATAR_PATH=/home/bot/e2e-avatar.png \
+VB_E2E_RESOLVE="bot.example.com:443:host.docker.internal,viate.example.com:443:host.docker.internal" \
+apps/e2e/docker-run.sh
+```
+
+容器里的 `127.0.0.1` 不是 Windows 宿主机。`host.docker.internal` 不会原样传给 `docker run --add-host`（Docker 会拒绝这个主机名）。脚本把它写成 `--add-host <域名>:host-gateway`，进容器后再解析成 IPv4，交给 Chromium。其它地址必须已经是 IPv4。截图在 `VB_E2E_STORAGE_DIR`（缺省是临时目录），登录会话只在内存中，不写入这个目录。镜像可用 `VB_E2E_IMAGE` 改，Node 版本缺省 `24.22.3`，可用 `VB_E2E_NODE_VERSION` 改。
+
+`VB_E2E_IGNORE_HTTPS_ERRORS=1` 时，登录上下文以及管理员和普通用户两个浏览器上下文忽略 HTTPS 证书错误。不设置则校验证书。`VB_E2E_PACE_MS` 是真实模式下两次发消息的间隔，缺省 15000 毫秒，设为 `0` 关闭；`VB_E2E_LOCAL=1` 的本地冒烟不等待。这两个变量由 `docker-run.sh` 透传进容器。
+
+在 Windows Git Bash 里运行 `apps/e2e/docker-run.sh` 时，变量与上面的容器示例相同，主机名用部署环境自己的地址。Git Bash 会把以 `/` 开头的路径改写成 Windows 路径。脚本发现 `cygpath` 后，把仓库目录和截图目录转成盘符路径再挂载，并设置 `MSYS_NO_PATHCONV=1`，避免容器内的 `/work` 被改写。macOS 和 Linux 没有 `cygpath`，不改挂载路径。

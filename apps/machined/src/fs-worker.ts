@@ -35,6 +35,7 @@ interface Request {
   pattern?: string;
   maxResults?: number;
   data?: string;
+  encoding?: "utf8" | "base64";
 }
 
 async function handle(line: string): Promise<void> {
@@ -60,7 +61,7 @@ async function handle(line: string): Promise<void> {
 
 async function run(request: Request, path: string): Promise<Record<string, unknown>> {
   if (request.op === "read") {
-    return { read: await readConfined(path, request.maxBytes ?? 1024 * 1024) };
+    return { read: await readConfined(path, request.maxBytes ?? 1024 * 1024, request.encoding === "base64" ? "base64" : "utf8") };
   }
   if (request.op === "write" || request.op === "writeFile") {
     const bytes = request.op === "write" ? Buffer.from(request.content ?? "", "base64") : Buffer.from(request.data ?? "", "base64");

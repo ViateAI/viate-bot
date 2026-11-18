@@ -31,6 +31,24 @@ describe("exec output capture", () => {
 });
 
 describe("filesystem confinement over http", () => {
+  it("refuses writes through aliases that could escape an approved path prefix", async () => {
+    const app = buildServer({ token: "test-token" });
+    const scratch = mkdtempSync(join("/tmp", "vb-write-alias-"));
+    dirs.push(scratch);
+    mkdirSync(join(scratch, "approved"));
+    mkdirSync(join(scratch, "private"));
+    const target = join(scratch, "private", "keep.txt");
+    writeFileSync(target, "keep");
+    symlinkSync(join(scratch, "private"), join(scratch, "approved", "alias"));
+    try {
+      const response = await app.inject({ method: "POST", url: "/fs/write", headers: { authorization: "Bearer test-token" }, payload: { path: join(scratch, "approved", "alias", "keep.txt"), content: "overwritten" } });
+      expect(response.statusCode).toBe(400);
+      expect(readFileSync(target, "utf8")).toBe("keep");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("refuses deletion through final or escaping parent symlinks", async () => {
     const app = buildServer({ token: "test-token" });
     const scratch = mkdtempSync(join("/tmp", "vb-machined-delete-"));

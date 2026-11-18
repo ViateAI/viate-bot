@@ -127,6 +127,28 @@ function headers(session: { token: string; csrf: string }, json = false) {
 }
 
 describe("admin http", () => {
+  it("restricts model limits, budgets and detail flags to administrators with CSRF", async () => {
+    const { app, db, admin, user } = await boot();
+    try {
+      const cases = [
+        { method: "PUT" as const, url: "/api/admin/model-limits", payload: { model: "fake", contextTokens: 32000, maxTokens: 1000 } },
+        { method: "PUT" as const, url: "/api/admin/task-token-budget", payload: { value: 0 } },
+        { method: "PATCH" as const, url: "/api/admin/users/user-1/process-detail", payload: { enabled: true } },
+      ];
+      for (const input of cases) {
+        expect((await app.inject({ ...input, headers: headers(user, true) })).statusCode).toBe(404);
+        expect((await app.inject({ ...input, headers: { cookie: `vb_session=${admin.token}` } })).statusCode).toBe(403);
+        expect((await app.inject({ ...input, headers: headers(admin, true) })).statusCode).toBe(200);
+      }
+      const invalid = await app.inject({ method: "PUT", url: "/api/admin/model-limits", headers: headers(admin, true), payload: { model: "fake", contextTokens: 1000, maxTokens: 1001 } });
+      expect(invalid.statusCode).toBe(400);
+      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({ modelLimits: { fake: { contextTokens: 32000, maxTokens: 1000 } }, taskTokenBudget: 0 });
+    } finally {
+      await app.close();
+      db.$client.close();
+    }
+  });
+
   it.each(["delete", "rebuild"])("refuses %s while an active task belongs to a soft-deleted bot", async (action) => {
     const { app, db, admin, removed } = await boot();
     chatRepository(db).updateTask(userScope("user-1"), "task-1", { state: "running" });

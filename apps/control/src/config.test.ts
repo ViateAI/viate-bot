@@ -80,10 +80,12 @@ describe("loadConfig", () => {
     expect(config.modelApi).toBe("openai-completions");
     expect(config.models).toEqual([]);
     expect(config.modelMaxTokens).toBe(4096);
+    expect(config.modelContextTokens).toBe(256_000);
     expect(config.summaryMaxTokens).toBe(2_000);
-    expect(config.taskTokenBudget).toBe(100_000);
+    expect(config.taskTokenBudget).toBe(2_000_000);
     expect(config.defaultMaxBots).toBe(5);
     expect(config.defaultMaxConcurrentTasks).toBe(2);
+    expect(config.defaultMaxRoutines).toBe(10);
     const custom = loadConfig({
       VB_MODEL_API: "openai-responses",
       VB_MODELS: " a, b ",
@@ -96,6 +98,7 @@ describe("loadConfig", () => {
     expect(custom.models).toEqual(["a", "b"]);
     expect(custom.modelMaxTokens).toBe(128);
     expect(custom.taskTokenBudget).toBe(10);
+    expect(loadConfig({ VB_TASK_TOKEN_BUDGET: "0" }).taskTokenBudget).toBe(0);
     expect(() => loadConfig({ VB_MODEL_API: "anthropic" })).toThrow(/VB_MODEL_API/);
     expect(() => loadConfig({ VB_MODEL_MAX_TOKENS: "0" })).toThrow(/VB_MODEL_MAX_TOKENS/);
   });

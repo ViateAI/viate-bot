@@ -56,6 +56,8 @@ export interface BotRuntimeSettings {
   alwaysAllow: AlwaysAllow[];
   /** 旧字段。门禁忽略它，shell 默认就要审批。 */
   approveShell: boolean;
+  /** 全部免审批。默认关。不能由 bot 修改。 */
+  approveNone: boolean;
 }
 
 const ALWAYS: Record<string, true> = {
@@ -68,17 +70,19 @@ const ALWAYS: Record<string, true> = {
   risky_tool: true,
 };
 
-export type ApprovalCategory = AlwaysAllow | "app_install";
+export type ApprovalCategory = AlwaysAllow | "app_install" | "bot_profile" | "rule_proposal";
 
-/** app_install 不是 alwaysAllow 的合法值。数组里即使有这个字符串也不跳过审批。 */
+/** app_install、bot_profile、rule_proposal 不是 alwaysAllow 的合法值。数组里即使有这些字符串也不跳过审批。 */
 export function skipsApproval(category: ApprovalCategory | undefined, settings: BotRuntimeSettings): boolean {
   if (!category) return true;
-  if (category === "app_install") return false;
+  if (category === "app_install" || category === "bot_profile" || category === "rule_proposal") return false;
   return settings.alwaysAllow.includes(category);
 }
 
 export function approvalClass(name: string, risky?: ReadonlySet<string>): ApprovalCategory | undefined {
   if (name === "install_mcp") return "app_install";
+  if (name === "update_bot_profile") return "bot_profile";
+  if (name === "propose_approval_rule") return "rule_proposal";
   if (READ_ONLY_TOOLS[name] || CONTROL_PLANE_TOOLS[name]) return undefined;
   const named = GATED_TOOLS[name];
   if (named) return named;
@@ -102,14 +106,14 @@ export function readBotSettings(settingsJson: string): BotRuntimeSettings {
   try {
     parsed = JSON.parse(settingsJson) as unknown;
   } catch {
-    return { alwaysAllow: [], approveShell: false };
+    return { alwaysAllow: [], approveShell: false, approveNone: false };
   }
-  if (!parsed || typeof parsed !== "object") return { alwaysAllow: [], approveShell: false };
+  if (!parsed || typeof parsed !== "object") return { alwaysAllow: [], approveShell: false, approveNone: false };
   const record = parsed as Record<string, unknown>;
   const alwaysAllow = Array.isArray(record.alwaysAllow)
     ? record.alwaysAllow.filter((item): item is AlwaysAllow => typeof item === "string" && ALWAYS[item] === true)
     : [];
-  return { alwaysAllow, approveShell: record.approveShell === true };
+  return { alwaysAllow, approveShell: record.approveShell === true, approveNone: record.approveNone === true };
 }
 
 function sortKeys(value: unknown): unknown {

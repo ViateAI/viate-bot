@@ -47,10 +47,11 @@ interface RpcRequest {
   pattern?: string;
   maxResults?: number;
   data?: string;
+  encoding?: "utf8" | "base64";
 }
 
 export interface FsClient {
-  read(path: string, maxBytes: number): Promise<FsReadResult>;
+  read(path: string, maxBytes: number, encoding?: "utf8" | "base64"): Promise<FsReadResult>;
   write(path: string, content: Buffer, mode: number): Promise<FsWriteResult>;
   list(path: string): Promise<{ path: string; entries: FsEntry[] }>;
   search(path: string, pattern: string, maxResults: number): Promise<{ hits: FsSearchHit[]; truncated: boolean }>;
@@ -66,8 +67,8 @@ export function createFsClient(): FsClient {
 }
 
 class LocalFs implements FsClient {
-  read(path: string, maxBytes: number): Promise<FsReadResult> {
-    return settle(readConfined(path, maxBytes));
+  read(path: string, maxBytes: number, encoding?: "utf8" | "base64"): Promise<FsReadResult> {
+    return settle(readConfined(path, maxBytes, encoding));
   }
   write(path: string, content: Buffer, mode: number): Promise<FsWriteResult> {
     return settle(writeConfined(path, content, mode));
@@ -118,8 +119,8 @@ class WorkerFs implements FsClient {
     this.child.on("exit", (code) => this.failAll(new Error(`fs worker 退出 ${code ?? "null"}`)));
   }
 
-  read(path: string, maxBytes: number): Promise<FsReadResult> {
-    return this.call({ op: "read", path, maxBytes }).then((response) => {
+  read(path: string, maxBytes: number, encoding?: "utf8" | "base64"): Promise<FsReadResult> {
+    return this.call({ op: "read", path, maxBytes, ...(encoding ? { encoding } : {}) }).then((response) => {
       if (!response.read) throw new Error("fs worker 没有返回读取结果");
       return response.read;
     });

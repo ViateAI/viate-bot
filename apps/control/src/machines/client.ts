@@ -105,8 +105,8 @@ export class MachinedClient {
     }
   }
 
-  async read(path: string, maxBytes: number, signal?: AbortSignal): Promise<FsReadResponse> {
-    const response = await this.post("/fs/read", { path, maxBytes }, signal);
+  async read(path: string, maxBytes: number, signal?: AbortSignal, encoding?: "utf8" | "base64"): Promise<FsReadResponse> {
+    const response = await this.post("/fs/read", { path, maxBytes, ...(encoding ? { encoding } : {}) }, signal);
     if (!response.ok) throw new Error(await readError(response));
     return (await response.json()) as FsReadResponse;
   }

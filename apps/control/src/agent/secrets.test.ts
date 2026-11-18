@@ -368,6 +368,33 @@ describe("secure form", () => {
     expect(dumped).not.toContain(PASSWORD);
   }, 15_000);
 
+  it("preserves the budget and consumed tokens when a secret wait resumes after restart", async () => {
+    let calls = 0;
+    const machine = await fakeMachine();
+    const modelPort = await listen(async (_req, res) => {
+      calls += 1;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(calls === 1 ? secretCall("call_budget", "site_password", "password") : textSse("must not reset"));
+    });
+    const env = { VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`, VB_TASK_TOKEN_BUDGET: "6" };
+    const endpoint = { host: "127.0.0.1", port: machine.port, token: "token-a" };
+    const first = await startApp(env, endpoint);
+    const botId = await createBot(first.app, first.alice);
+    const sent = await first.app.inject({ method: "POST", url: `/api/bots/${botId}/messages`, headers: auth(first.alice), payload: { text: "request password" } });
+    const taskId = sent.json().taskId as string;
+    await waitForSecret(first.app, first.alice, taskId);
+    await closeApp(first.app);
+    await chatService(first.app).idle();
+    first.ctx.db.$client.prepare("insert into settings(key,value_json) values ('task_token_budget','0') on conflict(key) do update set value_json='0'").run();
+    const second = await startApp(env, endpoint, first.ctx, first.config);
+    expect((await second.app.inject({ method: "POST", url: `/api/tasks/${taskId}/secrets`, headers: auth(second.alice), payload: { decision: "provide", name: "site_password", value: PASSWORD, save: false } })).statusCode).toBe(200);
+    await chatService(second.app).idle();
+    const task = chatRepository(first.ctx.db).findTask(userScope("user-a"), taskId);
+    expect(task?.state).toBe("failed");
+    expect(task?.error).toBe("已达到单任务 token 预算（已用 6 / 上限 6）");
+    expect(calls).toBe(2);
+  }, 15_000);
+
   it("cancels a live secret wait when the bot is deleted", async () => {
     const machine = await fakeMachine();
     const modelPort = await listen(async (_req, res, body) => {
@@ -628,6 +655,7 @@ async function startApp(
   if (!existing) {
     ensureDevUser(ctx.db, "user-a");
     ensureDevUser(ctx.db, "user-b");
+    ctx.db.$client.prepare("update users set show_process=1").run();
     contexts.add(ctx);
     cleanups.push(async () => {
       if (!contexts.has(ctx)) return;

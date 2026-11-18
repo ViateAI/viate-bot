@@ -568,10 +568,12 @@ export function listUserInstalls(deps: CatalogDeps, userId: string): InstallView
   return loadUserInstalls(deps.db, userId).map(toInstallView);
 }
 
-export function installsForModelContext(deps: CatalogDeps, userId: string): InstallContextView[] {
+export function installsForModelContext(deps: CatalogDeps, userId: string, botId?: string): InstallContextView[] {
   const views: InstallContextView[] = [];
+  const disabled = botId ? new Set((deps.db.$client.prepare("select ba.app_install_id as id from bot_apps ba join bots b on b.id=ba.bot_id where ba.bot_id=? and b.user_id=? and ba.enabled=0").all(botId, userId) as Array<{ id: string }>).map((row) => row.id)) : undefined;
   for (const item of loadUserInstalls(deps.db, userId)) {
     if (item.install.desired !== DESIRED_PRESENT || item.install.state !== "installed") continue;
+    if (disabled?.has(item.install.id)) continue;
     views.push({
       installId: item.install.id,
       name: item.app.name,

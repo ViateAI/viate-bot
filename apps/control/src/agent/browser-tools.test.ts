@@ -328,6 +328,7 @@ async function startApp(
   const ctx = contextFor(config);
   ensureDevUser(ctx.db, "user-a");
   ensureDevUser(ctx.db, "user-b");
+  ctx.db.$client.prepare("update users set show_process=1").run();
   const app = buildApp(ctx, {
     retryDelays: [0, 0],
     ensureMachine: async () => {},

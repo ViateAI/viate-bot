@@ -20,6 +20,8 @@ import type { AppDatabase } from "../db/index.js";
 import { settingsRepository } from "../db/settings.js";
 import { usageRepository } from "../db/usage.js";
 import { ulid } from "../id.js";
+import { budgetFailure } from "../task-budget.js";
+import { classifyFinish } from "./finish-reason.js";
 import { withPlatformPrompt } from "../agent/prompt.js";
 import { hourBucket, redactSecret } from "../agent/text.js";
 import { readError } from "../machines/client.js";
@@ -36,6 +38,9 @@ export interface GatewayTask {
   cacheWriteTokens: number;
   modelCalls: number;
   startedAt: number;
+  /** 任务开始时的预算快照。0 表示不限制。缺省时用环境配置。 */
+  tokenBudget?: number;
+  lengthContinuations?: number;
   /** 摘要调用记用量和 token 预算，不占 VB_MAX_TASK_STEPS。 */
   skipStep?: boolean;
 }
@@ -86,8 +91,8 @@ export function createGateway(deps: GatewayDeps): (
       const secret = currentTask.secret;
       const limit = limitReason(deps.config, currentTask, now().getTime());
       if (limit) {
-        pushStop(target, current, limit);
-        record(deps, currentTask, current.id, emptyUsage(), now(), 0, null, "model.skipped");
+        pushError(target, current, limit);
+        record(deps, currentTask, current.id, emptyUsage(), now(), 0, limit, "model.request");
         return;
       }
       if (deps.config.models.length > 0 && !deps.config.models.includes(current.id)) {
@@ -105,7 +110,8 @@ export function createGateway(deps: GatewayDeps): (
       }
       const platform = settingsRepository(deps.db).platformPrompt().text;
       const systemPrompt = withPlatformPrompt(platform, system);
-      const maxTokens = Math.min(options?.maxTokens ?? deps.config.modelMaxTokens, deps.config.modelMaxTokens);
+      const cap = current.maxTokens > 0 ? current.maxTokens : deps.config.modelMaxTokens;
+      const maxTokens = Math.min(options?.maxTokens ?? cap, cap);
       if (currentTask.skipStep !== true) currentTask.modelCalls += 1;
       const started = now();
       let attempts = 0;
@@ -164,7 +170,8 @@ export function createGateway(deps: GatewayDeps): (
 }
 
 function limitReason(config: ControlConfig, task: GatewayTask, nowMs: number): string | undefined {
-  if (task.tokensUsed >= config.taskTokenBudget) return "已达到单任务 token 预算，这次先停下来。回复后可以继续。";
+  const budget = budgetFailure(task, task.tokenBudget === undefined ? config.taskTokenBudget : undefined);
+  if (budget) return budget;
   if (task.modelCalls >= config.maxTaskSteps) return "已达到步数上限，这次先停下来。回复后可以继续。";
   if (nowMs - task.startedAt >= config.maxTaskDurationSec * 1000) return "已达到时长上限，这次先停下来。回复后可以继续。";
   return undefined;
@@ -332,7 +339,7 @@ async function readModelStream(
   let started = false;
   let textIndex = -1;
   const calls = new Map<number, ToolDraft>();
-  let finish = "stop";
+  let finish = "missing";
   let usage = emptyUsage();
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -346,6 +353,8 @@ async function readModelStream(
     if (typeof json.type === "string" && json.type.startsWith("response.")) {
       consumeResponses(json, partial, stream, calls, (next) => {
         usage = next;
+      }, (next) => {
+        finish = next;
       }, () => {
         textIndex = textIndex < 0 ? partial.content.length : textIndex;
       });
@@ -407,6 +416,7 @@ function consumeResponses(
   stream: ModelEventStream,
   _calls: Map<number, ToolDraft>,
   setUsage: (usage: Usage) => void,
+  setFinish: (finish: string) => void,
   ensureText: () => void,
 ): void {
   if (json.type === "response.output_text.delta" && typeof json.delta === "string") {
@@ -428,14 +438,26 @@ function consumeResponses(
       });
     }
   }
-  if (json.type === "response.completed") {
-    const response = json.response as { usage?: { input_tokens?: number; output_tokens?: number } } | undefined;
+  if (json.type === "response.completed" || json.type === "response.incomplete") {
+    const response = json.response as {
+      status?: string;
+      incomplete_details?: { reason?: string };
+      usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
+    } | undefined;
+    if (json.type === "response.incomplete" || response?.status === "incomplete" || response?.incomplete_details?.reason === "max_output_tokens") {
+      setFinish("length");
+    } else {
+      setFinish("stop");
+    }
+    const input = response?.usage?.input_tokens ?? 0;
+    const output = response?.usage?.output_tokens ?? 0;
+    const cacheRead = response?.usage?.input_tokens_details?.cached_tokens ?? 0;
     setUsage({
-      input: response?.usage?.input_tokens ?? 0,
-      output: response?.usage?.output_tokens ?? 0,
-      cacheRead: 0,
+      input,
+      output,
+      cacheRead,
       cacheWrite: 0,
-      totalTokens: (response?.usage?.input_tokens ?? 0) + (response?.usage?.output_tokens ?? 0),
+      totalTokens: input + output,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     });
   }
@@ -464,7 +486,13 @@ function emitCompletion(
   const usage = json.usage && typeof json.usage === "object" ? mapUsage(json.usage as UsageSource) : emptyUsage();
   onEmit();
   stream.push({ type: "start", partial: snapshot(partial) });
-  finishPartial(partial, calls, typeof choice?.finish_reason === "string" ? choice.finish_reason : "stop", usage, partial.content.length > 0 ? 0 : -1, stream);
+  const incomplete = json.incomplete_details as { reason?: string } | undefined;
+  const finish = json.status === "incomplete" || incomplete?.reason === "max_output_tokens"
+    ? "length"
+    : typeof choice?.finish_reason === "string"
+      ? choice.finish_reason
+      : json.status === "completed" ? "stop" : "missing";
+  finishPartial(partial, calls, finish, usage, partial.content.length > 0 ? 0 : -1, stream);
   return usage;
 }
 
@@ -492,8 +520,14 @@ function finishPartial(
     stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: snapshot(partial) });
   }
   partial.usage = usage;
-  partial.stopReason = ordered.length > 0 || finish === "tool_calls" ? "toolUse" : finish === "length" ? "length" : "stop";
-  const reason = partial.stopReason === "length" || partial.stopReason === "toolUse" ? partial.stopReason : "stop";
+  const classified = classifyFinish(finish, ordered.length > 0);
+  partial.stopReason = classified.stopReason;
+  if (classified.stopReason === "error") {
+    partial.errorMessage = classified.errorMessage ?? "模型没有正常结束";
+    stream.push({ type: "error", reason: "error", error: snapshot(partial) });
+    return;
+  }
+  const reason = classified.stopReason === "length" || classified.stopReason === "toolUse" ? classified.stopReason : "stop";
   stream.push({ type: "done", reason, message: snapshot(partial) });
 }
 
@@ -528,7 +562,8 @@ function addUsage(task: GatewayTask, usage: Usage): void {
   task.outputTokens += usage.output;
   task.cacheReadTokens += usage.cacheRead;
   task.cacheWriteTokens += usage.cacheWrite;
-  task.tokensUsed += usage.input + usage.output;
+  // prompt_tokens / input_tokens 已包含缓存。预算只计未命中缓存的输入和输出。
+  task.tokensUsed += Math.max(0, usage.input + usage.output - usage.cacheRead - usage.cacheWrite);
 }
 
 function record(
@@ -554,6 +589,7 @@ function record(
     error,
   };
   try {
+    deps.db.$client.prepare("update tasks set usage_json=? where id=?").run(taskUsageJson(task), task.taskId);
     emitOps(deps.db, opsMinutes, {
       id: ulid(now.getTime()),
       ts: now.toISOString(),
@@ -580,6 +616,20 @@ function record(
   } catch (caught) {
     console.error("模型记录写入失败", caught instanceof Error ? caught.message : "unknown");
   }
+}
+
+/** Persist usage and limits, never credentials or transcript content. */
+export function taskUsageJson(task: GatewayTask): string {
+  return JSON.stringify({
+    inputTokens: task.inputTokens,
+    outputTokens: task.outputTokens,
+    cacheReadTokens: task.cacheReadTokens,
+    cacheWriteTokens: task.cacheWriteTokens,
+    totalTokens: task.tokensUsed,
+    tokenBudget: task.tokenBudget,
+    modelCalls: task.modelCalls,
+    lengthContinuations: task.lengthContinuations ?? 0,
+  });
 }
 
 function blank(model: Model<Api>): AssistantMessage {
@@ -612,13 +662,6 @@ function emptyUsage(): Usage {
     totalTokens: 0,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   };
-}
-
-function pushStop(stream: ModelEventStream, model: Model<Api>, text: string): void {
-  const message = blank(model);
-  message.content = [{ type: "text", text }];
-  stream.push({ type: "start", partial: snapshot(message) });
-  stream.push({ type: "done", reason: "stop", message: snapshot(message) });
 }
 
 function pushError(stream: ModelEventStream, model: Model<Api>, text: string): void {

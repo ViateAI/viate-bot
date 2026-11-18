@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, stat, unlink } from "node:fs/promises";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import type { FsEntry, FsSearchHit } from "@viate-bot/protocol";
 import { PathEscapeError, resolveConfined } from "./paths.js";
 
@@ -34,7 +34,7 @@ export async function readRaw(requested: string): Promise<{ path: string; data: 
   }
 }
 
-export async function readConfined(requested: string, maxBytes: number): Promise<FsReadResult> {
+export async function readConfined(requested: string, maxBytes: number, encoding: "utf8" | "base64" = "utf8"): Promise<FsReadResult> {
   const path = resolveConfined(requested);
   const file = await open(path, READ_FLAGS);
   try {
@@ -43,7 +43,7 @@ export async function readConfined(requested: string, maxBytes: number): Promise
     const length = Math.min(info.size, maxBytes);
     const buffer = Buffer.alloc(length);
     await file.read(buffer, 0, length, 0);
-    return { path, content: buffer.toString("utf8"), truncated: info.size > length };
+    return { path, content: buffer.toString(encoding), truncated: info.size > length };
   } finally {
     await file.close();
   }
@@ -51,6 +51,8 @@ export async function readConfined(requested: string, maxBytes: number): Promise
 
 export async function writeConfined(requested: string, content: Buffer, mode: number): Promise<FsWriteResult> {
   const path = resolveConfined(requested);
+  // A lexical approval prefix must not write through an alias to a different directory.
+  if (path !== resolve(requested)) throw new PathEscapeError("写入路径不能包含符号链接");
   await mkdir(dirname(path), { recursive: true });
   const file = await open(path, WRITE_FLAGS, mode);
   try {

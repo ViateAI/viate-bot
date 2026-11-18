@@ -1,12 +1,16 @@
 import type { BeforeToolCallContext } from "@earendil-works/pi-agent-core";
 import type { ToolHooks } from "../agent/hooks.js";
 import { auditRepository } from "../db/audit.js";
+import { approvalRuleRepository } from "../db/approval-rules.js";
 import { emitOps, opsMinutes } from "../ops/rollup.js";
 import type { AppDatabase } from "../db/index.js";
 import { ulid } from "../id.js";
 import { AUDIT_ACTIONS, M2_EVENTS } from "../m2/events.js";
 import { approvalClass, argsHash, canonicalJson, READ_ONLY_TOOLS, readBotSettings, skipsApproval } from "../m2/risk.js";
-import { adminScope } from "../scope.js";
+import { adminScope, userScope } from "../scope.js";
+import { profileForbidden, profileNeedsApproval } from "../agent/profile-tool.js";
+import { proposalError } from "./propose-tool.js";
+import { ruleMatches } from "./rules.js";
 
 interface ApprovalRow {
   id: string; task_id: string; tool: string; args_json: string; args_hash: string;
@@ -21,6 +25,8 @@ export interface ApprovalGateOptions {
   onWaiting?: (taskId: string) => void;
   /** 审批卡片用。不能改执行参数，也不能写入配置值。 */
   summarize?: (taskId: string, tool: string, args: unknown) => string;
+  browserUrl?: (taskId: string, tool: string, args: unknown) => Promise<string | undefined>;
+  mcpApp?: (taskId: string, tool: string) => string | undefined;
 }
 
 export interface ApprovalGate {
@@ -79,8 +85,8 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
   }
   function bind(taskId: string): ToolHooks {
     return { beforeToolCall: async (context: BeforeToolCallContext, signal?: AbortSignal) => {
-      const bot = db.prepare("select b.id, b.settings_json from tasks t join bots b on b.id=t.bot_id where t.id=? and b.deleted_at is null")
-        .get(taskId) as { id: string; settings_json: string } | undefined;
+      const bot = db.prepare("select b.id, b.user_id, b.settings_json from tasks t join bots b on b.id=t.bot_id where t.id=? and b.deleted_at is null")
+        .get(taskId) as { id: string; user_id: string; settings_json: string } | undefined;
       if (!bot) return { block: true, reason: "找不到任务" };
       const name = context.toolCall.name;
       const settings = readBotSettings(bot.settings_json);
@@ -91,7 +97,30 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
       if (!READ_ONLY_TOOLS[name] && (takeover || task?.state === "waiting_takeover")) {
         return { block: true, reason: "用户正在接管，已拒绝执行" };
       }
+      if (name === "update_bot_profile") {
+        const forbidden = profileForbidden(context.args);
+        if (forbidden) return { block: true, reason: forbidden };
+      }
+      if (name === "propose_approval_rule") {
+        const problem = proposalError(context.args);
+        if (problem) return { block: true, reason: problem };
+      } else if (settings.approveNone) {
+        const gated = name === "update_bot_profile" ? profileNeedsApproval(context.args) : Boolean(category);
+        if (gated) {
+          auditRepository(options.db).write(adminScope(bot.user_id), "approval.skip_all", bot.id, { note: "全部免审批", taskId, tool: name });
+        }
+        return undefined;
+      }
+      if (name === "update_bot_profile" && !profileNeedsApproval(context.args)) return undefined;
       if (skipsApproval(category, settings)) return undefined;
+      if (autoRule(taskId, bot.id, bot.user_id, name, context.args, category)) return undefined;
+      if (category === "browser" && name !== "browser_open") {
+        const rules = approvalRuleRepository(options.db).active(userScope(bot.user_id), bot.id);
+        if (rules.some((rule) => rule.category === "browser")) {
+          const page = await options.browserUrl?.(taskId, name, context.args);
+          if (hitRule(bot.user_id, taskId, name, context.args, rules, page, undefined)) return undefined;
+        }
+      }
       const input = context.args as Record<string, unknown>;
       const args = name === "shell_exec" ? { cmd: input.cmd, cwd: input.cwd, env: input.env } : context.args;
       const json = canonicalJson(args);
@@ -145,8 +174,12 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
       }
       signal?.removeEventListener("abort", abort);
       db.prepare("update tasks set state='running' where id=? and state='waiting_approval'").run(taskId);
-      if (name === "install_mcp" && argsHash(name, context.args) !== hash) {
-        return { block: true, reason: "批准后的安装参数已改变，请重新申请审批" };
+      const currentArgs = name === "shell_exec" ? { cmd: input.cmd, cwd: input.cwd, env: input.env } : context.args;
+      if (argsHash(name, currentArgs) !== hash) {
+        return { block: true, reason: "批准后的参数已改变，不能复用这次审批" };
+      }
+      if (!READ_ONLY_TOOLS[name] && db.prepare("select 1 from takeover_leases where bot_id=? and state='active'").get(bot.id)) {
+        return { block: true, reason: "用户正在接管，已拒绝执行" };
       }
       if (state === "allowed" && !signal?.aborted) {
         const consumed = db.prepare("update approvals set consumed_at=? where id=? and state='allowed' and consumed_at is null and args_hash=?")
@@ -157,6 +190,26 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
       const reason = denied && name === "install_mcp" ? "用户拒绝安装" : denied ? "用户拒绝了审批" : "审批未完成或已失效";
       return { block: true, reason };
     } };
+  }
+  function autoRule(taskId: string, botId: string, userId: string, tool: string, args: unknown, category: ReturnType<typeof approvalClass>): boolean {
+    if (tool === "install_mcp" || tool === "update_bot_profile" || tool === "bulk_delete_action" || tool === "propose_approval_rule") return false;
+    if (category !== "browser" && category !== "shell" && category !== "fs_write" && category !== "mcp") return false;
+    if (category === "browser" && tool !== "browser_open") return false;
+    const rules = approvalRuleRepository(options.db).active(userScope(userId), botId);
+    const browserUrl = tool === "browser_open" && args && typeof args === "object" ? (args as { url?: unknown }).url : undefined;
+    const mcpApp = category === "mcp" ? options.mcpApp?.(taskId, tool) ?? undefined : undefined;
+    return hitRule(userId, taskId, tool, args, rules, typeof browserUrl === "string" ? browserUrl : undefined, mcpApp);
+  }
+  function hitRule(userId: string, taskId: string, tool: string, args: unknown, rules: ReturnType<ReturnType<typeof approvalRuleRepository>["active"]>, browserUrl: string | undefined, mcpApp: string | undefined): boolean {
+    const now = Date.now();
+    const scope = userScope(userId);
+    for (const rule of rules) {
+      if (!ruleMatches(rule, { now, tool, args, browserUrl, mcpApp })) continue;
+      approvalRuleRepository(options.db).recordHit(scope, rule.id, new Date(now));
+      auditRepository(options.db).write(adminScope(userId), "approval.rule_hit", rule.id, { ruleId: rule.id, taskId, tool });
+      return true;
+    }
+    return false;
   }
   return { bind, arm, decide };
 }

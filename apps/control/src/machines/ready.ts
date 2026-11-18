@@ -1,8 +1,9 @@
 import type { MachineEndpoint } from "@viate-bot/protocol";
-import { decrypt } from "../crypto.js";
+import { decrypt, encrypt } from "../crypto.js";
 import type { AppDatabase } from "../db/index.js";
 import { machineRepository } from "../db/machines.js";
 import { quotaRepository } from "../db/quotas.js";
+import { ulid } from "../id.js";
 import { userScope } from "../scope.js";
 import type { DockerDriver } from "./docker.js";
 import type { MachineSpec } from "./policy.js";
@@ -102,3 +103,33 @@ function delay(ms: number): Promise<void> {
     timer.unref?.();
   });
 }
+ 
+ export function devMachineBypass(env: NodeJS.ProcessEnv = process.env): MachineEndpoint | undefined {
+   if (env.VB_DEV !== "1" || !env.VB_DEV_MACHINE) return undefined;
+   const [host, portText, token] = env.VB_DEV_MACHINE.split(",");
+   const port = Number(portText);
+   if (!host || !token || !Number.isInteger(port) || port < 1) throw new Error("VB_DEV_MACHINE 必须是 host,port,token");
+   return { host, port, token };
+ }
+ 
+ export function rememberDevMachine(db: AppDatabase, key: Buffer, userId: string, endpoint: MachineEndpoint): void {
+   const store = machineRepository(db);
+   const scope = userScope(userId);
+   const tokenEnc = encrypt(key, endpoint.token);
+   const existing = store.find(scope);
+   if (existing && existing.state !== "deleted") {
+     store.update(scope, { state: "running", tokenEnc });
+     return;
+   }
+   store.insert(scope, {
+     id: ulid(),
+     userId,
+     state: "running",
+     containerId: null,
+     networkId: null,
+     volumeName: "dev-bypass",
+     imageVersion: "dev-bypass",
+     spec: devSpec,
+     tokenEnc,
+   });
+ }

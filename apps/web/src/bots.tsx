@@ -23,7 +23,7 @@ function modelChoices(models: { models: string[]; unrestricted: boolean } | unde
 }
 
 function preview(bot: Bot): string {
-  const line = bot.instructions.trim().split("\n").find((item) => item.trim())?.trim();
+  const line = (bot.bio || bot.instructions).trim().split("\n").find((item) => item.trim())?.trim();
   if (!line) return bot.model;
   return line.length > 36 ? `${line.slice(0, 36)}…` : line;
 }
@@ -175,7 +175,7 @@ export function BotSidebar({ activeId, onLogout }: { activeId?: string | undefin
                         aria-current={selected ? "page" : undefined}
                         className={`flex items-center gap-3 rounded-2xl px-2 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 ${selected ? "bg-white shadow-sm ring-1 ring-black/5" : "hover:bg-black/[0.04]"}`}
                       >
-                        <BotMark name={bot.name} className="size-12 rounded-full text-sm" />
+                        <BotMark name={bot.name} avatarUrl={bot.avatar ? `/api/bots/${bot.id}/avatar?v=${bots.dataUpdatedAt}` : undefined} className="size-12 rounded-full text-sm" />
                         <span className="min-w-0">
                           <span className="block truncate text-[15px] font-medium text-neutral-900">{bot.name}</span>
                           <span className="block truncate text-sm text-neutral-500">{preview(bot)}</span>

@@ -44,9 +44,9 @@ describe("memories", () => {
     const db = openDatabase(join(dir, "db.sqlite"));
     try {
       migrate(db, { migrationsFolder: previous });
-      ensureDevUser(db, "user-a");
-      bot(db, "user-a", "bot-a");
-      memoryRepository(db).save(userScope("user-a"), "bot-a", { id: "existing", content: "喜欢上海红茶", sourceTaskId: null });
+      db.$client.exec(`insert into users(id,email,name,status,created_at) values ('user-a','user-a@dev.local','user-a','active','now');
+        insert into bots(id,user_id,name,model,created_at,updated_at) values ('bot-a','user-a','bot-a','m','now','now');
+        insert into memories(id,bot_id,content,created_at,updated_at) values ('existing','bot-a','喜欢上海红茶','now','now');`);
       const { rowid } = db.$client.prepare("select rowid from memories where id = 'existing'").get() as { rowid: number };
       migrate(db, { migrationsFolder: migrations });
       const match = (text: string) => db.$client.prepare("select rowid from memories_fts where memories_fts match ?").all(`"${text}"`);

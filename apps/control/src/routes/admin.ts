@@ -21,6 +21,11 @@ import {
 } from "../admin/service.js";
 import { auditRepository } from "../db/audit.js";
 import { settingsRepository } from "../db/settings.js";
+import { assertModelLimit, ModelLimitRejected, readModelLimits, saveModelLimit } from "../model-limits.js";
+import { readGlobalTaskTokenBudget, saveGlobalTaskTokenBudget, TaskBudgetRejected } from "../task-budget.js";
+import { adminRepository } from "../db/admin.js";
+import { users } from "../db/schema.js";
+import { eq } from "drizzle-orm";
 import { authenticated } from "../auth.js";
 import { BotRejected } from "../bot-service.js";
 import type { MachineSpec } from "../machines/policy.js";
@@ -74,16 +79,32 @@ export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & 
     const body = record(request.body);
     const spec = readSpec(body.spec);
     try {
+      const budget = body.taskTokenBudget;
+      if ("taskTokenBudget" in body && budget !== null && (typeof budget !== "number" || !Number.isInteger(budget) || budget < 0)) {
+        return reply.code(400).send({ error: "token 预算必须是非负整数" });
+      }
       updateQuota(deps.db, scope, request.params.id, {
         ...(typeof body.maxBots === "number" ? { maxBots: body.maxBots } : {}),
         ...(typeof body.maxConcurrentTasks === "number" ? { maxConcurrentTasks: body.maxConcurrentTasks } : {}),
         ...(typeof body.maxRoutines === "number" ? { maxRoutines: body.maxRoutines } : {}),
+        ...("taskTokenBudget" in body ? { taskTokenBudget: budget === null ? null : (budget as number) } : {}),
         ...(spec ? { spec } : {}),
       });
       return { ok: true };
     } catch (error) {
       return sendError(reply, error);
     }
+  });
+
+  app.patch<{ Params: { id: string } }>("/api/admin/users/:id/process-detail", async (request, reply) => {
+    const scope = actor(request);
+    if (!scope) return reply.code(404).send({ error: "找不到" });
+    const enabled = record(request.body).enabled;
+    if (typeof enabled !== "boolean") return reply.code(400).send({ error: "enabled 必须是布尔值" });
+    if (!adminRepository(deps.db).findUser(scope, request.params.id)) return reply.code(404).send({ error: "找不到用户" });
+    deps.db.update(users).set({ showProcess: enabled }).where(eq(users.id, request.params.id)).run();
+    auditRepository(deps.db).write(scope, "user.process_detail", request.params.id, { enabled });
+    return { ok: true, enabled };
   });
 
   app.get("/api/admin/templates", async (request, reply) => {
@@ -177,7 +198,45 @@ export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & 
       integration: deps.config.integration,
       defaultChannel: settings.defaultChannel(),
       platformPrompt: settings.platformPrompt(),
+      modelLimits: readModelLimits(deps.db),
+      modelDefaults: {
+        contextTokens: deps.config.modelContextTokens,
+        maxTokens: deps.config.modelMaxTokens,
+      },
+      taskTokenBudget: readGlobalTaskTokenBudget(deps.db) ?? deps.config.taskTokenBudget,
+      models: deps.config.models,
     };
+  });
+
+  app.put("/api/admin/task-token-budget", async (request, reply) => {
+    const scope = actor(request);
+    if (!scope) return reply.code(404).send({ error: "找不到" });
+    const value = record(request.body).value;
+    try {
+      const saved = saveGlobalTaskTokenBudget(deps.db, value as number);
+      auditRepository(deps.db).write(scope, "task.token_budget", "settings", { value: saved });
+      return { taskTokenBudget: saved };
+    } catch (error) {
+      if (error instanceof TaskBudgetRejected) return reply.code(400).send({ error: error.message });
+      return sendError(reply, error);
+    }
+  });
+
+  app.put("/api/admin/model-limits", async (request, reply) => {
+    const scope = actor(request);
+    if (!scope) return reply.code(404).send({ error: "找不到" });
+    const body = record(request.body);
+    const model = typeof body.model === "string" ? body.model : "";
+    try {
+      const saved = body.clear === true
+        ? saveModelLimit(deps.db, model, null)
+        : saveModelLimit(deps.db, model, assertModelLimit(body.contextTokens as number, body.maxTokens as number));
+      auditRepository(deps.db).write(scope, "model.limits", model, body.clear === true ? { clear: true } : { contextTokens: body.contextTokens, maxTokens: body.maxTokens });
+      return { modelLimits: saved };
+    } catch (error) {
+      if (error instanceof ModelLimitRejected) return reply.code(400).send({ error: error.message });
+      return sendError(reply, error);
+    }
   });
 
   app.patch("/api/admin/settings", async (request, reply) => {

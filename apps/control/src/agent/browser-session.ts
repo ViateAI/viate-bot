@@ -6,6 +6,21 @@ export interface BoundBrowser {
   run<T>(action: (client: BrowserClient) => Promise<T>): Promise<T>;
 }
 
+/** Read trusted browser state rather than model-supplied page hints. */
+export async function browserApprovalUrl(bound: BoundBrowser, tool: string, args: unknown): Promise<string | undefined> {
+  try {
+    const input = args as { action?: unknown; index?: unknown } | null;
+    if (tool === "browser_tabs" && (input?.action === "close" || input?.action === "switch")) {
+      if (typeof input.index !== "number" || !Number.isInteger(input.index) || input.index < 0) return undefined;
+      const tabs = await bound.run((client) => client.listTabs(bound.botId));
+      return tabs.find((tab) => tab.index === input.index)?.url;
+    }
+    return await bound.run((client) => client.evaluate<string>(bound.botId, "location.href"));
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * 每个用户一个 BrowserClient 和一把 UserBrowserLock。
  * 工具创建时绑定 userId 对应的机器，参数里不能换机器。

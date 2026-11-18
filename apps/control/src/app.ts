@@ -22,6 +22,7 @@ import { reconcileOnce } from "./machines/loop.js";
 import type { MachineSpec } from "./machines/policy.js";
 import { MachinedClient } from "./machines/client.js";
 import { ensureUserMachine, prepareMachineEndpoint, type MachineHost } from "./machines/ready.js";
+import { devMachineBypass, rememberDevMachine } from "./machines/ready.js";
 import { applyRetention, flushMinutes, opsMinutes } from "./ops/rollup.js";
 import { registerOpsRoutes } from "./ops/routes.js";
 import { reconcileMachineApps, registerCatalogRoutes } from "./apps/catalog.js";
@@ -152,13 +153,24 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     }),
     prepareEndpoint:
       options.prepareEndpoint ??
-      ((userId, onPhase) => prepareMachineEndpoint(ctx, userId, onPhase, options.fetch ?? fetch)),
+      (devMachineBypass()
+        ? async (userId, onPhase) => {
+            const endpoint = devMachineBypass();
+            if (!endpoint) throw new Error("开发机器旁路没有配置");
+            rememberDevMachine(db, key, userId, endpoint);
+            onPhase("ready");
+            return endpoint;
+          }
+        : (userId, onPhase) => prepareMachineEndpoint(ctx, userId, onPhase, options.fetch ?? fetch)),
     now,
     leases,
     flights,
   });
   chats.set(app, chat);
-  const ensureMachine = options.ensureMachine ?? ((userId: string, spec?: MachineSpec) => ensureUserMachine(ctx, userId, spec));
+  const bypass = devMachineBypass();
+  const ensureMachine = options.ensureMachine ?? (bypass
+    ? async (userId: string) => { rememberDevMachine(db, key, userId, bypass); }
+    : (userId: string, spec?: MachineSpec) => ensureUserMachine(ctx, userId, spec));
   registerChatRoutes(app, {
     db,
     config,
@@ -178,7 +190,7 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     ensureMachine,
     waitHealthy:
       options.waitHealthy ??
-      ((userId) => prepareMachineEndpoint(ctx, userId, () => {}, options.fetch ?? fetch).then(() => undefined)),
+      (bypass ? async () => {} : (userId) => prepareMachineEndpoint(ctx, userId, () => {}, options.fetch ?? fetch).then(() => undefined)),
     deleteMachine: options.deleteMachine ?? ((userId) => deleteCreatedMachine(db, driver, userId)),
     machineControl: options.machineControl ?? dockerMachineControl(db, driver),
     now,
@@ -186,8 +198,14 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
   registerWebsocket(app, { db, key, config, runtime, hub, now });
   const prepare =
     options.prepareEndpoint ??
-    ((userId: string, onPhase: (phase: "starting" | "ready") => void) =>
-      prepareMachineEndpoint(ctx, userId, onPhase, options.fetch ?? fetch));
+    (bypass
+      ? async (userId: string, onPhase: (phase: "starting" | "ready") => void) => {
+          rememberDevMachine(db, key, userId, bypass);
+          onPhase("ready");
+          return bypass;
+        }
+      : (userId: string, onPhase: (phase: "starting" | "ready") => void) =>
+          prepareMachineEndpoint(ctx, userId, onPhase, options.fetch ?? fetch));
   const screen = {
     db,
     key,
@@ -358,6 +376,7 @@ export function chatService(app: FastifyInstance): ChatService {
 }
 
 export function startReconcileLoop(ctx: ControlContext, intervalMs = 30_000): () => void {
+  if (devMachineBypass()) return () => {};
   const timer = setInterval(() => {
     reconcileOnce(reconcileDeps(ctx.db, ctx.driver, taskActivityProbe(ctx.db), ctx.reconcileApps)).catch((error: unknown) => {
       console.error("对账失败", error);
@@ -375,7 +394,7 @@ export function startRoutineLoop(app: FastifyInstance, ctx: ControlContext, inte
     const now = new Date();
     for (const userId of usersToWake(ctx.db, now)) {
       routineUserStatus(ctx, runtime, userId).then(async (status) => {
-        if (status === "active") await prepareMachineEndpoint(ctx, userId, () => {});
+        if (status === "active" && !devMachineBypass()) await prepareMachineEndpoint(ctx, userId, () => {});
       }).catch((error: unknown) => {
         console.error("定时任务唤醒失败", error);
       });

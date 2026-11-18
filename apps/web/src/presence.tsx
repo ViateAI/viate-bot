@@ -17,7 +17,8 @@ export function initials(name: string): string {
   return /^[A-Za-z]+$/.test(mark) ? mark.toUpperCase() : mark;
 }
 
-export function BotMark({ name, className }: { name: string; className?: string }) {
+export function BotMark({ name, avatarUrl, className }: { name: string; avatarUrl?: string | undefined; className?: string }) {
+  if (avatarUrl) return <img src={avatarUrl} alt="" aria-hidden className={`shrink-0 object-cover ${className ?? ""}`} />;
   return (
     <span
       aria-hidden

@@ -32,6 +32,16 @@ afterEach(() => {
 });
 
 describe("schema migration", () => {
+  it("upgrades existing user and quota rows with detail off and budget inheritance without changing routine quota", () => {
+    const sqlite = new Database(":memory:");
+    for (const name of ["0000_init.sql", "0001_session_validation.sql", "0002_memories_fts.sql", "0003_conversation_summary.sql", "0004_m2.sql", "0005_routine_punctuality.sql", "0006_bot_install.sql"]) applyMigration(sqlite, name);
+    sqlite.exec("insert into users(id,email,name,status,is_admin,created_at) values ('u','u@x','U','active',1,'now'); insert into quotas(user_id,max_bots,spec_json,max_concurrent_tasks,max_routines) values ('u',4,'{}',2,0);");
+    applyMigration(sqlite, "0007_polish.sql");
+    expect(sqlite.prepare("select show_process, is_admin from users where id='u'").get()).toEqual({ show_process: 0, is_admin: 1 });
+    expect(sqlite.prepare("select task_token_budget,max_routines,max_bots from quotas where user_id='u'").get()).toEqual({ task_token_budget: null, max_routines: 0, max_bots: 4 });
+    sqlite.close();
+  });
+
   it("creates every table from section 3 and enforces one machine per user", () => {
     const dir = mkdtempSync(join(tmpdir(), "vb-db-"));
     dirs.push(dir);
@@ -53,6 +63,7 @@ describe("schema migration", () => {
       "app_visibility",
       "apps",
       "approvals",
+      "approval_rules",
       "audit_log",
       "bot_apps",
       "bots",
@@ -83,6 +94,9 @@ describe("schema migration", () => {
       expect.arrayContaining(["idp_refresh_token_enc", "token_hash", "last_validated_at"]),
     );
     expect(columnNames(db, "bots")).toContain("model_credential_id");
+    expect(columnNames(db, "bots")).toContain("bio");
+    expect(columnNames(db, "users")).toContain("show_process");
+    expect(columnNames(db, "quotas")).toContain("task_token_budget");
     expect(primaryKey(db, "identities")).toEqual(["provider", "subject"]);
     expect(primaryKey(db, "usage_hourly")).toEqual(["bot_id", "user_id", "model", "hour"]);
     expect(columnNames(db, "usage_hourly")).toContain("cost_source");

@@ -11,6 +11,7 @@ export interface AdminUserRecord {
   name: string;
   status: string;
   isAdmin: boolean;
+  showProcess: boolean;
 }
 
 /** 管理端统计。只返回数量，不返回对话、记忆或密钥。 */
@@ -25,6 +26,7 @@ export function adminRepository(db: AppDatabase) {
           name: users.name,
           status: users.status,
           isAdmin: users.isAdmin,
+          showProcess: users.showProcess,
         })
         .from(users)
         .all();
@@ -38,6 +40,7 @@ export function adminRepository(db: AppDatabase) {
           name: users.name,
           status: users.status,
           isAdmin: users.isAdmin,
+          showProcess: users.showProcess,
         })
         .from(users)
         .where(eq(users.id, id))

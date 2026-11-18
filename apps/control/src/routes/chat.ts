@@ -1,7 +1,10 @@
 import type { FastifyInstance } from "fastify";
+import { existsSync, readFileSync } from "node:fs";
+import { avatarFile } from "../agent/profile-tool.js";
 import type { ChatService } from "../agent/service.js";
 import { ChatError } from "../agent/service.js";
 import { messageView, stepView, taskView } from "../agent/view.js";
+import { redactMessage, redactMessages, redactStep, userShowsProcess } from "../agent/process-detail.js";
 import { authenticated } from "../auth.js";
 import { BotRejected, createBot, deleteBot } from "../bot-service.js";
 import type { ControlConfig } from "../config.js";
@@ -87,6 +90,15 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     return { bot: botView(bot) };
   });
 
+  app.get<{ Params: { id: string } }>("/api/bots/:id/avatar", async (request, reply) => {
+    const scope = scopeOf(request, reply);
+    if (!scope) return;
+    const bot = bots.findById(scope, request.params.id);
+    const path = bot?.avatar ? avatarFile(deps.config.dataDir, bot.id) : "";
+    if (!bot?.avatar || !path || !existsSync(path)) return reply.code(404).send({ error: "找不到头像" });
+    return reply.type(bot.avatar).send(readFileSync(path));
+  });
+
   app.delete<{ Params: { id: string } }>("/api/bots/:id", async (request, reply) => {
     const scope = scopeOf(request, reply);
     if (!scope) return;
@@ -141,7 +153,9 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!scope) return;
     const rows = chat.listMessages(scope, request.params.id);
     if (!rows) return reply.code(404).send({ error: "找不到对话" });
-    return { messages: rows.map(messageView) };
+    const detail = userShowsProcess(deps.db, scope);
+    const tasks = (chat.listTasks(scope, request.params.id) ?? []).map(taskView);
+    return { messages: redactMessages(rows.map(messageView), tasks, detail) };
   });
 
   app.get<{ Params: { id: string } }>("/api/conversations/:id/tasks", async (request, reply) => {
@@ -162,7 +176,13 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!scope) return;
     const row = chat.findMessage(scope, request.params.id);
     if (!row) return reply.code(404).send({ error: "找不到消息" });
-    return { message: messageView(row) };
+    const view = messageView(row);
+    if (userShowsProcess(deps.db, scope)) return { message: view };
+    const tasks = (chat.listTasks(scope, row.conversationId) ?? []).map(taskView);
+    const messages = (chat.listMessages(scope, row.conversationId) ?? []).map(messageView);
+    const redacted = redactMessage(view, messages, tasks, false);
+    if (!redacted) return reply.code(404).send({ error: "找不到消息" });
+    return { message: redacted };
   });
 
   app.get<{ Params: { id: string } }>("/api/tasks/:id", async (request, reply) => {
@@ -178,7 +198,8 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!scope) return;
     const rows = chat.listSteps(scope, request.params.id);
     if (!rows) return reply.code(404).send({ error: "找不到任务" });
-    return { steps: rows.map(stepView) };
+    const detail = userShowsProcess(deps.db, scope);
+    return { steps: rows.map((row) => redactStep(stepView(row), detail)) };
   });
 
   app.post<{ Params: { id: string } }>("/api/bots/:id/messages", async (request, reply) => {
@@ -258,8 +279,8 @@ function scopeOf(request: { id?: string }, reply: { code: (status: number) => { 
   return userScope(resolved.user.id);
 }
 
-function botView(bot: { id: string; name: string; model: string; instructions: string }) {
-  return { id: bot.id, name: bot.name, model: bot.model, instructions: bot.instructions };
+function botView(bot: { id: string; name: string; bio: string; avatar: string | null; model: string; instructions: string }) {
+  return { id: bot.id, name: bot.name, bio: bot.bio, avatar: bot.avatar, model: bot.model, instructions: bot.instructions };
 }
 
 function record(body: unknown): Record<string, unknown> {

@@ -4,8 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readTar } from "./archive.js";
-// The linker runs on the machine as plain JavaScript, so it has no TypeScript types.
-// @ts-expect-error machine script
 import { inferLaunchBin, linkInstalled, npmBinMap } from "./link-mcp.mjs";
 import { buildRegistryPackage, buildRemotePackage, PackageCommandError } from "./package-command.js";
 

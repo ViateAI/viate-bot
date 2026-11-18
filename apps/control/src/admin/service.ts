@@ -10,7 +10,7 @@ import { identityRepository } from "../db/identities.js";
 import type { AppDatabase } from "../db/index.js";
 import { machineRepository, type MachineAdminRecord } from "../db/machines.js";
 import { memoryRepository } from "../db/memories.js";
-import { quotaRepository, type QuotaDraft } from "../db/quotas.js";
+import { quotaRepository, type QuotaDraft, type QuotaPatch } from "../db/quotas.js";
 import { settingsRepository, type BotTemplate } from "../db/settings.js";
 import { userRepository, type UserRecord } from "../db/users.js";
 import { ulid } from "../id.js";
@@ -121,7 +121,7 @@ async function provisionLocked(deps: ProvisionDeps, scope: AdminScope, input: Pr
       maxBots: positive(input.maxBots, deps.config.defaultMaxBots, "maxBots"),
       spec,
       maxConcurrentTasks: positive(input.maxConcurrentTasks, deps.config.defaultMaxConcurrentTasks, "maxConcurrentTasks"),
-      maxRoutines: nonNegative(input.maxRoutines, 0, "maxRoutines"),
+      maxRoutines: nonNegative(input.maxRoutines, deps.config.defaultMaxRoutines, "maxRoutines"),
     };
     const channelId = await resolveChannel(deps, user.id, input.channelId);
     const machines = machineRepository(deps.db);
@@ -300,6 +300,11 @@ export interface AdminUserRow {
   botCount: number;
   tasks7d: number;
   subject: string | null;
+  maxBots: number | null;
+  maxConcurrentTasks: number | null;
+  maxRoutines: number | null;
+  taskTokenBudget: number | null;
+  showProcess: boolean;
 }
 
 export async function listAdminUsers(
@@ -316,16 +321,22 @@ export async function listAdminUsers(
   for (const user of admin.listUsers(scope)) {
     const identity = identities.findByUser(user.id, deps.providerId);
     const machine = machines.find(userScope(user.id));
+    const quota = quotas.find(userScope(user.id));
     rows.set(user.id, {
       id: user.id,
       email: user.email,
       name: user.name,
       status: user.status,
-      provisioned: quotas.find(userScope(user.id)) !== undefined,
+      provisioned: quota !== undefined,
       machineState: machine && machine.state !== "deleted" ? machine.state : null,
       botCount: admin.countBots(scope, user.id),
       tasks7d: admin.countTasksSince(scope, user.id, since),
       subject: identity?.subject ?? null,
+      maxBots: quota?.maxBots ?? null,
+      maxConcurrentTasks: quota?.maxConcurrentTasks ?? null,
+      maxRoutines: quota?.maxRoutines ?? null,
+      taskTokenBudget: quota?.taskTokenBudget ?? null,
+      showProcess: user.showProcess,
     });
   }
   if (deps.directory.listUsers) {
@@ -347,6 +358,11 @@ export async function listAdminUsers(
         botCount: 0,
         tasks7d: 0,
         subject: item.subject,
+        maxBots: null,
+        maxConcurrentTasks: null,
+        maxRoutines: null,
+        taskTokenBudget: null,
+        showProcess: false,
       });
     }
   }
@@ -367,13 +383,19 @@ async function collectDirectory(directory: Directory) {
   return users;
 }
 
-export function updateQuota(db: AppDatabase, scope: AdminScope, userId: string, patch: Partial<QuotaDraft>): void {
+export function updateQuota(db: AppDatabase, scope: AdminScope, userId: string, patch: QuotaPatch): void {
   const admin = adminRepository(db);
   if (!admin.findUser(scope, userId)) throw new AdminRejected("找不到用户", 404);
   if (patch.spec) assertSpec(patch.spec);
   if (patch.maxBots !== undefined) positive(patch.maxBots, patch.maxBots, "maxBots");
   if (patch.maxConcurrentTasks !== undefined) positive(patch.maxConcurrentTasks, patch.maxConcurrentTasks, "maxConcurrentTasks");
   if (patch.maxRoutines !== undefined) nonNegative(patch.maxRoutines, patch.maxRoutines, "maxRoutines");
+  if ("taskTokenBudget" in patch) {
+    const value = patch.taskTokenBudget;
+    if (value !== null && (typeof value !== "number" || !Number.isInteger(value) || value < 0)) {
+      throw new AdminRejected("token 预算必须是非负整数", 400);
+    }
+  }
   const quotas = quotaRepository(db);
   if (!quotas.find(userScope(userId))) throw new AdminRejected("用户尚未开通", 404);
   if (!quotas.update(scope, userId, patch)) throw new AdminRejected("找不到配额", 404);
@@ -381,6 +403,7 @@ export function updateQuota(db: AppDatabase, scope: AdminScope, userId: string, 
     ...(patch.maxBots !== undefined ? { maxBots: patch.maxBots } : {}),
     ...(patch.maxConcurrentTasks !== undefined ? { maxConcurrentTasks: patch.maxConcurrentTasks } : {}),
     ...(patch.maxRoutines !== undefined ? { maxRoutines: patch.maxRoutines } : {}),
+    ...("taskTokenBudget" in patch ? { taskTokenBudget: patch.taskTokenBudget ?? null } : {}),
     ...(patch.spec ? { spec: patch.spec } : {}),
   });
 }

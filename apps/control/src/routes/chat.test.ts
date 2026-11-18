@@ -127,6 +127,7 @@ describe("chat http and websocket", () => {
     expect(created.statusCode).toBe(201);
     const botId = created.json().bot.id as string;
     ctx.db.$client.prepare("update bots set settings_json=? where id=?").run(JSON.stringify({ alwaysAllow: ["shell"] }), botId);
+    ctx.db.$client.prepare("update users set show_process=1 where id=?").run("user-a");
     const sent = await app.inject({
       method: "POST",
       url: `/api/bots/${botId}/messages`,
@@ -161,6 +162,26 @@ describe("chat http and websocket", () => {
     expect(prepared).toEqual(["user-a"]);
     const events = eventRepository(ctx.db).listByBot(botId).map((event) => event.attrsJson).join("\n");
     expect(events).not.toContain(SECRET);
+    ctx.db.$client.prepare("update users set show_process=0 where id=?").run("user-a");
+    const hiddenMessages = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${body.conversationId}/messages`,
+      headers: { cookie: cookie(alice.token) },
+    });
+    const hiddenSteps = await app.inject({
+      method: "GET",
+      url: `/api/tasks/${body.taskId}/steps`,
+      headers: { cookie: cookie(alice.token) },
+    });
+    const hidden = JSON.stringify({ messages: hiddenMessages.json(), steps: hiddenSteps.json() });
+    expect(hidden).toContain("命令结果已经回来了");
+    expect(hidden).not.toContain("Linux test");
+    const quiet = JSON.stringify({
+      messages: (hiddenMessages.json().messages as Array<{ role: string }>).filter((message) => message.role !== "user"),
+      steps: hiddenSteps.json(),
+    });
+    expect(quiet).not.toContain("uname");
+    expect(hiddenSteps.json().steps.some((step: { request?: { label?: string } }) => step.request?.label === "正在执行命令")).toBe(true);
     for (const path of [
       `/api/bots/${botId}`,
       `/api/conversations/${body.conversationId}`,

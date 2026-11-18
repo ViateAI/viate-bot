@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { api, taskLabel, type ChatMessage, type MemoryItem, type Step, type Task } from "./api.js";
-import { ApprovalList } from "./approval.js";
+import { api, taskLabel, type Bot, type ChatMessage, type MemoryItem, type Step, type Task } from "./api.js";
+import { ApprovalList, ApprovalRules } from "./approval.js";
 import { Computer } from "./computer.js";
 import { BotMark } from "./presence.js";
 import { Routines } from "./routines.js";
@@ -31,7 +31,7 @@ export function ChatPage({ botId }: { botId: string }) {
   });
   const bot = useQuery({
     queryKey: ["bot", botId],
-    queryFn: () => api<{ bot: { id: string; name: string; model: string; instructions: string } }>(`/api/bots/${botId}`),
+    queryFn: () => api<{ bot: Bot }>(`/api/bots/${botId}`),
   });
   const conversations = useQuery({
     queryKey: ["conversations", botId],
@@ -54,8 +54,10 @@ export function ChatPage({ botId }: { botId: string }) {
   });
   const task = tasks.data?.tasks[0];
   useEffect(() => {
-    if (task?.state === "succeeded" || task?.state === "failed" || task?.state === "cancelled") {
+    if (task?.state === "succeeded" || task?.state === "failed" || task?.state === "cancelled" || task?.state === "interrupted") {
       void queryClient.invalidateQueries({ queryKey: ["memories", botId] });
+      void queryClient.invalidateQueries({ queryKey: ["bot", botId] });
+      void queryClient.invalidateQueries({ queryKey: ["bots"] });
     }
   }, [botId, queryClient, task?.id, task?.state]);
   const steps = useQuery({
@@ -287,6 +289,8 @@ export function ChatPage({ botId }: { botId: string }) {
       <ProfilePanel
         botId={botId}
         name={name}
+        bio={bot.data?.bot.bio ?? ""}
+        avatarUrl={bot.data?.bot.avatar ? `/api/bots/${botId}/avatar?v=${bot.dataUpdatedAt}` : undefined}
         model={bot.data?.bot.model ?? ""}
         instructions={bot.data?.bot.instructions ?? ""}
         machine={machine}
@@ -305,6 +309,8 @@ export function ChatPage({ botId }: { botId: string }) {
 function ProfilePanel({
   botId,
   name,
+  bio,
+  avatarUrl,
   model,
   instructions,
   machine,
@@ -318,6 +324,8 @@ function ProfilePanel({
 }: {
   botId: string;
   name: string;
+  bio: string;
+  avatarUrl: string | undefined;
   model: string;
   instructions: string;
   machine: "starting" | "ready" | "idle";
@@ -357,8 +365,9 @@ function ProfilePanel({
         </button>
       </div>
       <div className="flex flex-col items-center px-6 pt-4 pb-2">
-        <BotMark name={name} className="size-20 rounded-[1.6rem] text-2xl" />
+        <BotMark name={name} avatarUrl={avatarUrl} className="size-20 rounded-[1.6rem] text-2xl" />
         <h2 className="mt-4 text-center text-xl font-semibold">{name}</h2>
+        {bio ? <p className="mt-2 text-center text-sm text-neutral-500">{bio}</p> : null}
         {model ? <p className="mt-1 text-sm text-neutral-500">{model}</p> : null}
         <p className="mt-1 text-sm text-neutral-500">{status}</p>
       </div>
@@ -429,6 +438,7 @@ function ProfilePanel({
             <p className="mt-2 text-sm leading-6 whitespace-pre-wrap">{instructions}</p>
           </section>
         ) : null}
+        <ApprovalRules botId={botId} />
         <div data-testid="memory-list">
           <h3 className="text-xs text-neutral-500">记忆</h3>
           <ul className="mt-2 grid gap-2">
@@ -594,6 +604,8 @@ function pendingSecret(steps: Step[]): SecretRequestView | undefined {
 }
 
 function stepTitle(step: Step): string {
+  const request = step.request as { label?: string } | null;
+  if (request?.label) return request.label;
   if (step.kind === "compact") return "已压缩较早的上下文";
   if (step.kind === "mcp") return mcpTitle(step);
   if (step.kind === "tool") return toolTitle(step);
@@ -611,6 +623,8 @@ function toolTitle(step: Step): string {
 }
 
 function stepBody(step: Step): string {
+  const labeled = step.request as { label?: string; args?: unknown } | null;
+  if (labeled?.label && labeled.args === undefined && step.response == null) return labeled.label;
   if (step.kind === "compact") return "较早的对话已收成摘要，原文仍留在记录里。";
   if (step.kind === "mcp") {
     const request = step.request as { category?: string } | null;

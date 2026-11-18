@@ -7,6 +7,8 @@ export interface BotRecord {
   id: string;
   userId: string;
   name: string;
+  bio: string;
+  avatar: string | null;
   model: string;
   instructions: string;
   modelCredentialId: string | null;
@@ -22,6 +24,8 @@ export interface BotDraft {
 
 export interface BotPatch {
   name?: string;
+  bio?: string;
+  avatar?: string | null;
   model?: string;
   instructions?: string;
 }
@@ -84,6 +88,8 @@ export function botRepository(db: AppDatabase): BotStore {
         .update(bots)
         .set({
           ...(patch.name !== undefined ? { name: patch.name } : {}),
+          ...(patch.bio !== undefined ? { bio: patch.bio } : {}),
+          ...(patch.avatar !== undefined ? { avatar: patch.avatar } : {}),
           ...(patch.model !== undefined ? { model: patch.model } : {}),
           ...(patch.instructions !== undefined ? { instructions: patch.instructions } : {}),
           updatedAt: new Date().toISOString(),
@@ -133,6 +139,8 @@ function toRecord(row: typeof bots.$inferSelect): BotRecord {
     id: row.id,
     userId: row.userId,
     name: row.name,
+    bio: row.bio,
+    avatar: row.avatar,
     model: row.model,
     instructions: row.instructions,
     modelCredentialId: row.modelCredentialId,

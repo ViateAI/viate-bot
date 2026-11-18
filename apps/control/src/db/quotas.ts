@@ -10,6 +10,8 @@ export interface QuotaRecord {
   spec: MachineSpec | undefined;
   maxConcurrentTasks: number;
   maxRoutines: number;
+  /** null 表示沿用全局预算。0 表示不限制。 */
+  taskTokenBudget: number | null;
 }
 
 /** ensureDevUser 写入的默认配额。已有测试靠这一行继续能建 bot。 */
@@ -25,6 +27,10 @@ export interface QuotaDraft {
   spec: MachineSpec;
   maxConcurrentTasks: number;
   maxRoutines: number;
+}
+
+export interface QuotaPatch extends Partial<QuotaDraft> {
+  taskTokenBudget?: number | null;
 }
 
 export function quotaRepository(db: AppDatabase) {
@@ -65,7 +71,7 @@ export function quotaRepository(db: AppDatabase) {
         throw error;
       }
     },
-    update(scope: AdminScope, userId: string, patch: Partial<QuotaDraft>): boolean {
+    update(scope: AdminScope, userId: string, patch: QuotaPatch): boolean {
       void scope;
       const result = db
         .update(quotas)
@@ -74,6 +80,7 @@ export function quotaRepository(db: AppDatabase) {
           ...(patch.spec !== undefined ? { specJson: JSON.stringify(patch.spec) } : {}),
           ...(patch.maxConcurrentTasks !== undefined ? { maxConcurrentTasks: patch.maxConcurrentTasks } : {}),
           ...(patch.maxRoutines !== undefined ? { maxRoutines: patch.maxRoutines } : {}),
+          ...("taskTokenBudget" in patch ? { taskTokenBudget: patch.taskTokenBudget ?? null } : {}),
         })
         .where(eq(quotas.userId, userId))
         .run();
@@ -94,6 +101,7 @@ function toRecord(row: typeof quotas.$inferSelect): QuotaRecord {
     spec: parseSpec(row.specJson),
     maxConcurrentTasks: row.maxConcurrentTasks,
     maxRoutines: row.maxRoutines,
+    taskTokenBudget: row.taskTokenBudget ?? null,
   };
 }
 
