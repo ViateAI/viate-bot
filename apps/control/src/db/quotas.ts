@@ -27,6 +27,8 @@ export interface QuotaDraft {
   spec: MachineSpec;
   maxConcurrentTasks: number;
   maxRoutines: number;
+  /** 省略或 null 表示沿用全局预算。 */
+  taskTokenBudget?: number | null;
 }
 
 export interface QuotaPatch extends Partial<QuotaDraft> {
@@ -50,6 +52,7 @@ export function quotaRepository(db: AppDatabase) {
           specJson: JSON.stringify(draft.spec),
           maxConcurrentTasks: draft.maxConcurrentTasks,
           maxRoutines: draft.maxRoutines,
+          ...(draft.taskTokenBudget !== undefined ? { taskTokenBudget: draft.taskTokenBudget } : {}),
         })
         .run();
     },
@@ -63,6 +66,7 @@ export function quotaRepository(db: AppDatabase) {
             specJson: JSON.stringify(draft.spec),
             maxConcurrentTasks: draft.maxConcurrentTasks,
             maxRoutines: draft.maxRoutines,
+            ...(draft.taskTokenBudget !== undefined ? { taskTokenBudget: draft.taskTokenBudget } : {}),
           })
           .run();
         return true;

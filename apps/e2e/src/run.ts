@@ -52,12 +52,42 @@ export async function runSuite(): Promise<void> {
     let botId: string;
     if (!prior.provisioned) {
       if (!local) throw new Error("请先开通专用测试账号，套件不会在真实部署创建机器");
-      const provision = await json<{ botId: string }>(adminApi, `${baseURL}/api/admin/users/provision`, {
-      method: "POST",
-      headers: { "x-vb-csrf": adminCsrf },
-      data: { userId: me.id, templateId: "general", model, spec: { cpu: 1, memMb: 1024, diskGb: 10 }, maxRoutines: 4 },
+      const provisionPage = await admin.newPage();
+      await provisionPage.goto(`${baseURL}/admin`);
+      await waitFor(async () => {
+        const options = await provisionPage.getByTestId("provision-user").innerText();
+        return options.includes(me.email) ? "ok" : "开通列表还没有测试用户";
       });
-      botId = provision.botId;
+      await provisionPage.getByTestId("provision-user").selectOption({ label: me.email });
+      await waitFor(async () => {
+        const routines = await provisionPage.getByTestId("provision-routines").inputValue();
+        const modelValue = await provisionPage.getByTestId("provision-model").inputValue();
+        return routines !== "" && modelValue !== "" ? "ok" : "开通默认值还没到";
+      });
+      const submitted = {
+        model: await provisionPage.getByTestId("provision-model").inputValue(),
+        maxBots: Number(await provisionPage.getByTestId("provision-bots").inputValue()),
+        maxConcurrentTasks: Number(await provisionPage.getByTestId("provision-tasks").inputValue()),
+        maxRoutines: Number(await provisionPage.getByTestId("provision-routines").inputValue()),
+      };
+      await provisionPage.getByTestId("provision-routines").fill("");
+      await provisionPage.getByTestId("provision-submit").click();
+      await provisionPage.getByText("maxRoutines 必须是非负整数", { exact: true }).waitFor();
+      await provisionPage.getByTestId("provision-routines").fill(String(submitted.maxRoutines));
+      await provisionPage.getByTestId("provision-submit").click();
+      await provisionPage.getByTestId("provision-result").waitFor({ timeout: TASK_TIMEOUT_MS });
+      if (shots) await provisionPage.screenshot({ path: `${shots}/provision-form.png` });
+      await provisionPage.close();
+      const opened = (await json<{ users: UserQuota[] }>(adminApi, `${baseURL}/api/admin/users`)).users.find((row) => row.id === me.id);
+      if (!opened?.provisioned) throw new Error("表单开通后用户仍未开通");
+      if (opened.maxBots !== submitted.maxBots || opened.maxConcurrentTasks !== submitted.maxConcurrentTasks || opened.maxRoutines !== submitted.maxRoutines) {
+        throw new Error(`配额和表单不一致: ${JSON.stringify(opened)} ${JSON.stringify(submitted)}`);
+      }
+      if (opened.taskTokenBudget !== null) throw new Error("留空的单任务预算不应覆盖全局值");
+      const createdBots = await json<{ bots: Array<{ id: string; model: string }> }>(userApi, `${baseURL}/api/bots`);
+      const createdBot = createdBots.bots.find((item) => item.model === submitted.model);
+      if (!createdBot) throw new Error(`开通后的 bot 模型不是 ${submitted.model}`);
+      botId = createdBot.id;
       const baseline = (await json<{ users: UserQuota[] }>(adminApi, `${baseURL}/api/admin/users`)).users.find((row) => row.id === me.id)!;
       cleanups.push(async () => { await json(adminApi, `${baseURL}/api/admin/users/${me.id}/quota`, { method: "PATCH", headers: { "x-vb-csrf": adminCsrf }, data: { maxBots: baseline.maxBots, maxConcurrentTasks: baseline.maxConcurrentTasks, maxRoutines: baseline.maxRoutines, taskTokenBudget: baseline.taskTokenBudget } }); });
     } else {
@@ -88,6 +118,43 @@ export async function runSuite(): Promise<void> {
     const page = await user.newPage();
     await page.goto(`${baseURL}/b/${botId}`);
     await page.getByTestId("message-input").waitFor();
+    if (local) {
+      const previousRate = await json<{ modelRate: { userPerMin: number; botPerMin: number } }>(adminApi, `${baseURL}/api/admin/settings`);
+      cleanups.push(async () => {
+        await json(adminApi, `${baseURL}/api/admin/model-rate`, {
+          method: "PUT",
+          headers: { "x-vb-csrf": adminCsrf },
+          data: previousRate.modelRate,
+        });
+      });
+      await json(adminApi, `${baseURL}/api/admin/model-rate`, {
+        method: "PUT",
+        headers: { "x-vb-csrf": adminCsrf },
+        data: { userPerMin: 0, botPerMin: 1 },
+      });
+      const firstRate = await say(page, botId, "e2e-rate-a");
+      await waitState(userApi, baseURL, firstRate.taskId, "succeeded");
+      const secondRate = await say(page, botId, "e2e-rate-b");
+      await waitFor(async () => {
+        const task = await json<{ task: { state: string; waitingRate?: boolean } }>(userApi, `${baseURL}/api/tasks/${secondRate.taskId}`);
+        if (task.task.waitingRate) return "ok";
+        if (task.task.state === "succeeded" || task.task.state === "failed" || task.task.state === "cancelled") {
+          return `任务failed: 限流没有进入等待 (${task.task.state})`;
+        }
+        return "还没进入限流等待";
+      });
+      await waitFor(async () => {
+        const label = await page.getByTestId("task-status").textContent();
+        return label?.includes("请求较多，等待中") ? "ok" : `状态是 ${label ?? ""}`;
+      });
+      if (shots) await page.screenshot({ path: `${shots}/rate-wait.png` });
+      await json(adminApi, `${baseURL}/api/admin/model-rate`, {
+        method: "PUT",
+        headers: { "x-vb-csrf": adminCsrf },
+        data: previousRate.modelRate,
+      });
+      await waitState(userApi, baseURL, secondRate.taskId, "succeeded");
+    }
     await json(userApi, `${baseURL}/api/bots/${botId}/approval-settings`, {
       method: "PUT",
       headers: { "x-vb-csrf": userCsrf },
@@ -105,6 +172,11 @@ export async function runSuite(): Promise<void> {
     const adminPage = await admin.newPage();
     await adminPage.goto(`${baseURL}/admin/settings`);
     await adminPage.getByTestId("model-settings").waitFor();
+    if (local) {
+      await adminPage.getByTestId("model-rate-user").fill("");
+      await adminPage.getByRole("button", { name: "保存限流", exact: true }).click();
+      await adminPage.getByText("限流必须是非负整数，0 表示不限制", { exact: true }).waitFor();
+    }
     await adminPage.getByTestId("model-limit-name").fill(limitModel);
     cleanups.push(async () => { await json(adminApi, `${baseURL}/api/admin/model-limits`, { method: "PUT", headers: { "x-vb-csrf": adminCsrf }, data: { model: limitModel, clear: true } }); });
     await adminPage.getByTestId("model-context").fill("32000");

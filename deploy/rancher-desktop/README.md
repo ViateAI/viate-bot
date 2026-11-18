@@ -4,7 +4,7 @@
 
 ## 安装与启动顺序
 
-先运行过一次 Rancher Desktop。在 **PowerShell、仓库根目录**执行：
+先运行过一次 Rancher Desktop。若要改私网丢弃列表，**先写好定制文件，再替换脚本**（见「本地定制」）。没有定制就不要放空文件；文件不存在等于仓库默认。在 **PowerShell、仓库根目录**执行：
 
 ```powershell
 $P = Join-Path $env:LOCALAPPDATA 'rancher-desktop\provisioning'
@@ -35,16 +35,35 @@ sh "$P/vb-firewall-check.sh"; echo "exit:$?"
 
 从旧的未审查脚本切换，先停止用户机器并完整退出/重开 Rancher Desktop，避免旧的后台 shell 继续覆盖新规则。不要按旧 pid 文件盲目 `kill`。新版不创建旧的 `i<hash>` IFB，也不盲删无所有权标记的设备；完整 WSL 重启会清理它们。
 
+## 本地定制
+
+默认丢弃列表仍是 `10.0.0.0/8`、`127.0.0.0/8`、`169.254.0.0/16`、`172.16.0.0/12`、`192.168.0.0/16`、`100.64.0.0/10`。要改这份列表，在脚本同目录放 `vb-firewall.local`。替换 `vb-firewall.start` 不会覆盖它。路径也可用环境变量 `VB_FIREWALL_LOCAL` 指定。文件不存在等于仓库默认。
+
+**先写好定制文件，再替换脚本。** 无参数运行会按合并后的列表整链 `iptables-restore`。若先换成仓库脚本再补文件，中间会把默认的 `10.0.0.0/8` DROP 装回去。
+
+语法：空行和 `#` 注释忽略。
+
+- `omit <cidr>`：从默认列表去掉这一项。必须和默认项逐字相同，否则失败退出，避免拼写错误被当成已经放行。
+- `extra <cidr>`：额外丢弃一条 IPv4 CIDR。
+- 其他内容失败退出。
+
+规则生成和自检读同一份合并结果。示例（放行整个 `10/8`）：
+
+```
+# 公司内网在 10/8
+omit 10.0.0.0/8
+```
+
 ## 实际策略与边界
 
 - 网桥为 `vb` + `sha256(userId)` 前 12 hex，14 字符；只匹配 `vb+`。创建/重建时，已有网络复用前检查 driver/网桥选项/IPv6/Internal；不合规且为空则重建，有端点则明确拒绝。已有容器的启动只校验，不替换网络：即使停机后没有活动端点，它仍引用旧 NetworkID，必须重建机器。对账发现正在运行的旧网机器会停机并报错，不能继续假报健康。管理员重建、缺容器对账创建走相同路径；删除仍保留卷，不强制断开其它端点。
 - `VB-GUARD` 在 IPv4 FORWARD 入口兜底私网、TCP 25、INVALID/UNTRACKED；`VB-EGRESS` 在 DOCKER-USER 做同样隔离及 **每源 IP** 新建速率 50/s、TCP 并发 512。`VB-INPUT` 限制 WSL 本机。只允许 `ESTABLISHED,RELATED --ctdir REPLY` 回包先行，避免旧的机器发起私网连接沿 ESTABLISHED 绕过。没有通用内网白名单。
-- 私网/特殊目标：`10/8`、`172.16/12`、`192.168/16`、`169.254/16`、`100.64/10`、`127/8`。这些是**目的地址**过滤；经过 RFC1918/CGNAT 网关转发到公网 IP 不受影响。若 DNS 上游本身处于这些网段，Docker 转发的 DNS 可能被阻断；应配置可达公网 DNS，不要放开整段。Windows 公网地址、VPN 自定义地址等若不在这些段内，须在部署验收中额外检查，不可据此宣称任意宿主地址均已覆盖。
+- 私网/特殊目标：`10/8`、`172.16/12`、`192.168/16`、`169.254/16`、`100.64/10`、`127/8`。这些是**目的地址**过滤；经过 RFC1918/CGNAT 网关转发到公网 IP 不受影响。要改列表用上一节的 `vb-firewall.local`，不要改脚本里的默认值。若 DNS 上游本身处于这些网段，Docker 转发的 DNS 可能被阻断；应配置可达公网 DNS，不要放开整段。Windows 公网地址、VPN 自定义地址等若不在这些段内，须在部署验收中额外检查，不可据此宣称任意宿主地址均已覆盖。
 - ICMP/UDP（含 DNS、QUIC）同样受目的地址隔离；全协议 NEW 流量受 hashlimit，TCP 才有 connlimit。UDP conntrack NEW 可能连续多包，50/s 是保守上限，不承诺精确按 UDP 会话数计量。机器没有 NET_RAW/NET_ADMIN，不能以伪造 SYN-ACK 或源地址当作受支持的合法协议。
 - Docker 内置 DNS 是**容器 netns** 的 `127.0.0.11`。不在宿主 DNAT 到这个地址，也不开放宿主/网桥 `:53`。正常解析必须用实际行为验证，不能用 NAT 跳转存在代替。
 - IPv6 在 FORWARD/INPUT 对 `vb+` 全丢；同时网络策略禁止 EnableIPv6。必须打开 `bridge-nf-call-iptables` 与 `bridge-nf-call-ip6tables`，确保同桥隔离。它们是**全局开关**，会让默认 bridge 和其它桥接容器也经过现有 iptables/ip6tables FORWARD，可能触发别的默认 DROP/隔离规则。本脚本的跳转只匹配 `vb+`，但无法承诺其它应用完全不受该全局开关影响；部署前后都应冒烟其它容器。不要用关闭 bridge-nf 当作修复，否则同桥隔离消失。
 - **当前可验证部署：控制面在 WSL 宿主网络命名空间主动连 machined。仅把控制面容器加入用户网桥不足以支持它主动建连**：它也从 `vb+` 进入，私网规则会拦它。容器模式还需要可信控制面端点的单向发起许可（精确到可信 veth/身份，不能放开整段或整个网桥），控制面接入/断开协调也未由本脚本完成。采用设计中的容器部署前，该项必须实现并验收；不得用 `VB_ALLOW_CIDRS` 开洞。
-- 下行：bridge root TBF；上行：每个宿主 veth ingress **在进入 bridge-nf 前**重定向到该桥专属 `vbi<12hex>` IFB，再 TBF，均为 50 Mbit/s。同桥所有端点共享上行桶；不是每机器覆盖配置。IFB alias 为 `viate-bot:<bridge>`，同名非自有设备拒绝修改；删网后清理仅自有 IFB。旧版 bridge ingress→IFB 会破坏 conntrack，禁止恢复。
+- 下行：bridge root TBF；上行：每个宿主 veth ingress **在进入 bridge-nf 前**重定向到该桥专属 `vbi<12hex>` IFB，再 TBF，均为 50 Mbit/s。同桥所有端点共享上行桶；不是每机器覆盖配置。IFB alias 为 `viate-bot:<bridge>`。脚本只从 `ip -j -d link show` 的 `info_kind=ifb` 和 `ifalias` 判断所有权，不读 `/sys/class/net/*/ifalias`，也不另挂 sysfs。alias 为空或属于别的桥时拒绝改名或删除。删网后清理仅自有 IFB。旧版 bridge ingress→IFB 会破坏 conntrack，禁止恢复。
 - 规则用单次 `iptables-restore --noflush` filter 事务替换；缺模块/规则失败返回非零，不发布半条链。IPv4/IPv6 是各自事务，不是跨协议原子提交。监视器每 5 秒只修复缺失规则/tc，不反复清计数和限速桶；监督进程由 flock 保持唯一、重启异常退出的监视器。pid 校验含启动时间、命令参数和状态；成功周期超过 15 秒也自检失败。监督进程本身被终止/全体进程被杀时没有系统 init 自动恢复，须告警并重跑 provisioning/重启 RD。DOCKER-USER 跳转被删后，限连接规则最迟下一轮恢复；独立 FORWARD 的私网 guard 仍在。整个 FORWARD 表被外部清空时不能保证零窗口。
 
 阈值只能收紧。`VB_RATE_MBIT=1..50`、`VB_HASHLIMIT=1..50`（整数，每秒）、`VB_HASHLIMIT_BURST=1..50`、`VB_CONNLIMIT=1..512`。每次运行把校验过的配置原子写到 `/run/vb-firewall/config`，监视器读取它；自检也用同一配置。日志 `/var/log/vb-firewall.log`。这些环境变量属于 WSL provisioning，不是控制面 `.env`。
@@ -260,13 +279,13 @@ TESTBR="vb$H"
 TESTNET=$(docker network create -o "com.docker.network.bridge.name=$TESTBR" "vb-accept-$H")
 sleep 6
 sh "$P/vb-firewall-check.sh"
-cat "/sys/class/net/vbi$H/ifalias"
+ip -d link show dev "vbi$H" | grep -F "alias viate-bot:$TESTBR"
 docker network rm "$TESTNET"
 sleep 6
-test ! -e "/sys/class/net/vbi$H"; echo "IFB removed exit:$?"
+if ip link show dev "vbi$H" >/dev/null 2>&1; then echo "IFB removed exit:1"; else echo "IFB removed exit:0"; fi
 ```
 
-预期alias为 `viate-bot:vb<hash>`，删除后exit:0。通过管理端重建用户机器：空旧网络被重建；仍挂控制面等端点的旧网络明确报错，不强拆端点；新网络的bridge选项必须为上面的稳定短名。删除机器后卷保留；监视器清理自有IFB。
+预期 `ip -d link` 里 alias 为 `viate-bot:vb<hash>`，删除后 exit:0。不要用 `/sys/class/net/.../ifalias` 判断：进 dockerd 网络命名空间时 /sys 仍可能是 init 的挂载。通过管理端重建用户机器：空旧网络被重建；仍挂控制面等端点的旧网络明确报错，不强拆端点；新网络的bridge选项必须为上面的稳定短名。删除机器后卷保留；监视器清理自有IFB。
 
 ## 重启、升级、Windows 重启（设计10.2 必做）
 

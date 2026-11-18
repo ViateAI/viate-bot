@@ -20,8 +20,10 @@ import type { AppDatabase } from "../db/index.js";
 import { settingsRepository } from "../db/settings.js";
 import { usageRepository } from "../db/usage.js";
 import { ulid } from "../id.js";
+import { markRateWait, readModelRate, subscribeModelRate } from "../model-rate.js";
 import { budgetFailure } from "../task-budget.js";
 import { classifyFinish } from "./finish-reason.js";
+import { createRateLimiter, systemRateClock, type RateClock } from "./rate-limit.js";
 import { withPlatformPrompt } from "../agent/prompt.js";
 import { hourBucket, redactSecret } from "../agent/text.js";
 import { readError } from "../machines/client.js";
@@ -51,6 +53,8 @@ export interface GatewayDeps {
   tasks: Map<string, GatewayTask>;
   fetch?: typeof fetch;
   now?: () => Date;
+  /** 注入后，限流等待和这次调用的时间戳都走这只钟。 */
+  clock?: RateClock;
   retryDelays?: number[];
 }
 
@@ -62,9 +66,11 @@ export function createGateway(deps: GatewayDeps): (
   options?: SimpleStreamOptions,
 ) => AssistantMessageEventStream {
   const fetchImpl = deps.fetch ?? fetch;
-  const now = deps.now ?? (() => new Date());
+  const clock = deps.clock ?? systemRateClock();
+  const now = deps.clock ? () => new Date(clock.now()) : (deps.now ?? (() => new Date()));
+  const stamp = () => (deps.clock ? clock.now() : now().getTime());
   const delays = deps.retryDelays ?? DEFAULT_DELAYS;
-  const limiter = createLimiter(() => now().getTime());
+  const limiter = createRateLimiter(clock);
   return (model, context, options) => {
     const stream = new ModelEventStream();
     const task = deps.tasks.get(options?.sessionId ?? "");
@@ -89,7 +95,7 @@ export function createGateway(deps: GatewayDeps): (
         return;
       }
       const secret = currentTask.secret;
-      const limit = limitReason(deps.config, currentTask, now().getTime());
+      const limit = limitReason(deps.config, currentTask, stamp());
       if (limit) {
         pushError(target, current, limit);
         record(deps, currentTask, current.id, emptyUsage(), now(), 0, limit, "model.request");
@@ -100,12 +106,36 @@ export function createGateway(deps: GatewayDeps): (
         record(deps, currentTask, current.id, emptyUsage(), now(), 0, `模型不在白名单内: ${current.id}`, "model.request");
         return;
       }
-      if (
-        !limiter.allow(`user:${currentTask.userId}`, deps.config.modelRateUserPerMin) ||
-        !limiter.allow(`bot:${currentTask.botId}`, deps.config.modelRateBotPerMin)
-      ) {
-        pushError(target, current, "请求过于频繁");
-        record(deps, currentTask, current.id, emptyUsage(), now(), 0, "请求过于频繁", "model.request");
+      const deadline = currentTask.startedAt + deps.config.maxTaskDurationSec * 1000;
+      const unsubscribe = subscribeModelRate(() => limiter.poke());
+      markRateWait(currentTask.taskId, true);
+      const slot = await limiter.acquire({
+        userKey: `user:${currentTask.userId}`,
+        botKey: `bot:${currentTask.botId}`,
+        limits: () => readModelRate(deps.db, {
+          userPerMin: deps.config.modelRateUserPerMin,
+          botPerMin: deps.config.modelRateBotPerMin,
+        }),
+        deadline,
+        ...(signal ? { signal } : {}),
+      }).finally(() => {
+        unsubscribe();
+        markRateWait(currentTask.taskId, false);
+      });
+      if (!slot.ok) {
+        if (slot.reason === "aborted" || signal?.aborted) {
+          pushAborted(target, current);
+          return;
+        }
+        const expired = limitReason(deps.config, currentTask, stamp()) ?? "已达到时长上限，这次先停下来。回复后可以继续。";
+        pushError(target, current, expired);
+        record(deps, currentTask, current.id, emptyUsage(), now(), 0, expired, "model.request");
+        return;
+      }
+      const afterWait = limitReason(deps.config, currentTask, stamp());
+      if (afterWait) {
+        pushError(target, current, afterWait);
+        record(deps, currentTask, current.id, emptyUsage(), now(), 0, afterWait, "model.request");
         return;
       }
       const platform = settingsRepository(deps.db).platformPrompt().text;
@@ -756,23 +786,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     }
     signal?.addEventListener("abort", onAbort, { once: true });
   });
-}
-
-function createLimiter(now: () => number) {
-  const hits = new Map<string, number[]>();
-  return {
-    allow(key: string, limit: number): boolean {
-      const windowStart = now() - 60_000;
-      const recent = (hits.get(key) ?? []).filter((stamp) => stamp >= windowStart);
-      if (recent.length >= limit) {
-        hits.set(key, recent);
-        return false;
-      }
-      recent.push(now());
-      hits.set(key, recent);
-      return true;
-    },
-  };
 }
 
 export function buildModel(config: ControlConfig, modelId: string): Model<Api> {

@@ -22,6 +22,7 @@ import {
 import { auditRepository } from "../db/audit.js";
 import { settingsRepository } from "../db/settings.js";
 import { assertModelLimit, ModelLimitRejected, readModelLimits, saveModelLimit } from "../model-limits.js";
+import { ModelRateRejected, readModelRate, saveModelRate } from "../model-rate.js";
 import { readGlobalTaskTokenBudget, saveGlobalTaskTokenBudget, TaskBudgetRejected } from "../task-budget.js";
 import { adminRepository } from "../db/admin.js";
 import { users } from "../db/schema.js";
@@ -66,6 +67,7 @@ export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & 
         ...(typeof body.maxBots === "number" ? { maxBots: body.maxBots } : {}),
         ...(typeof body.maxConcurrentTasks === "number" ? { maxConcurrentTasks: body.maxConcurrentTasks } : {}),
         ...(typeof body.maxRoutines === "number" ? { maxRoutines: body.maxRoutines } : {}),
+        ...("taskTokenBudget" in body && body.taskTokenBudget !== null ? { taskTokenBudget: body.taskTokenBudget as number } : {}),
       });
       return reply.code(201).send(result);
     } catch (error) {
@@ -205,7 +207,34 @@ export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & 
       },
       taskTokenBudget: readGlobalTaskTokenBudget(deps.db) ?? deps.config.taskTokenBudget,
       models: deps.config.models,
+      provisionDefaults: {
+        maxBots: deps.config.defaultMaxBots,
+        maxConcurrentTasks: deps.config.defaultMaxConcurrentTasks,
+        maxRoutines: deps.config.defaultMaxRoutines,
+        models: deps.config.models,
+      },
+      modelRate: readModelRate(deps.db, {
+        userPerMin: deps.config.modelRateUserPerMin,
+        botPerMin: deps.config.modelRateBotPerMin,
+      }),
     };
+  });
+
+  app.put("/api/admin/model-rate", async (request, reply) => {
+    const scope = actor(request);
+    if (!scope) return reply.code(404).send({ error: "找不到" });
+    const body = record(request.body);
+    try {
+      const saved = saveModelRate(deps.db, {
+        userPerMin: body.userPerMin as number,
+        botPerMin: body.botPerMin as number,
+      });
+      auditRepository(deps.db).write(scope, "model.rate", "settings", { userPerMin: saved.userPerMin, botPerMin: saved.botPerMin });
+      return { modelRate: saved };
+    } catch (error) {
+      if (error instanceof ModelRateRejected) return reply.code(400).send({ error: error.message });
+      return sendError(reply, error);
+    }
   });
 
   app.put("/api/admin/task-token-budget", async (request, reply) => {

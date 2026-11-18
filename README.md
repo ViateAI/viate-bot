@@ -36,7 +36,32 @@ PowerShell 没有仓库里的导入脚本。在 Windows 上按下表逐项设置
 
 开发时浏览器走 Vite（4420）的话，`VB_PUBLIC_URL` 必须是浏览器打开的源，`VB_CONTROL_PORT` 必须和 `VITE_CONTROL_ORIGIN` 的端口一致。例如控制面 `4418`、公开地址 `http://127.0.0.1:4420`、`VITE_CONTROL_ORIGIN=http://127.0.0.1:4418`。控制面自己提供构建好的网页时，公开地址和控制面端口用同一个源。
 
-控制面构建会把 `src` 中的 JavaScript（包括 `apps/link-mcp.mjs`）一并输出到 `dist`。部署前执行 `pnpm --filter @viate-bot/control build && pnpm --filter @viate-bot/control check:dist`，检查编译后的安装模块可直接加载，不依赖 `src`。部署仍需 `apps/control/drizzle` 迁移文件、工作区依赖和构建好的网页。
+控制面构建会把 `src` 中的 JavaScript（包括 `apps/link-mcp.mjs`）一并输出到 `dist`。部署前执行 `pnpm --filter @viate-bot/control build && pnpm --filter @viate-bot/control check:dist`，检查编译后的安装模块和服务端导入图可直接加载，不依赖 `src`。镜像在 `deploy --prod` 后再跑同一检查，防止开发依赖掩盖运行依赖缺失。部署仍需 `apps/control/drizzle` 迁移文件、工作区依赖和构建好的网页。
+
+## 控制面镜像
+
+在仓库根目录构建。Node 24 基础镜像按 digest 固定，pnpm 版本与根 `packageManager` 一致，锁文件冻结；先复制工作区清单安装依赖，源码改动不会重新安装依赖。镜像只打包网页、迁移、编译产物和生产依赖，不含工作区源码、测试或环境文件，运行用户是 `node`。
+
+控制面创建机器时只连接 `/var/run/docker.sock`，目前不读取 `DOCKER_HOST`。必须挂入实际 Docker daemon 的 socket，且容器里的非 root 用户要有该 socket 的组权限。以下运行示例在 **Docker daemon 所在的 Linux 环境**执行（Rancher Desktop 为其 WSL 环境）；先确认 socket 所属 GID，不能直接套用 Mac/Windows 代理 socket 的 GID。
+
+```sh
+docker build -f images/control/Dockerfile -t viate-bot/control:dev .
+docker run --rm --network host \
+  --group-add "$(stat -c '%g' /var/run/docker.sock)" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e VB_PUBLIC_URL=http://127.0.0.1:3000 \
+  -e VB_OIDC_ISSUER=https://id.example/ \
+  -e VB_OIDC_CLIENT_ID=bot \
+  -e VB_OIDC_CLIENT_SECRET=replace-me \
+  -e VB_MODEL_BASE_URL=https://model.example/v1 \
+  -e VB_MODEL_API_KEY=replace-me \
+  -v viate-bot-data:/data \
+  viate-bot/control:dev
+```
+
+`/data` 挂载保存 SQLite 和密钥。登录、模型地址和密钥按上一节的环境变量传入，不要写进镜像。构建阶段会编译 `better-sqlite3`，并让 `esbuild` 下载对应平台的二进制；这两项在 `pnpm-workspace.yaml` 的 `allowBuilds` 里，其余依赖安装脚本不运行。
+
+Docker socket 访问相当于该 daemon 的 root 权限；不要用 `chmod 666` 或开放未认证的 Docker TCP 端口解决权限问题。绑定宿主目录到 `/data` 时还须允许 UID 1000 写入。`--network host` 使控制面从 daemon 宿主网络主动连接用户机器，和现有 Rancher Desktop 防火墙相容；仅把控制面加入用户网桥会被私网规则拦截，不能视为受支持的部署方式。详见 [防火墙部署边界](deploy/rancher-desktop/README.md#实际策略与边界)。Host 网络下端口直接在宿主监听，请由反向代理和宿主防火墙限制入口。
 
 任务预算、用量和 length 续写次数在等待用户时也会持久化；重启恢复同一个任务不会重新获得预算。预算耗尽后不执行该轮返回的工具，任务失败且显示原因。缺少正常结束标记的模型响应，以及步数/时长耗尽，都不能伪造正常 `stop`。shell 自动规则只匹配可静态解析的字面词，含展开、环境变量覆盖或非默认工作目录时转人工审批；`fs_write` 不跟随路径中的符号链接。bot 禁用应用后，新任务不再加载该应用的 MCP 工具。
 
@@ -51,7 +76,7 @@ PowerShell 没有仓库里的导入脚本。在 Windows 上按下表逐项设置
 | `VB_OIDC_CLIENT_ID` | 空 | OIDC client id |
 | `VB_OIDC_CLIENT_SECRET` | 空 | OIDC client secret |
 | `VB_ALLOW_SIGNUP` | `false` | `true` 时，未知身份可以建一个还没有 bot 的用户。不会自动开通 bot |
-| `VB_OIDC_TRUST_EMAIL` | `false` | `true` 时把身份提供方给出的邮箱当作已验证 |
+| `VB_OIDC_TRUST_EMAIL` | `false` | **全局邮箱信任开关，不仅用于管理员首登。** 关闭时只有 `email_verified=true` 才能按邮箱认管理员、自动绑定唯一未绑定用户或放行管理员首登。打开后这三条路径都信任 IdP 的未验证邮箱（含 `false` 或缺失），但仍须有非空邮箱声明。能在 IdP 拿到管理员邮箱的人可成为管理员；能拿到任意预开通邮箱的人也可绑定该唯一未绑定用户并访问其 bot、机器及数据，即使关闭注册且邮箱不在管理员列表。已绑定用户仍只按 `(provider, sub)` 匹配，不按邮箱合并。只有 IdP 不开放自助注册、或账号由管理员创建且邮箱不可由不可信用户任意修改时才应打开；对接其他 IdP 先确认。viate 的 `email_verified` 恒为 `false`，接 viate 时需要打开 |
 | `VB_MODEL_BASE_URL` | 空 | 模型网关地址。调用模型时必须有值 |
 | `VB_MODEL_API_KEY` | 空 | 共享 key。共享模式下调用模型时必须有值 |
 | `VB_MODELS` | 空 | 逗号分隔的模型白名单。空表示不额外限制 |
@@ -60,8 +85,8 @@ PowerShell 没有仓库里的导入脚本。在 Windows 上按下表逐项设置
 | `VB_MODEL_CONTEXT_TOKENS` | `256000` | 上下文窗口，正整数。管理员可按模型覆盖；只影响之后开始的任务 |
 | `VB_SUMMARY_MAX_TOKENS` | `2000` | 上下文摘要单次输出上限，正整数 |
 | `VB_TASK_TOKEN_BUDGET` | `2000000` | 单任务 token 预算。`0` 表示不限制。管理员可在模型设置改全局值，在配额里按用户覆盖。计入输入和输出，不计缓存读写 |
-| `VB_MODEL_RATE_USER` | `30` | 每用户每分钟模型请求上限，正整数 |
-| `VB_MODEL_RATE_BOT` | `20` | 每 bot 每分钟模型请求上限，正整数 |
+| `VB_MODEL_RATE_USER` | `120` | 每用户每分钟模型请求上限。非负整数，`0` 表示不限制。管理员可在模型设置覆盖，下一次调用即生效。超限会等待，不让任务失败 |
+| `VB_MODEL_RATE_BOT` | `60` | 每 bot 每分钟模型请求上限。非负整数，`0` 表示不限制。和用户窗口一起判断，两个都有空位才记一次 |
 | `VB_MAX_TASK_STEPS` | `16` | 单任务步数上限，正整数 |
 | `VB_MAX_TASK_DURATION_SEC` | `600` | 单任务时长上限（秒），正整数 |
 | `VB_DEFAULT_MAX_BOTS` | `5` | 管理员开通时写入配额的 bot 上限。已有配额行不会被这个值改写 |
@@ -120,7 +145,7 @@ VB_VIATE_CLIENT_ID=
 VB_VIATE_CLIENT_SECRET=
 ```
 
-缺任何一项不会阻止控制面启动；第一次调服务接口才报错。viate 的 `id_token` 已经带已验证邮箱时，`VB_OIDC_TRUST_EMAIL` 保持 `false`。邮箱只有在身份提供方侧被当作已验证时才设 `true`。
+缺任何一项不会阻止控制面启动；第一次调服务接口才报错。viate 作为 IdP 时 `email_verified` 恒为 `false`，所以接 viate 时要把 `VB_OIDC_TRUST_EMAIL` 设为 `true`。打开后，任何能在 IdP 里拿到某个管理员邮箱的人都能成为管理员；只有 IdP 不开放自助注册、或账号由管理员创建时才应打开。对接其他 IdP 时要先确认这一点。
 
 ## 任意 OIDC
 

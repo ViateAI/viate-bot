@@ -9,6 +9,9 @@ import { loadConfig } from "../config.js";
 import { eventRepository } from "../db/events.js";
 import { openDatabase, type AppDatabase } from "../db/index.js";
 import { DEFAULT_PLATFORM_PROMPT } from "../db/settings.js";
+import { saveModelRate } from "../model-rate.js";
+import { taskRateWaiting } from "../model-rate.js";
+import { manualRateClock } from "./rate-limit.js";
 import { buildModel, createGateway, type GatewayTask } from "./stream.js";
 
 const dirs: string[] = [];
@@ -287,15 +290,61 @@ describe("model gateway", () => {
     db.$client.close();
   });
 
-  it("rate limits the second call for a user", async () => {
+  it("waits out a full window and then completes the call", async () => {
     const db = database();
+    const clock = manualRateClock(1_000_000);
     let calls = 0;
-    const tasks = new Map([["task-1", task()]]);
-    const config = loadConfig({ VB_MODEL_BASE_URL: "http://model.test/v1", VB_MODEL_RATE_USER: "1", VB_MODEL_RATE_BOT: "10" });
+    const current = task();
+    current.startedAt = clock.now();
+    const tasks = new Map([["task-1", current]]);
+    const config = loadConfig({
+      VB_MODEL_BASE_URL: "http://model.test/v1",
+      VB_MODEL_RATE_USER: "1",
+      VB_MODEL_RATE_BOT: "10",
+      VB_MAX_TASK_DURATION_SEC: "600",
+    });
     const gateway = createGateway({
       db,
       config,
       tasks,
+      clock,
+      retryDelays: [0, 0],
+      fetch: async () => {
+        calls += 1;
+        return textSse("ok");
+      },
+    });
+    const model = buildModel(config, "gpt-test");
+    const context = { messages: [{ role: "user" as const, content: "hi", timestamp: 1 }] };
+    const first = await finish(gateway(model, context, { sessionId: "task-1" }));
+    expect(first.stopReason).toBe("stop");
+    expect(calls).toBe(1);
+    const second = finish(gateway(model, context, { sessionId: "task-1" }));
+    await clock.untilSleeping();
+    expect(taskRateWaiting("task-1")).toBe(true);
+    expect(calls).toBe(1);
+    expect(current.modelCalls).toBe(1);
+    clock.advance(60_000);
+    const resumed = await second;
+    expect(resumed.stopReason).toBe("stop");
+    expect(calls).toBe(2);
+    expect(taskRateWaiting("task-1")).toBe(false);
+    db.$client.close();
+  });
+
+  it("does not call the model when the wait is aborted", async () => {
+    const db = database();
+    const clock = manualRateClock(1_000_000);
+    let calls = 0;
+    const current = task();
+    current.startedAt = clock.now();
+    const tasks = new Map([["task-1", current]]);
+    const config = loadConfig({ VB_MODEL_BASE_URL: "http://model.test/v1", VB_MODEL_RATE_USER: "1", VB_MODEL_RATE_BOT: "1" });
+    const gateway = createGateway({
+      db,
+      config,
+      tasks,
+      clock,
       retryDelays: [0, 0],
       fetch: async () => {
         calls += 1;
@@ -305,10 +354,87 @@ describe("model gateway", () => {
     const model = buildModel(config, "gpt-test");
     const context = { messages: [{ role: "user" as const, content: "hi", timestamp: 1 }] };
     await finish(gateway(model, context, { sessionId: "task-1" }));
-    const limited = await finish(gateway(model, context, { sessionId: "task-1" }));
+    const controller = new AbortController();
+    const waiting = finish(gateway(model, context, { sessionId: "task-1", signal: controller.signal }));
+    await clock.untilSleeping();
+    controller.abort();
+    const stopped = await waiting;
+    expect(stopped.stopReason).toBe("aborted");
+    expect(taskRateWaiting("task-1")).toBe(false);
     expect(calls).toBe(1);
-    expect(limited.stopReason).toBe("error");
-    expect(limited.errorMessage).toContain("频繁");
+    expect(current.modelCalls).toBe(1);
+    db.$client.close();
+  });
+
+  it("counts the wait toward the task duration and does not call the model", async () => {
+    const db = database();
+    const clock = manualRateClock(1_000_000);
+    let calls = 0;
+    const current = task();
+    current.startedAt = clock.now();
+    const tasks = new Map([["task-1", current]]);
+    const config = loadConfig({
+      VB_MODEL_BASE_URL: "http://model.test/v1",
+      VB_MODEL_RATE_USER: "1",
+      VB_MODEL_RATE_BOT: "1",
+      VB_MAX_TASK_DURATION_SEC: "30",
+    });
+    const gateway = createGateway({
+      db,
+      config,
+      tasks,
+      clock,
+      retryDelays: [0, 0],
+      fetch: async () => {
+        calls += 1;
+        return textSse("ok");
+      },
+    });
+    const model = buildModel(config, "gpt-test");
+    const context = { messages: [{ role: "user" as const, content: "hi", timestamp: 1 }] };
+    await finish(gateway(model, context, { sessionId: "task-1" }));
+    const waiting = finish(gateway(model, context, { sessionId: "task-1" }));
+    await clock.untilSleeping();
+    clock.advance(30_000);
+    const expired = await waiting;
+    expect(expired.stopReason).toBe("error");
+    expect(taskRateWaiting("task-1")).toBe(false);
+    expect(expired.errorMessage).toContain("时长上限");
+    expect(calls).toBe(1);
+    expect(current.modelCalls).toBe(1);
+    db.$client.close();
+  });
+
+  it("applies a model rate change to a call that is already waiting", async () => {
+    const db = database();
+    const clock = manualRateClock(1_000_000);
+    let calls = 0;
+    const current = task();
+    current.startedAt = clock.now();
+    const tasks = new Map([["task-1", current]]);
+    const config = loadConfig({ VB_MODEL_BASE_URL: "http://model.test/v1", VB_MODEL_RATE_USER: "1", VB_MODEL_RATE_BOT: "1" });
+    const gateway = createGateway({
+      db,
+      config,
+      tasks,
+      clock,
+      retryDelays: [0, 0],
+      fetch: async () => {
+        calls += 1;
+        return textSse("ok");
+      },
+    });
+    const model = buildModel(config, "gpt-test");
+    const context = { messages: [{ role: "user" as const, content: "hi", timestamp: 1 }] };
+    await finish(gateway(model, context, { sessionId: "task-1" }));
+    const waiting = finish(gateway(model, context, { sessionId: "task-1" }));
+    await clock.untilSleeping();
+    expect(calls).toBe(1);
+    saveModelRate(db, { userPerMin: 0, botPerMin: 0 });
+    const resumed = await waiting;
+    expect(resumed.stopReason).toBe("stop");
+    expect(calls).toBe(2);
+    expect(clock.now()).toBe(1_000_000);
     db.$client.close();
   });
 

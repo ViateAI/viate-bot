@@ -72,7 +72,7 @@ export function acceptIdentity(
     }
   }
 
-  if (!config.allowSignup) throw new LoginRejected("不允许注册", 403);
+  if (!config.allowSignup && !adminSignup(identity, config)) throw new LoginRejected("不允许注册", 403);
   const id = ulid();
   const created = users.insert({
     id,
@@ -89,6 +89,18 @@ export function acceptIdentity(
     emailVerified: identity.emailVerified,
   });
   return created;
+}
+
+/**
+ * 关闭注册时，管理员邮箱仍走和开放注册一样的首登建号。
+ * 必须有邮箱声明。VB_OIDC_TRUST_EMAIL 关闭时还要求 email_verified 严格为 true；打开时不检查这项。
+ * 不按邮箱把新身份绑到已有用户。
+ */
+function adminSignup(identity: ExternalIdentity, config: ControlConfig): boolean {
+  const email = normalizeEmail(identity.email);
+  if (!email || !config.adminEmails.includes(email)) return false;
+  if (config.oidcTrustEmail) return true;
+  return identity.emailVerified === true;
 }
 
 export function normalizeEmail(email: string | null): string | null {

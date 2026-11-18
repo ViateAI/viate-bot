@@ -70,7 +70,7 @@ export function ChatPage({ botId }: { botId: string }) {
   const stoppable = active || task?.state === "waiting_input" || task?.state === "waiting_approval" || task?.state === "waiting_takeover";
   const secret = task?.state === "waiting_input" ? pendingSecret(steps.data?.steps ?? []) : undefined;
   const name = bot.data?.bot.name ?? "对话";
-  const status = taskLabel(task?.state ?? "", machine, task?.error);
+  const status = taskLabel(task?.state ?? "", machine, task?.error, task?.waitingRate);
 
   useEffect(() => {
     setSheet(false);

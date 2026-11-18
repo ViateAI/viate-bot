@@ -68,6 +68,8 @@ export interface ProvisionInput {
   maxBots?: number;
   maxConcurrentTasks?: number;
   maxRoutines?: number;
+  /** null 或省略表示不覆盖全局预算。 */
+  taskTokenBudget?: number | null;
 }
 
 export interface ProvisionDeps {
@@ -117,11 +119,13 @@ async function provisionLocked(deps: ProvisionDeps, scope: AdminScope, input: Pr
     }
     const spec = input.spec ?? devSpec;
     assertSpec(spec);
+    const taskTokenBudget = readTaskTokenBudget(input.taskTokenBudget);
     const quota: QuotaDraft = {
       maxBots: positive(input.maxBots, deps.config.defaultMaxBots, "maxBots"),
       spec,
       maxConcurrentTasks: positive(input.maxConcurrentTasks, deps.config.defaultMaxConcurrentTasks, "maxConcurrentTasks"),
       maxRoutines: nonNegative(input.maxRoutines, deps.config.defaultMaxRoutines, "maxRoutines"),
+      ...(taskTokenBudget === undefined ? {} : { taskTokenBudget }),
     };
     const channelId = await resolveChannel(deps, user.id, input.channelId);
     const machines = machineRepository(deps.db);
@@ -155,7 +159,18 @@ async function provisionLocked(deps: ProvisionDeps, scope: AdminScope, input: Pr
     if (!quotas.insert(scope, user.id, quota)) throw new AdminRejected("已经开通", 409);
     quotaInserted = true;
     audit.write(scope, "user.provision", user.id, { botId: bot.id, templateId: template.id, ok: true });
-    return { userId: user.id, botId: bot.id, email: user.email };
+    return {
+      userId: user.id,
+      botId: bot.id,
+      email: user.email,
+      model,
+      quota: {
+        maxBots: quota.maxBots,
+        maxConcurrentTasks: quota.maxConcurrentTasks,
+        maxRoutines: quota.maxRoutines,
+        taskTokenBudget: quota.taskTokenBudget ?? null,
+      },
+    };
   } catch (error) {
     const rollbackErrors: string[] = [];
     if (botId) {
@@ -579,6 +594,12 @@ function assertSpec(spec: MachineSpec): void {
   if (!Number.isFinite(spec.cpu) || spec.cpu <= 0) throw new AdminRejected("cpu 必须是正数", 400);
   if (!Number.isFinite(spec.memMb) || spec.memMb <= 0) throw new AdminRejected("memMb 必须是正数", 400);
   if (!Number.isFinite(spec.diskGb) || spec.diskGb <= 0) throw new AdminRejected("diskGb 必须是正数", 400);
+}
+
+function readTaskTokenBudget(value: number | null | undefined): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Number.isInteger(value) || value < 0) throw new AdminRejected("taskTokenBudget 必须是非负整数", 400);
+  return value;
 }
 
 function positive(value: number | undefined, fallback: number, label: string): number {

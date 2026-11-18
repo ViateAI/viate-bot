@@ -132,6 +132,7 @@ describe("admin http", () => {
     try {
       const cases = [
         { method: "PUT" as const, url: "/api/admin/model-limits", payload: { model: "fake", contextTokens: 32000, maxTokens: 1000 } },
+        { method: "PUT" as const, url: "/api/admin/model-rate", payload: { userPerMin: 0, botPerMin: 2 } },
         { method: "PUT" as const, url: "/api/admin/task-token-budget", payload: { value: 0 } },
         { method: "PATCH" as const, url: "/api/admin/users/user-1/process-detail", payload: { enabled: true } },
       ];
@@ -142,7 +143,14 @@ describe("admin http", () => {
       }
       const invalid = await app.inject({ method: "PUT", url: "/api/admin/model-limits", headers: headers(admin, true), payload: { model: "fake", contextTokens: 1000, maxTokens: 1001 } });
       expect(invalid.statusCode).toBe(400);
-      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({ modelLimits: { fake: { contextTokens: 32000, maxTokens: 1000 } }, taskTokenBudget: 0 });
+      for (const payload of [{ userPerMin: -1, botPerMin: 1 }, { userPerMin: 1.5, botPerMin: 1 }, { userPerMin: "1", botPerMin: 1 }, { userPerMin: 1 }]) {
+        expect((await app.inject({ method: "PUT", url: "/api/admin/model-rate", headers: headers(admin, true), payload })).statusCode).toBe(400);
+      }
+      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({
+        modelLimits: { fake: { contextTokens: 32000, maxTokens: 1000 } }, taskTokenBudget: 0,
+        modelRate: { userPerMin: 0, botPerMin: 2 },
+        provisionDefaults: { maxBots: 5, maxConcurrentTasks: 2, maxRoutines: 10, models: [] },
+      });
     } finally {
       await app.close();
       db.$client.close();

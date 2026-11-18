@@ -90,18 +90,56 @@ export function AdminUsers() {
   const queryClient = useQueryClient();
   const users = useQuery({ queryKey: ["admin-users"], queryFn: () => api<{ users: AdminUser[] }>("/api/admin/users") });
   const templates = useQuery({ queryKey: ["admin-templates"], queryFn: () => api<{ templates: Template[] }>("/api/admin/templates") });
-  const settings = useQuery({ queryKey: ["admin-settings"], queryFn: () => api<{ integration: string; defaultChannel: string | null }>("/api/admin/settings") });
+  const settings = useQuery({
+    queryKey: ["admin-settings"],
+    queryFn: () => api<{
+      integration: string;
+      defaultChannel: string | null;
+      provisionDefaults: { maxBots: number; maxConcurrentTasks: number; maxRoutines: number; models: string[] };
+    }>("/api/admin/settings"),
+  });
   const [userId, setUserId] = useState("");
   const [email, setEmail] = useState("");
   const [channelId, setChannelId] = useState("");
   const [spec, setSpec] = useState({ cpu: 1, memMb: 1024, diskGb: 10 });
   const [templateId, setTemplateId] = useState("general");
+  const [model, setModel] = useState<string | null>(null);
+  const [maxBots, setMaxBots] = useState<string | null>(null);
+  const [maxConcurrentTasks, setMaxConcurrentTasks] = useState<string | null>(null);
+  const [maxRoutines, setMaxRoutines] = useState<string | null>(null);
+  const [taskTokenBudget, setTaskTokenBudget] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const defaults = settings.data?.provisionDefaults;
+  const selectedTemplate = (templates.data?.templates ?? []).find((item) => item.id === templateId);
+  const configuredModels = defaults?.models ?? [];
+  const templateModel = selectedTemplate?.defaultModel.trim() ?? "";
+  const defaultModel = configuredModels.length > 0
+    ? (templateModel && configuredModels.includes(templateModel) ? templateModel : configuredModels[0] ?? "")
+    : templateModel;
+  const modelValue = model ?? defaultModel;
+  const botsValue = maxBots ?? (defaults ? String(defaults.maxBots) : "");
+  const tasksValue = maxConcurrentTasks ?? (defaults ? String(defaults.maxConcurrentTasks) : "");
+  const routinesValue = maxRoutines ?? (defaults ? String(defaults.maxRoutines) : "");
   const provision = useMutation({
     mutationFn: () => {
       const selected = users.data?.users.find((user) => (user.id ? `local:${user.id}` : `directory:${user.subject}`) === userId);
       if (!selected && !email.trim()) throw new Error("请选择用户或输入邮箱");
+      const nextErrors: Record<string, string> = {};
+      const bots = Number(botsValue);
+      const tasks = Number(tasksValue);
+      const routines = Number(routinesValue);
+      if (!botsValue.trim() || !Number.isInteger(bots) || bots < 1) nextErrors.maxBots = "maxBots 必须是正整数";
+      if (!tasksValue.trim() || !Number.isInteger(tasks) || tasks < 1) nextErrors.maxConcurrentTasks = "maxConcurrentTasks 必须是正整数";
+      if (!routinesValue.trim() || !Number.isInteger(routines) || routines < 0) nextErrors.maxRoutines = "maxRoutines 必须是非负整数";
+      const budgetText = taskTokenBudget.trim();
+      const budget = budgetText === "" ? null : Number(budgetText);
+      if (budget !== null && (!Number.isInteger(budget) || budget < 0)) nextErrors.taskTokenBudget = "token 预算必须是非负整数";
+      if (!modelValue.trim()) nextErrors.model = "没有可用模型";
+      else if (configuredModels.length > 0 && !configuredModels.includes(modelValue)) nextErrors.model = `模型不在白名单内: ${modelValue}`;
+      setFieldErrors(nextErrors);
+      if (Object.keys(nextErrors).length > 0) throw new Error("请修正标出的字段");
       return api("/api/admin/users/provision", {
         method: "POST",
         body: JSON.stringify({
@@ -111,6 +149,11 @@ export function AdminUsers() {
           channelId: channelId.trim() || settings.data?.defaultChannel || undefined,
           spec,
           templateId: templateId || "general",
+          model: modelValue,
+          maxBots: bots,
+          maxConcurrentTasks: tasks,
+          maxRoutines: routines,
+          ...(budget === null ? {} : { taskTokenBudget: budget }),
         }),
       });
     },
@@ -190,6 +233,37 @@ export function AdminUsers() {
         <label className="grid gap-1 text-sm">
           渠道 ID（留空使用默认渠道）
           <input data-testid="provision-channel" className={field} value={channelId} placeholder={settings.data?.defaultChannel ?? "用户的首个授权渠道"} onChange={(event) => setChannelId(event.target.value)} />
+        </label>
+        <label className="grid gap-1 text-sm">
+          模型
+          {configuredModels.length > 0 ? (
+            <select data-testid="provision-model" className={field} value={modelValue} onChange={(event) => setModel(event.target.value)}>
+              {configuredModels.map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+          ) : (
+            <input data-testid="provision-model" className={field} value={modelValue} onChange={(event) => setModel(event.target.value)} />
+          )}
+          {fieldErrors.model ? <span className="text-red-300">{fieldErrors.model}</span> : null}
+        </label>
+        <label className="grid gap-1 text-sm">
+          bot 数
+          <input data-testid="provision-bots" className={field} value={botsValue} onChange={(event) => setMaxBots(event.target.value)} />
+          {fieldErrors.maxBots ? <span className="text-red-300">{fieldErrors.maxBots}</span> : null}
+        </label>
+        <label className="grid gap-1 text-sm">
+          并发任务
+          <input data-testid="provision-tasks" className={field} value={tasksValue} onChange={(event) => setMaxConcurrentTasks(event.target.value)} />
+          {fieldErrors.maxConcurrentTasks ? <span className="text-red-300">{fieldErrors.maxConcurrentTasks}</span> : null}
+        </label>
+        <label className="grid gap-1 text-sm">
+          定时任务
+          <input data-testid="provision-routines" className={field} value={routinesValue} onChange={(event) => setMaxRoutines(event.target.value)} />
+          {fieldErrors.maxRoutines ? <span className="text-red-300">{fieldErrors.maxRoutines}</span> : null}
+        </label>
+        <label className="grid gap-1 text-sm">
+          单任务 token 预算（留空用全局值）
+          <input data-testid="provision-budget" className={field} value={taskTokenBudget} placeholder="沿用全局" onChange={(event) => setTaskTokenBudget(event.target.value)} />
+          {fieldErrors.taskTokenBudget ? <span className="text-red-300">{fieldErrors.taskTokenBudget}</span> : null}
         </label>
         {(["cpu", "memMb", "diskGb"] as const).map((key) => (
           <label key={key} className="grid gap-1 text-sm">
@@ -445,6 +519,7 @@ export function AdminSettings() {
       modelDefaults: { contextTokens: number; maxTokens: number };
       taskTokenBudget: number;
       models: string[];
+      modelRate: { userPerMin: number; botPerMin: number };
     }>("/api/admin/settings"),
   });
   const [prompt, setPrompt] = useState("");
@@ -492,12 +567,14 @@ export function AdminSettings() {
   );
 }
 
-function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { contextTokens: number; maxTokens: number }>; modelDefaults: { contextTokens: number; maxTokens: number }; taskTokenBudget?: number; models: string[] } | undefined }) {
+function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { contextTokens: number; maxTokens: number }>; modelDefaults: { contextTokens: number; maxTokens: number }; taskTokenBudget?: number; models: string[]; modelRate?: { userPerMin: number; botPerMin: number } } | undefined }) {
   const client = useQueryClient();
   const [model, setModel] = useState("");
   const [contextTokens, setContextTokens] = useState("");
   const [maxTokens, setMaxTokens] = useState("");
   const [budget, setBudget] = useState<string | null>(null);
+  const [userRate, setUserRate] = useState<string | null>(null);
+  const [botRate, setBotRate] = useState<string | null>(null);
   const [error, setError] = useState("");
   const loadedBudget = settings?.taskTokenBudget;
   const draft = budget !== null ? budget : loadedBudget === undefined ? "" : String(loadedBudget);
@@ -533,6 +610,29 @@ function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { c
           <input data-testid="task-token-budget" className={field} value={draft} onChange={(event) => setBudget(event.target.value)} />
         </label>
         <button className={button} type="submit" disabled={!budgetReady}>保存预算</button>
+      </form>
+      <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => {
+        event.preventDefault();
+        const userText = userRate ?? (settings?.modelRate ? String(settings.modelRate.userPerMin) : "");
+        const botText = botRate ?? (settings?.modelRate ? String(settings.modelRate.botPerMin) : "");
+        const userPerMin = Number(userText);
+        const botPerMin = Number(botText);
+        if (!userText.trim() || !botText.trim() || !Number.isInteger(userPerMin) || userPerMin < 0 || !Number.isInteger(botPerMin) || botPerMin < 0) {
+          setError("限流必须是非负整数，0 表示不限制");
+          return;
+        }
+        void api("/api/admin/model-rate", { method: "PUT", body: JSON.stringify({ userPerMin, botPerMin }) }).then(async () => {
+          setError("");
+          await client.invalidateQueries({ queryKey: ["admin-settings"] });
+        }).catch((caught: Error) => setError(caught.message));
+      }}>
+        <label className="grid gap-1 text-sm">每用户每分钟（0 表示不限制）
+          <input data-testid="model-rate-user" className={field} value={userRate ?? (settings?.modelRate ? String(settings.modelRate.userPerMin) : "")} onChange={(event) => setUserRate(event.target.value)} />
+        </label>
+        <label className="grid gap-1 text-sm">每 bot 每分钟（0 表示不限制）
+          <input data-testid="model-rate-bot" className={field} value={botRate ?? (settings?.modelRate ? String(settings.modelRate.botPerMin) : "")} onChange={(event) => setBotRate(event.target.value)} />
+        </label>
+        <button className={button} type="submit" disabled={!settings?.modelRate}>保存限流</button>
       </form>
       <ul className="grid gap-1 text-sm">
         {Object.entries(settings?.modelLimits ?? {}).map(([name, limit]) => (

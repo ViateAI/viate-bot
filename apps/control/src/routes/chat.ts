@@ -4,6 +4,7 @@ import { avatarFile } from "../agent/profile-tool.js";
 import type { ChatService } from "../agent/service.js";
 import { ChatError } from "../agent/service.js";
 import { messageView, stepView, taskView } from "../agent/view.js";
+import { taskRateWaiting } from "../model-rate.js";
 import { redactMessage, redactMessages, redactStep, userShowsProcess } from "../agent/process-detail.js";
 import { authenticated } from "../auth.js";
 import { BotRejected, createBot, deleteBot } from "../bot-service.js";
@@ -166,6 +167,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     return {
       tasks: rows.map((row) => ({
         ...taskView(row),
+        waitingRate: taskRateWaiting(row.id),
         remoteUncertain: row.error === "remote_unconfirmed" && remoteUncertain(deps.db, scope.userId),
       })),
     };
@@ -190,7 +192,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!scope) return;
     const row = chat.findTask(scope, request.params.id);
     if (!row) return reply.code(404).send({ error: "找不到任务" });
-    return { task: { ...taskView(row), remoteUncertain: remoteUncertain(deps.db, scope.userId) } };
+    return { task: { ...taskView(row), waitingRate: taskRateWaiting(row.id), remoteUncertain: remoteUncertain(deps.db, scope.userId) } };
   });
 
   app.get<{ Params: { id: string } }>("/api/tasks/:id/steps", async (request, reply) => {
