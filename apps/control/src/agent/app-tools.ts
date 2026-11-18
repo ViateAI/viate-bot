@@ -74,7 +74,7 @@ export function searchAppsTool(catalog: CatalogDeps, userId: string): AgentTool<
   return {
     name: "search_apps",
     label: "搜索应用",
-    description: "在当前用户可见的目录应用和他的私有应用里按关键字搜索。返回名称、版本、简介、MCP 服务、配置项、高风险工具和是否已安装。不访问网络。",
+    description: "在当前用户可见的目录应用和他的私有应用里按关键字搜索。返回名称、版本、简介、MCP 服务、配置项、高风险工具和是否已安装。所有者还会看到自己每个版本的发布状态和驳回原因。不访问网络。",
     parameters: searchSchema,
     execute: async (_id, params) => {
       const query = params.query.trim();

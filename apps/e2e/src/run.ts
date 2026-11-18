@@ -307,6 +307,7 @@ export async function runSuite(): Promise<void> {
       return `预算任务状态是 ${task.task.state}`;
     });
     if (shots) await page.screenshot({ path: `${shots}/budget-failed.png` });
+    if (local) await publishOwnApp(page, adminPage, userApi, adminApi, baseURL, botId, userCsrf, adminCsrf);
   } finally {
     let cleanupFailures = 0;
     for (const cleanup of cleanups.reverse()) {
@@ -347,6 +348,77 @@ async function say(page: Page, botId: string, text: string): Promise<{ taskId: s
   const posted = await response;
   if (posted.status() !== 202) throw new Error(`发送失败 ${posted.status()} ${await posted.text()}`);
   return posted.json() as Promise<{ taskId: string }>;
+}
+
+async function publishOwnApp(
+  page: Page,
+  adminPage: Page,
+  userApi: HttpClient,
+  adminApi: HttpClient,
+  baseURL: string,
+  botId: string,
+  userCsrf: string,
+  adminCsrf: string,
+): Promise<void> {
+  const shots = process.env.VB_E2E_SHOTS || "/tmp/vb-req001-shots";
+  mkdirSync(shots, { recursive: true });
+  await json(userApi, `${baseURL}/api/bots/${botId}/approval-settings`, {
+    method: "PUT",
+    headers: { "x-vb-csrf": userCsrf },
+    data: { approveNone: false, alwaysAllow: ["fs_write"] },
+  });
+  await json(adminApi, `${baseURL}/api/admin/users/${(await json<{ id: string }>(userApi, `${baseURL}/api/me`)).id}/quota`, {
+    method: "PATCH",
+    headers: { "x-vb-csrf": adminCsrf },
+    data: { taskTokenBudget: 0 },
+  });
+  const task = await say(page, botId, "e2e-publish");
+  await page.getByTestId("install-title").waitFor({ timeout: TASK_TIMEOUT_MS });
+  await json(userApi, `${baseURL}/api/bots/${botId}/approval-settings`, {
+    method: "PUT",
+    headers: { "x-vb-csrf": userCsrf },
+    data: { approveNone: true, alwaysAllow: ["fs_write"] },
+  });
+  await page.getByRole("button", { name: "允许" }).click();
+  await page.getByTestId("publish-approval").waitFor({ timeout: TASK_TIMEOUT_MS });
+  await page.screenshot({ path: `${shots}/publish-approval.png` });
+  await page.getByRole("button", { name: "允许" }).click();
+  await waitState(userApi, baseURL, task.taskId, "succeeded");
+  await adminPage.goto(`${baseURL}/admin/app-reviews`);
+  await adminPage.getByTestId("admin-review-list").waitFor({ timeout: TASK_TIMEOUT_MS });
+  await adminPage.getByTestId("admin-review-list").screenshot({ path: `${shots}/admin-review-list.png` });
+  await adminPage.getByTestId("admin-review-detail").waitFor({ timeout: TASK_TIMEOUT_MS });
+  await adminPage.getByTestId("admin-review-detail").screenshot({ path: `${shots}/admin-review-detail.png` });
+  await adminPage.getByTestId("admin-review-approve").click();
+  await waitFor(async () => {
+    const listed = await json<{ requests: Array<{ name: string; state: string }> }>(adminApi, `${baseURL}/api/admin/app-reviews`);
+    const row = listed.requests.find((item) => item.name === "e2enotes");
+    return row?.state === "approved" ? "ok" : "发布申请还没通过";
+  });
+  await page.goto(`${baseURL}/apps`);
+  await page.getByTestId("app-card").filter({ hasText: "e2enotes" }).click();
+  await page.getByText("1.0.0 · 已公开").waitFor({ timeout: TASK_TIMEOUT_MS });
+  await page.screenshot({ path: `${shots}/user-publish-status.png` });
+  const ada = await json<{ id: string }>(adminApi, `${baseURL}/api/me`);
+  const directory = await json<{ users: Array<{ id: string | null; provisioned: boolean }> }>(adminApi, `${baseURL}/api/admin/users`);
+  if (!directory.users.some((user) => user.id === ada.id && user.provisioned)) {
+    const opened = await json<{ ok?: boolean }>(adminApi, `${baseURL}/api/admin/users/provision`, {
+      method: "POST",
+      headers: { "x-vb-csrf": adminCsrf },
+      data: { userId: ada.id, templateId: "general", model: "fake", maxBots: 1, maxConcurrentTasks: 1, maxRoutines: 0, spec: { cpu: 1, memMb: 1024, diskGb: 10 } },
+    });
+    if (!opened) throw new Error("第二个测试用户没有开通");
+  }
+  const catalog = await json<{ apps: Array<{ name: string; publisher?: string | null }> }>(adminApi, `${baseURL}/api/apps`);
+  const published = catalog.apps.find((app) => app.name === "e2enotes");
+  if (!published?.publisher) throw new Error("另一个用户看不到已公开的应用或发布者");
+  await json(adminApi, `${baseURL}/api/apps/e2enotes/install`, {
+    method: "POST",
+    headers: { "x-vb-csrf": adminCsrf },
+    data: { version: "1.0.0" },
+  });
+  const installs = await json<{ installs: Array<{ name: string; state: string }> }>(adminApi, `${baseURL}/api/apps/installs`);
+  if (!installs.installs.some((install) => install.name === "e2enotes" && install.state === "installed")) throw new Error("另一个用户没有装上已公开的应用");
 }
 
 async function waitQuiet(api: HttpClient, baseURL: string, taskId: string, expectState?: string): Promise<void> {

@@ -20,6 +20,7 @@ export const M2_EVENTS = {
   appInstallFailed: "app.install_failed",
   appUninstalled: "app.uninstalled",
   appPushed: "app.pushed",
+  appPublishReviewed: "app.publish_reviewed",
   secretFormUsed: "secret.form_used",
   machineState: "machine.state",
 } as const;
@@ -47,6 +48,7 @@ export const AUDIT_ACTIONS = {
   appPublish: "app.publish",
   appPush: "app.push",
   appRetire: "app.retire",
+  appPublishReview: "app.publish_review",
   machineLifecycle: "machine.lifecycle",
   routineChange: "routine.change",
 } as const;

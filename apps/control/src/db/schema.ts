@@ -507,3 +507,26 @@ export const appPushTargets = sqliteTable(
   },
   (table) => [primaryKey({ columns: [table.pushId, table.userId] })],
 );
+
+/** 用户应用某个版本的公开审批。待审批、驳回、撤回都不让其他用户看到该版本。 */
+export const appPublishRequests = sqliteTable(
+  "app_publish_requests",
+  {
+    id: text("id").primaryKey(),
+    appVersionId: text("app_version_id")
+      .notNull()
+      .references(() => appVersions.id),
+    requesterUserId: text("requester_user_id")
+      .notNull()
+      .references(() => users.id),
+    botId: text("bot_id").references(() => bots.id),
+    taskId: text("task_id").references(() => tasks.id),
+    note: text("note").notNull(),
+    state: text("state").notNull(),
+    reason: text("reason"),
+    reviewerUserId: text("reviewer_user_id").references(() => users.id),
+    createdAt: text("created_at").notNull(),
+    decidedAt: text("decided_at"),
+  },
+  (table) => [index("app_publish_requests_version_idx").on(table.appVersionId, table.state)],
+);

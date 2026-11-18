@@ -19,6 +19,7 @@ export function startFakeModel(port: number): Promise<import("node:http").Server
 }
 
 export function startFakeMachine(port: number, token: string): Promise<import("node:http").Server> {
+  const files = new Map<string, string>();
   const server = createServer((req, res) => {
     if (req.headers.authorization !== `Bearer ${token}`) {
       res.writeHead(401).end();
@@ -39,11 +40,76 @@ export function startFakeMachine(port: number, token: string): Promise<import("n
         res.end(JSON.stringify({ path: parsed.path, content, truncated: false }));
         return;
       }
+      if (req.url === "/fs/write") {
+        const parsed = JSON.parse(body) as { path?: string; content?: string };
+        const path = parsed.path ?? "";
+        const content = parsed.content ?? "";
+        files.set(path, content);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ path, bytes: Buffer.byteLength(content) }));
+        return;
+      }
+      if (req.url === "/fs/pack") {
+        const parsed = JSON.parse(body) as { path?: string };
+        const root = (parsed.path ?? "").replace(/\/$/, "");
+        const packed = [...files.entries()]
+          .filter(([path]) => path === root || path.startsWith(`${root}/`))
+          .map(([path, content]) => ({ path: path.slice(root.length + 1), data: Buffer.from(content) }));
+        if (packed.length === 0 || packed.some((file) => file.path.length === 0)) {
+          res.writeHead(400).end("empty");
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/x-tar" });
+        res.end(tar(packed));
+        return;
+      }
+      if (req.url?.startsWith("/apps/install")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ routines: [] }));
+        return;
+      }
+      if (req.method === "GET" && req.url?.startsWith("/apps/")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ mcpServers: [] }));
+        return;
+      }
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end(`data: ${JSON.stringify({ type: "stdout", data: "ok\n" })}\n\ndata: ${JSON.stringify({ type: "exit", code: 0, signal: null, timedOut: false })}\n\n`);
     });
   });
   return listen(server, port);
+}
+
+function tar(files: Array<{ path: string; data: Buffer }>): Buffer {
+  const chunks: Buffer[] = [];
+  const field = (block: Buffer, value: number, start: number, length: number) => {
+    block.write(`${value.toString(8).padStart(length - 1, "0")}\0`, start, length, "ascii");
+  };
+  for (const file of [...files].sort((left, right) => left.path.localeCompare(right.path))) {
+    const header = Buffer.alloc(512);
+    let name = file.path;
+    let prefix = "";
+    if (Buffer.byteLength(name) > 100) {
+      const split = name.lastIndexOf("/");
+      prefix = name.slice(0, split);
+      name = name.slice(split + 1);
+    }
+    header.write(name, 0, 100);
+    field(header, 0o644, 100, 8);
+    field(header, 0, 108, 8);
+    field(header, 0, 116, 8);
+    field(header, file.data.length, 124, 12);
+    field(header, 0, 136, 12);
+    header.fill(32, 148, 156);
+    header[156] = 48;
+    header.write("ustar\0", 257, 6);
+    header.write("00", 263, 2);
+    header.write(prefix, 345, 155);
+    field(header, header.reduce((sum, byte) => sum + byte, 0), 148, 8);
+    chunks.push(header, file.data, Buffer.alloc((512 - (file.data.length % 512)) % 512));
+  }
+  chunks.push(Buffer.alloc(1024));
+  return Buffer.concat(chunks);
 }
 
 function script(body: string): string {
@@ -82,6 +148,20 @@ function script(body: string): string {
   }
   if (text.includes("e2e-flip")) return recent.includes("update_bot_profile") ? textSse("尝试结束") : toolSse("update_bot_profile", { approveNone: false, name: "开关不该被关" });
   if (text.includes("e2e-budget")) return textSse("超预算", 5, 5);
+  if (text.includes("e2e-publish")) {
+    const plugin = JSON.stringify({
+      $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+      name: "e2enotes",
+      description: "private notes",
+    });
+    const skill = "---\nname: e2enotes\ndescription: private notes\n---\nhello\n";
+    if (!recent.includes("plugin.json")) return toolSse("fs_write", { path: "/tmp/e2enotes/plugin.json", content: plugin });
+    if (!recent.includes("SKILL.md")) return toolSse("fs_write", { path: "/tmp/e2enotes/skills/e2enotes/SKILL.md", content: skill });
+    if (!recent.includes("package_app")) return toolSse("package_app", { path: "/tmp/e2enotes", version: "1.0.0" });
+    if (!recent.includes("install_mcp")) return toolSse("install_mcp", { catalog: { name: "e2enotes", version: "1.0.0" }, reason: "装到自己的机器" });
+    if (!recent.includes("request_app_publish")) return toolSse("request_app_publish", { name: "e2enotes", version: "1.0.0", note: "请公开这个笔记技能" });
+    return textSse("发布申请已提交");
+  }
   return textSse("在");
 }
 

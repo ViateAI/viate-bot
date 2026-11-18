@@ -135,6 +135,14 @@ export class MachinedClient {
     return (await response.json()) as { path: string };
   }
 
+  async pack(path: string, signal?: AbortSignal): Promise<Buffer> {
+    const response = await this.post("/fs/pack", { path }, signal);
+    if (!response.ok) throw new Error(await readError(response));
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length > 200 * 1024 * 1024) throw new Error("应用包过大");
+    return bytes;
+  }
+
   async ensureDisplay(display: number, signal?: AbortSignal): Promise<DisplayEnsureResponse> {
     const response = await this.post(`/displays/${display}`, { width: 1280, height: 720 }, signal);
     if (!response.ok) throw new Error(await readError(response));

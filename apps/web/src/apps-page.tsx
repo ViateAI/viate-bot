@@ -51,6 +51,8 @@ export interface UserCatalogEntry {
   source: string;
   visibility: "private" | "all" | "user";
   version: { id: string; version: string; recommended: boolean };
+  publisher?: string | null;
+  privateVersions?: Array<{ version: string; publishState: string; reason: string | null }>;
 }
 
 export interface InstallView {
@@ -80,6 +82,8 @@ export interface AdminCatalogEntry {
   id: string;
   name: string;
   source: string;
+  ownerUserId?: string | null;
+  ownerName?: string | null;
   visibility: "all" | "user" | "push" | "hidden";
   userIds: string[];
   versions: AdminVersion[];
@@ -146,6 +150,8 @@ export interface UserAppRow {
   inCatalog: boolean;
   version: { id: string; version: string; recommended: boolean } | null;
   install: InstallView | null;
+  publisher: string | null;
+  privateVersions: Array<{ version: string; publishState: string; reason: string | null }>;
 }
 
 export interface ConfigDraft {
@@ -346,6 +352,8 @@ export function joinUserApps(catalog: UserCatalogEntry[], installs: InstallView[
       inCatalog: true,
       version: app.version,
       install: currentInstall(byApp.get(app.id) ?? []),
+      publisher: app.publisher ?? null,
+      privateVersions: app.privateVersions ?? [],
     });
   }
   for (const [appId, list] of byApp) {
@@ -360,6 +368,8 @@ export function joinUserApps(catalog: UserCatalogEntry[], installs: InstallView[
       inCatalog: false,
       version: null,
       install,
+      publisher: null,
+      privateVersions: [],
     });
   }
   rows.sort((left, right) => left.name.localeCompare(right.name, "en"));
@@ -839,7 +849,7 @@ function matchesFilter(row: UserAppRow, filter: CatalogFilter, needle: string): 
 }
 
 function cardSubtitle(row: UserAppRow): string {
-  const parts = [row.inCatalog ? visibilityText(row.visibility) : "目录外"];
+  const parts = [row.publisher ? `由用户〈${row.publisher}〉发布` : row.inCatalog ? visibilityText(row.visibility) : "目录外"];
   if (row.version) parts.push(row.version.recommended ? `${row.version.version} 推荐` : row.version.version);
   if (row.install) {
     parts.push(installStateText(row.install));
@@ -847,6 +857,54 @@ function cardSubtitle(row: UserAppRow): string {
     if (row.install.forced) parts.push("强制安装");
   }
   return parts.join(" · ");
+}
+
+function PublishStatus({ name, versions, onChanged }: {
+  name: string;
+  versions: UserAppRow["privateVersions"];
+  onChanged: () => Promise<void>;
+}) {
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  async function submit(version: string) {
+    const note = (notes[version] ?? "").trim();
+    if (!note) {
+      setError("说明不能为空");
+      return;
+    }
+    setBusy(version);
+    setError("");
+    try {
+      await api(`/api/apps/${encodeURIComponent(name)}/publish`, { method: "POST", body: JSON.stringify({ version, note }) });
+      setNotes((current) => ({ ...current, [version]: "" }));
+      await onChanged();
+    } catch (caught) {
+      setError(appErrorMessage(caught));
+    } finally {
+      setBusy(null);
+    }
+  }
+  return (
+    <section className="grid gap-3" data-testid="publish-status">
+      <h3 className="font-medium">发布状态</h3>
+      {versions.map((item) => (
+        <div key={item.version} className="grid gap-2 text-sm">
+          <p className="whitespace-pre-wrap break-all">{item.version} · {item.publishState}{item.reason ? ` · ${item.reason}` : ""}</p>
+          {item.publishState === "私有" || item.publishState === "已撤回" ? (
+            <label className="grid gap-1">
+              申请说明
+              <input className={appFieldClass} value={notes[item.version] ?? ""} onChange={(event) => setNotes((current) => ({ ...current, [item.version]: event.target.value }))} />
+              <button className={appButtonClass} type="button" data-testid={`publish-request-${item.version}`} disabled={busy !== null} onClick={() => void submit(item.version)}>
+                {busy === item.version ? "正在提交…" : "申请公开"}
+              </button>
+            </label>
+          ) : null}
+        </div>
+      ))}
+      {error ? <ErrorText>{error}</ErrorText> : null}
+    </section>
+  );
 }
 
 export function PrivatePanel({ csrf, onCreated }: { csrf: string; onCreated: (appId: string) => Promise<void> }) {
@@ -1216,6 +1274,7 @@ function AppDetail({
           {appErrorText(install.error) ? <p className="mt-1 text-red-300">失败原因：{appErrorText(install.error)}</p> : null}
         </div>
       ) : null}
+      {row.privateVersions.length > 0 ? <PublishStatus name={row.name} versions={row.privateVersions} onChanged={onChanged} /> : null}
       {row.inCatalog ? (
         <label className="grid gap-1 text-sm">
           指定版本

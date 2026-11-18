@@ -1,14 +1,25 @@
 import { createInterface } from "node:readline";
+import { pipeline } from "node:stream/promises";
 import type { FsEntry, FsSearchHit } from "@viate-bot/protocol";
-import { deleteConfined, fsFailure, listConfined, readConfined, readRaw, searchConfined, writeConfined } from "./fs-ops.js";
+import { deleteConfined, fsFailure, listConfined, packConfined, readConfined, readRaw, searchConfined, writeConfined } from "./fs-ops.js";
 
 dropToBot();
 
-const lines = createInterface({ input: process.stdin });
-let chain = Promise.resolve();
-lines.on("line", (line) => {
-  chain = chain.then(() => handle(line));
-});
+if (process.argv[2] === "--pack") {
+  const requested = process.argv[3] ?? "";
+  packConfined(requested)
+    .then((archive) => pipeline(archive, process.stdout))
+    .catch((error: unknown) => {
+      process.stderr.write(fsFailure(error).error);
+      process.exit(1);
+    });
+} else {
+  const lines = createInterface({ input: process.stdin });
+  let chain = Promise.resolve();
+  lines.on("line", (line) => {
+    chain = chain.then(() => handle(line));
+  });
+}
 
 function dropToBot(): void {
   if (process.getuid?.() !== 0) return;

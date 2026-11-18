@@ -164,6 +164,15 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     return filesystem().delete(body.path);
   });
 
+  app.post("/fs/pack", async (request, reply) => {
+    const body = bodyRecord(request.body);
+    if (typeof body.path !== "string" || body.path.length === 0) {
+      throw Object.assign(new Error("path 不能为空"), { name: "PathEscapeError" });
+    }
+    const archive = await filesystem().pack(body.path);
+    return reply.type("application/x-tar").send(archive);
+  });
+
   app.get("/fs/file", async (request, reply) => {
     const path = resolveConfined(queryPath(request));
     const data = await filesystem().readFile(path);

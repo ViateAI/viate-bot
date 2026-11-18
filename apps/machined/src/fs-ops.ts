@@ -1,12 +1,15 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, stat, unlink } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { Readable } from "node:stream";
 import type { FsEntry, FsSearchHit } from "@viate-bot/protocol";
 import { PathEscapeError, resolveConfined } from "./paths.js";
 
 const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
 const WRITE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW;
+const PACK_FILES = 5000;
+const PACK_BYTES = 200 * 1024 * 1024;
 
 export interface FsReadResult {
   path: string;
@@ -109,6 +112,100 @@ export async function searchConfined(
   const path = resolveConfined(requested);
   const hits = await ripgrep(path, pattern, maxResults);
   return { hits: hits.slice(0, maxResults), truncated: hits.length > maxResults };
+}
+
+interface PackedFile {
+  path: string;
+  absolute: string;
+  size: number;
+  ino: number;
+  dev: number;
+  mode: number;
+}
+
+/** 打包目录为 ustar。不跟随符号链接，跳过 fifo、socket 和设备文件，超限时在读文件内容前停下。 */
+export async function packConfined(requested: string): Promise<Readable> {
+  const root = resolveConfined(requested);
+  const info = await lstat(root);
+  if (!info.isDirectory()) throw Object.assign(new Error("只能打包目录"), { statusCode: 400 });
+  const files: PackedFile[] = [];
+  const total = { bytes: 0 };
+  await collectPack(root, root, files, total);
+  return Readable.from(renderTar(root, files), { objectMode: false, highWaterMark: 64 * 1024 });
+}
+
+async function collectPack(root: string, dir: string, files: PackedFile[], total: { bytes: number }): Promise<void> {
+  const dirents = await readdir(dir, { withFileTypes: true });
+  for (const entry of dirents) {
+    const abs = join(dir, entry.name);
+    const info = await lstat(abs);
+    if (info.isSymbolicLink()) continue;
+    if (info.isDirectory()) {
+      await collectPack(root, abs, files, total);
+      continue;
+    }
+    if (!info.isFile()) continue;
+    if (files.length >= PACK_FILES) throw Object.assign(new Error("文件数超过 5000"), { statusCode: 400 });
+    if (total.bytes + info.size > PACK_BYTES) throw Object.assign(new Error("打包超过 200MB"), { statusCode: 400 });
+    total.bytes += info.size;
+    files.push({ path: relative(root, abs).split(sep).join("/"), absolute: abs, size: info.size, ino: info.ino, dev: info.dev, mode: info.mode & 0o777 });
+  }
+}
+
+async function* renderTar(root: string, files: PackedFile[]): AsyncGenerator<Buffer> {
+  const field = (header: Buffer, value: number, start: number, length: number) => {
+    header.write(`${value.toString(8).padStart(length - 1, "0")}\0`, start, length, "ascii");
+  };
+  for (const file of files.sort((left, right) => left.path.localeCompare(right.path))) {
+    const header = Buffer.alloc(512);
+    let name = file.path;
+    let prefix = "";
+    if (Buffer.byteLength(name) > 100) {
+      const split = name.lastIndexOf("/");
+      prefix = split > 0 ? name.slice(0, split) : "";
+      name = split > 0 ? name.slice(split + 1) : name;
+    }
+    if (Buffer.byteLength(name) > 100 || Buffer.byteLength(prefix) > 155 || name.length === 0) {
+      throw Object.assign(new Error("打包路径过长"), { statusCode: 400 });
+    }
+    header.write(name, 0, Buffer.byteLength(name), "utf8");
+    field(header, file.mode, 100, 8);
+    field(header, 0, 108, 8);
+    field(header, 0, 116, 8);
+    field(header, file.size, 124, 12);
+    field(header, 0, 136, 12);
+    header.fill(32, 148, 156);
+    header[156] = 48;
+    header.write("ustar\0", 257, 6, "ascii");
+    header.write("00", 263, 2, "ascii");
+    if (prefix.length > 0) header.write(prefix, 345, Buffer.byteLength(prefix), "utf8");
+    let sum = 0;
+    for (const byte of header) sum += byte;
+    field(header, sum, 148, 8);
+    const resolved = resolveConfined(file.absolute);
+    if (resolved !== file.absolute || !resolved.startsWith(`${root}/`)) throw new PathEscapeError("打包路径已改变");
+    const handle = await open(file.absolute, READ_FLAGS | constants.O_NONBLOCK);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile() || info.ino !== file.ino || info.dev !== file.dev || info.size !== file.size) {
+        throw Object.assign(new Error("打包文件已改变"), { statusCode: 400 });
+      }
+      yield header;
+      let at = 0;
+      while (at < file.size) {
+        const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, file.size - at));
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, at);
+        if (bytesRead === 0) throw Object.assign(new Error("打包文件已改变"), { statusCode: 400 });
+        at += bytesRead;
+        yield bytesRead === chunk.length ? chunk : chunk.subarray(0, bytesRead);
+      }
+    } finally {
+      await handle.close();
+    }
+    const pad = (512 - (file.size % 512)) % 512;
+    if (pad !== 0) yield Buffer.alloc(pad);
+  }
+  yield Buffer.alloc(1024);
 }
 
 export function fsFailure(error: unknown): { error: string; name: string; statusCode: number } {

@@ -12,6 +12,7 @@ import { eventRepository } from "../db/events.js";
 import type { AppDatabase } from "../db/index.js";
 import {
   appInstalls,
+  appPublishRequests,
   appPushTargets,
   appPushes,
   appVersions,
@@ -21,6 +22,7 @@ import {
   bots,
   machines,
   secrets,
+  users,
 } from "../db/schema.js";
 import { userRepository } from "../db/users.js";
 import { ulid } from "../id.js";
@@ -38,6 +40,8 @@ import {
   type ValidatedPackage,
 } from "./archive.js";
 import { ingestGit, ingestNpm } from "./ingest.js";
+import { requestAppPublish } from "./publish-request.js";
+import { decidePublishReview, listPublishReviews, publishReviewDetail, publishReviewFile } from "./publish-review.js";
 import { nextCron } from "../routines/cron.js";
 import { routineService } from "../routines/service.js";
 
@@ -173,6 +177,8 @@ export interface AdminCatalogEntry {
   id: string;
   name: string;
   source: string;
+  ownerUserId: string | null;
+  ownerName: string | null;
   visibility: "all" | "user" | "push" | "hidden";
   userIds: string[];
   versions: Array<{ id: string; version: string; status: string; recommended: boolean; sha256: string }>;
@@ -184,6 +190,8 @@ export interface UserCatalogEntry {
   source: string;
   visibility: "private" | "all" | "user";
   version: { id: string; version: string; recommended: boolean };
+  publisher: string | null;
+  privateVersions: Array<{ version: string; publishState: string; reason: string | null }>;
 }
 
 export interface InstallView {
@@ -379,6 +387,27 @@ export function createPrivateApp(deps: CatalogDeps, scope: UserScope, input: Pri
   });
 }
 
+export function withdrawPublishRequest(
+  deps: CatalogDeps,
+  userId: string,
+  requestId: string,
+): { id: string; state: "withdrawn" } {
+  const row = deps.db.select().from(appPublishRequests).where(eq(appPublishRequests.id, requestId)).get();
+  if (!row || row.requesterUserId !== userId) throw new CatalogRejected("找不到", 404);
+  const version = deps.db.select().from(appVersions).where(eq(appVersions.id, row.appVersionId)).get();
+  const app = version ? deps.db.select().from(apps).where(eq(apps.id, version.appId)).get() : undefined;
+  if (!app || app.source !== APP_SOURCE_USER || app.ownerUserId !== userId) throw new CatalogRejected("找不到", 404);
+  if (row.state !== "pending") throw new CatalogRejected("只能撤回待审批的申请", 409);
+  const decidedAt = nowIso(deps);
+  const result = deps.db
+    .update(appPublishRequests)
+    .set({ state: "withdrawn", decidedAt })
+    .where(and(eq(appPublishRequests.id, requestId), eq(appPublishRequests.state, "pending")))
+    .run();
+  if (result.changes !== 1) throw new CatalogRejected("只能撤回待审批的申请", 409);
+  return { id: requestId, state: "withdrawn" };
+}
+
 export function setVisibility(deps: CatalogDeps, scope: AdminScope, appId: string, spec: VisibilitySpec): void {
   assertAdmin(scope);
   const app = requireCatalogApp(deps.db, appId);
@@ -398,10 +427,11 @@ export function setVisibility(deps: CatalogDeps, scope: AdminScope, appId: strin
 
 export function recommendVersion(deps: CatalogDeps, scope: AdminScope, appId: string, versionId: string): void {
   assertAdmin(scope);
-  requireCatalogApp(deps.db, appId);
+  const app = requireExistingApp(deps.db, appId);
   deps.db.transaction(() => {
     const version = deps.db.select().from(appVersions).where(eq(appVersions.id, versionId)).get();
     if (!version || version.appId !== appId) throw new CatalogRejected("找不到", 404);
+    if (app.source === APP_SOURCE_USER && !approvedVersionIds(deps.db).has(versionId)) throw new CatalogRejected("找不到", 404);
     if (version.status !== VERSION_ACTIVE) throw new CatalogRejected("不能推荐已下架的版本", 409);
     deps.db.update(appVersions).set({ recommended: false }).where(eq(appVersions.appId, appId)).run();
     const result = deps.db
@@ -415,9 +445,10 @@ export function recommendVersion(deps: CatalogDeps, scope: AdminScope, appId: st
 
 export function retireVersion(deps: CatalogDeps, scope: AdminScope, appId: string, versionId: string): void {
   assertAdmin(scope);
-  requireCatalogApp(deps.db, appId);
+  const app = requireExistingApp(deps.db, appId);
   const version = deps.db.select().from(appVersions).where(eq(appVersions.id, versionId)).get();
   if (!version || version.appId !== appId) throw new CatalogRejected("找不到", 404);
+  if (app.source === APP_SOURCE_USER && !approvedVersionIds(deps.db).has(versionId)) throw new CatalogRejected("找不到", 404);
   deps.db.update(appVersions).set({ status: VERSION_RETIRED, recommended: false }).where(eq(appVersions.id, versionId)).run();
   audit(deps, scope.actorUserId, AUDIT_ACTIONS.appRetire, appId, { versionId });
 }
@@ -425,19 +456,25 @@ export function retireVersion(deps: CatalogDeps, scope: AdminScope, appId: strin
 export function listAdminCatalog(deps: CatalogDeps, scope: AdminScope): AdminCatalogEntry[] {
   assertAdmin(scope);
   const grouped = groupApps(deps.db);
+  const approved = approvedVersionIds(deps.db);
+  const names = new Map(deps.db.select({ id: users.id, name: users.name }).from(users).all().map((user) => [user.id, user.name]));
   const entries: AdminCatalogEntry[] = [];
   for (const item of grouped.values()) {
-    if (item.app.source === APP_SOURCE_USER) continue;
+    const userSource = item.app.source === APP_SOURCE_USER;
+    const versions = userSource ? item.versions.filter((version) => approved.has(version.id)) : item.versions;
+    if (userSource && versions.length === 0) continue;
     const mode = adminVisibility(item.visibility);
     entries.push({
       id: item.app.id,
       name: item.app.name,
       source: item.app.source,
+      ownerUserId: item.app.ownerUserId,
+      ownerName: item.app.ownerUserId ? names.get(item.app.ownerUserId) ?? null : null,
       visibility: mode,
       userIds: item.visibility.flatMap((row) =>
         row.scope === "user" && row.userId && row.userId !== VISIBILITY_SENTINEL ? [row.userId] : [],
       ),
-      versions: item.versions
+      versions: versions
         .slice()
         .sort(newest)
         .map((version) => ({
@@ -454,18 +491,28 @@ export function listAdminCatalog(deps: CatalogDeps, scope: AdminScope): AdminCat
 }
 
 export function listUserCatalog(deps: CatalogDeps, userId: string): UserCatalogEntry[] {
+  const approved = approvedVersionIds(deps.db);
+  const names = ownerNames(deps.db);
+  const requests = deps.db.select().from(appPublishRequests).all();
   const entries: UserCatalogEntry[] = [];
   for (const item of groupApps(deps.db).values()) {
-    const visibility = visibilityFor(item.app, item.visibility, userId);
+    const versions = selectableVersions(item, userId, approved);
+    if (!versions) continue;
+    const visibility = item.app.source === APP_SOURCE_USER
+      ? item.app.ownerUserId === userId ? "private" as const : "all" as const
+      : visibilityFor(item.app, item.visibility, userId);
     if (visibility !== "private" && visibility !== "all" && visibility !== "user") continue;
-    const version = preferredActive(item.versions);
+    const version = preferredActive(versions);
     if (!version) continue;
+    const ownerView = item.app.source === APP_SOURCE_USER && item.app.ownerUserId === userId;
     entries.push({
       id: item.app.id,
       name: item.app.name,
       source: item.app.source,
       visibility,
       version: { id: version.id, version: version.version, recommended: version.recommended },
+      publisher: item.app.source === APP_SOURCE_USER && !ownerView ? names.get(item.app.ownerUserId ?? "") ?? null : null,
+      privateVersions: ownerView ? versionStates(item.versions, requests) : [],
     });
   }
   entries.sort((left, right) => left.name.localeCompare(right.name));
@@ -480,18 +527,21 @@ export interface AppSearchHit {
   mcpServers: Array<{ name: string; type: string; command?: string; args?: string[]; url?: string }>;
   config: Array<{ key: string; description: string; secret: boolean }>;
   riskyTools: string[];
+  publisher?: string;
+  publishVersions?: Array<{ version: string; publishState: string; reason: string | null }>;
 }
 
 /** 精确名称。别人的私有应用返回 undefined。 */
 export function findVisibleApp(deps: CatalogDeps, userId: string, name: string, selectedVersion?: string): {
   version: string; versions: string[]; config: AppSearchHit["config"]; mcpServers: AppSearchHit["mcpServers"]; riskyTools: string[]; runsInstallScript: boolean;
 } | undefined {
+  const approved = approvedVersionIds(deps.db);
   for (const item of groupApps(deps.db).values()) {
     if (item.app.name !== name) continue;
-    const visibility = visibilityFor(item.app, item.visibility, userId);
-    if (visibility !== "private" && visibility !== "all" && visibility !== "user") return undefined;
-    const active = item.versions.filter((version) => version.status === VERSION_ACTIVE);
-    const preferred = selectedVersion ? active.find((item) => item.version === selectedVersion) : preferredActive(item.versions);
+    const versions = selectableVersions(item, userId, approved);
+    if (!versions) return undefined;
+    const active = versions.filter((version) => version.status === VERSION_ACTIVE);
+    const preferred = selectedVersion ? active.find((version) => version.version === selectedVersion) : preferredActive(versions);
     if (!preferred) return undefined;
     const declared = readManifestConfig(preferred.manifestJson);
     return {
@@ -514,10 +564,13 @@ export function searchApps(deps: CatalogDeps, userId: string, query: string): Ap
       .map((item) => item.app.name),
   );
   const hits: AppSearchHit[] = [];
+  const approved = approvedVersionIds(deps.db);
+  const names = ownerNames(deps.db);
+  const requests = deps.db.select().from(appPublishRequests).all();
   for (const item of groupApps(deps.db).values()) {
-    const visibility = visibilityFor(item.app, item.visibility, userId);
-    if (visibility !== "private" && visibility !== "all" && visibility !== "user") continue;
-    const version = preferredActive(item.versions);
+    const versions = selectableVersions(item, userId, approved);
+    if (!versions) continue;
+    const version = preferredActive(versions);
     if (!version) continue;
     const description = manifestDescription(version.manifestJson);
     const declared = readManifestConfig(version.manifestJson);
@@ -540,6 +593,12 @@ export function searchApps(deps: CatalogDeps, userId: string, query: string): Ap
       mcpServers,
       config,
       riskyTools,
+      ...(item.app.source === APP_SOURCE_USER && item.app.ownerUserId !== userId && names.get(item.app.ownerUserId ?? "")
+        ? { publisher: names.get(item.app.ownerUserId ?? "") as string }
+        : {}),
+      ...(item.app.source === APP_SOURCE_USER && item.app.ownerUserId === userId
+        ? { publishVersions: versionStates(item.versions, requests) }
+        : {}),
     });
     if (hits.length >= 40) break;
   }
@@ -664,6 +723,7 @@ export async function updateInstallConfig(
 ): Promise<InstallView> {
   const owned = findOwnedInstall(deps.db, userId, installId);
   if (!owned) throw new CatalogRejected("找不到", 404);
+  if (!canReceivePackage(deps.db, userId, owned.version.id)) throw new CatalogRejected("找不到", 404);
   storeConfig(deps, userId, installId, owned.version.manifestJson, config);
   if (owned.install.desired !== DESIRED_PRESENT) return mustInstallView(deps.db, installId);
   await runLocked(installId, "follow", async () => {
@@ -832,6 +892,7 @@ export async function reconcileMachineApps(deps: CatalogDeps, machineId: string)
   const failedIds: string[] = [];
   for (const row of rows) {
     if (row.desired !== DESIRED_PRESENT) continue;
+    if (!canReceivePackage(deps.db, machine.userId, row.versionId)) continue;
     installIds.push(row.installId);
     markInstall(deps, row.installId, "installing", null, DESIRED_PRESENT);
     try {
@@ -1146,6 +1207,68 @@ export function registerCatalogRoutes(app: FastifyInstance, deps: CatalogDeps): 
     }
   });
 
+  app.post<{ Params: { name: string } }>("/api/apps/:name/publish", async (request, reply) => {
+    const user = sessionUser(request);
+    if (!user) return reply.code(401).send({ error: "未登录" });
+    const body = asRecord(request.body);
+    if (typeof body.version !== "string" || typeof body.note !== "string") return reply.code(400).send({ error: "发布说明不合法" });
+    try {
+      const created = requestAppPublish(deps, user.id, { name: request.params.name, version: body.version, note: body.note });
+      return reply.code(201).send(created);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get("/api/admin/app-reviews", async (request, reply) => {
+    const scope = adminActor(request);
+    if (!scope) return reply.code(404).send({ error: "找不到" });
+    return listPublishReviews(deps, scope);
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>("/api/admin/app-reviews/:id/files", async (request, reply) => {
+    const scope = adminActor(request);
+    if (!scope) return reply.code(404).send({ error: "找不到" });
+    if (typeof request.query.path !== "string") return reply.code(400).send({ error: "找不到文件" });
+    try {
+      return publishReviewFile(deps, scope, request.params.id, request.query.path);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/admin/app-reviews/:id", async (request, reply) => {
+    const scope = adminActor(request);
+    if (!scope) return reply.code(404).send({ error: "找不到" });
+    try {
+      return publishReviewDetail(deps, scope, request.params.id);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/admin/app-reviews/:id/approve", async (request, reply) => {
+    const scope = adminActor(request);
+    if (!scope) return reply.code(404).send({ error: "找不到" });
+    try {
+      return decidePublishReview(deps, scope, request.params.id, { decision: "approve" });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/admin/app-reviews/:id/reject", async (request, reply) => {
+    const scope = adminActor(request);
+    if (!scope) return reply.code(404).send({ error: "找不到" });
+    const body = asRecord(request.body);
+    if (typeof body.reason !== "string") return reply.code(400).send({ error: "驳回原因不能为空" });
+    try {
+      return decidePublishReview(deps, scope, request.params.id, { decision: "reject", reason: body.reason });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
   app.get("/api/admin/apps", async (request, reply) => {
     const scope = adminActor(request);
     if (!scope) return reply.code(404).send({ error: "找不到" });
@@ -1354,6 +1477,7 @@ async function performInstall(deps: CatalogDeps, input: {
   archivePath: string;
   signal?: AbortSignal;
 }): Promise<void> {
+  if (!canReceivePackage(deps.db, input.userId, input.versionId)) throw new CatalogRejected("找不到", 404);
   try {
     materializeInjection(deps, input.userId, input.installId);
   } catch {
@@ -1670,9 +1794,9 @@ function resolveForUser(db: AppDatabase, userId: string, name: string): { app: A
   const grouped = groupApps(db);
   const item = [...grouped.values()].find((entry) => entry.app.name === name);
   if (!item) throw new CatalogRejected("找不到", 404);
-  const visibility = visibilityFor(item.app, item.visibility, userId);
-  if (visibility !== "private" && visibility !== "all" && visibility !== "user") throw new CatalogRejected("找不到", 404);
-  return item;
+  const versions = selectableVersions(item, userId, approvedVersionIds(db));
+  if (!versions) throw new CatalogRejected("找不到", 404);
+  return { app: item.app, versions };
 }
 
 function pickVersion(versions: VersionRow[], requested: string | undefined): VersionRow {
@@ -1707,6 +1831,80 @@ function groupApps(db: AppDatabase): Map<string, { app: AppRow; versions: Versio
   return map;
 }
 
+function approvedVersionIds(db: AppDatabase): Set<string> {
+  const rows = db
+    .select({ id: appPublishRequests.appVersionId })
+    .from(appPublishRequests)
+    .where(eq(appPublishRequests.state, "approved"))
+    .all();
+  return new Set(rows.map((row) => row.id));
+}
+
+function ownerNames(db: AppDatabase): Map<string, string> {
+  return new Map(db.select({ id: users.id, name: users.name }).from(users).all().map((user) => [user.id, user.name]));
+}
+
+function versionStates(
+  versions: VersionRow[],
+  requests: Array<{ appVersionId: string; state: string; reason: string | null; createdAt: string }>,
+): Array<{ version: string; publishState: string; reason: string | null }> {
+  return versions
+    .filter((version) => version.status === VERSION_ACTIVE)
+    .slice()
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .map((version) => {
+      const rows = requests.filter((request) => request.appVersionId === version.id);
+      if (rows.some((request) => request.state === "pending")) return { version: version.version, publishState: "待审批", reason: null };
+      if (rows.some((request) => request.state === "approved")) return { version: version.version, publishState: "已公开", reason: null };
+      const rejected = rows.filter((request) => request.state === "rejected").sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+      if (rejected) return { version: version.version, publishState: "已驳回", reason: rejected.reason };
+      if (rows.some((request) => request.state === "withdrawn")) return { version: version.version, publishState: "已撤回", reason: null };
+      return { version: version.version, publishState: "私有", reason: null };
+    });
+}
+
+function selectableVersions(
+  item: { app: AppRow; versions: VersionRow[]; visibility: VisibilityRow[] },
+  userId: string,
+  approved: ReadonlySet<string>,
+): VersionRow[] | undefined {
+  if (item.app.source === APP_SOURCE_USER) {
+    if (item.app.ownerUserId === userId) return item.versions;
+    const visible = item.versions.filter((version) => version.status === VERSION_ACTIVE && approved.has(version.id));
+    return visible.length > 0 ? visible : undefined;
+  }
+  const visibility = visibilityFor(item.app, item.visibility, userId);
+  if (visibility !== "private" && visibility !== "all" && visibility !== "user") return undefined;
+  return item.versions;
+}
+
+/** 非所有者只能拿到已批准且仍上架的版本。已经装上的已批准版本在下架后仍可对账，和目录应用的下架一样。 */
+function canReceivePackage(db: AppDatabase, userId: string, versionId: string): boolean {
+  const row = db
+    .select({ source: apps.source, ownerUserId: apps.ownerUserId, status: appVersions.status })
+    .from(appVersions)
+    .innerJoin(apps, eq(apps.id, appVersions.appId))
+    .where(eq(appVersions.id, versionId))
+    .get();
+  if (!row) return false;
+  if (row.source !== APP_SOURCE_USER || row.ownerUserId === userId) return true;
+  const approved = db
+    .select({ id: appPublishRequests.id })
+    .from(appPublishRequests)
+    .where(and(eq(appPublishRequests.appVersionId, versionId), eq(appPublishRequests.state, "approved")))
+    .get();
+  if (!approved) return false;
+  if (row.status === VERSION_ACTIVE) return true;
+  const machine = findLiveMachine(db, userId);
+  if (!machine) return false;
+  const install = db
+    .select({ desired: appInstalls.desired })
+    .from(appInstalls)
+    .where(and(eq(appInstalls.machineId, machine.id), eq(appInstalls.appVersionId, versionId)))
+    .get();
+  return install?.desired === DESIRED_PRESENT;
+}
+
 function visibilityFor(app: AppRow, rows: VisibilityRow[], userId: string): "private" | "all" | "user" | "push" | "hidden" {
   if (app.source === APP_SOURCE_USER) return app.ownerUserId === userId ? "private" : "hidden";
   if (rows.some((row) => row.scope === "all")) return "all";
@@ -1725,6 +1923,12 @@ function adminVisibility(rows: VisibilityRow[]): "all" | "user" | "push" | "hidd
 function requireCatalogApp(db: AppDatabase, appId: string): AppRow {
   const app = db.select().from(apps).where(eq(apps.id, appId)).get();
   if (!app || app.source === APP_SOURCE_USER) throw new CatalogRejected("找不到", 404);
+  return app;
+}
+
+function requireExistingApp(db: AppDatabase, appId: string): AppRow {
+  const app = db.select().from(apps).where(eq(apps.id, appId)).get();
+  if (!app) throw new CatalogRejected("找不到", 404);
   return app;
 }
 

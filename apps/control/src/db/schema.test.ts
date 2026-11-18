@@ -32,6 +32,31 @@ afterEach(() => {
 });
 
 describe("schema migration", () => {
+  it("preserves private versions and pending reviews across migration restart", () => {
+    const dir = mkdtempSync(join(tmpdir(), "vb-db-"));
+    dirs.push(dir);
+    const path = join(dir, "restart.sqlite");
+    const migrationsFolder = fileURLToPath(new URL("../../drizzle", import.meta.url));
+    const db = openDatabase(path);
+    migrate(db, { migrationsFolder });
+    db.$client.exec(`insert into users(id,email,name,status,created_at) values ('owner','o@example.com','Owner','active','now');
+      insert into apps(id,name,source,owner_user_id,created_at) values ('private','notes','user','owner','now');
+      insert into app_versions(id,app_id,version,manifest_json,archive_path,sha256,status,created_at) values ('version','private','1.0.0','{}','/tmp/notes.tar.zst','hash','active','now');
+      insert into app_publish_requests(id,app_version_id,requester_user_id,note,state,created_at) values ('request','version','owner','please publish','pending','now');`);
+    db.$client.close();
+    const reopened = openDatabase(path);
+    try {
+      migrate(reopened, { migrationsFolder });
+      migrate(reopened, { migrationsFolder });
+      expect(reopened.$client.prepare(`select a.source,a.owner_user_id,v.version,v.sha256,r.state,r.note
+        from apps a join app_versions v on v.app_id=a.id join app_publish_requests r on r.app_version_id=v.id`).get()).toEqual({
+        source: "user", owner_user_id: "owner", version: "1.0.0", sha256: "hash", state: "pending", note: "please publish",
+      });
+    } finally {
+      reopened.$client.close();
+    }
+  });
+
   it("upgrades existing user and quota rows with detail off and budget inheritance without changing routine quota", () => {
     const sqlite = new Database(":memory:");
     for (const name of ["0000_init.sql", "0001_session_validation.sql", "0002_memories_fts.sql", "0003_conversation_summary.sql", "0004_m2.sql", "0005_routine_punctuality.sql", "0006_bot_install.sql"]) applyMigration(sqlite, name);
@@ -59,6 +84,7 @@ describe("schema migration", () => {
       "app_installs",
       "app_push_targets",
       "app_pushes",
+      "app_publish_requests",
       "app_versions",
       "app_visibility",
       "apps",
@@ -157,6 +183,27 @@ describe("schema migration", () => {
     insertHashed.run("s4", "user-1", "hash-b", "c", "enc", now, now, now, now);
     expect(() => insertHashed.run("s5", "user-1", "hash-a", "c", "enc", now, now, now, now)).toThrow(/UNIQUE/);
     sqlite.close();
+  });
+
+  it("creates app_publish_requests for per-version publish review", () => {
+    const dir = mkdtempSync(join(tmpdir(), "vb-db-"));
+    dirs.push(dir);
+    const db = openDatabase(join(dir, "viate-bot.sqlite"));
+    migrate(db, { migrationsFolder: fileURLToPath(new URL("../../drizzle", import.meta.url)) });
+    expect(columnNames(db, "app_publish_requests")).toEqual([
+      "id",
+      "app_version_id",
+      "requester_user_id",
+      "bot_id",
+      "task_id",
+      "note",
+      "state",
+      "reason",
+      "reviewer_user_id",
+      "created_at",
+      "decided_at",
+    ]);
+    db.$client.close();
   });
 });
 

@@ -1,11 +1,12 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { createInterface } from "node:readline";
-import type { Readable, Writable } from "node:stream";
+import { PassThrough, type Readable, type Writable } from "node:stream";
 import type { FsEntry, FsSearchHit } from "@viate-bot/protocol";
 import {
   deleteConfined,
   fsFailure,
   listConfined,
+  packConfined,
   readConfined,
   readRaw,
   searchConfined,
@@ -58,6 +59,7 @@ export interface FsClient {
   readFile(path: string): Promise<Buffer>;
   writeFile(path: string, data: Buffer): Promise<FsWriteResult>;
   delete(path: string): Promise<{ path: string }>;
+  pack(path: string): Promise<Readable>;
 }
 
 /** root 时把文件操作交给降权子进程；测试和非 root 进程就地执行。 */
@@ -88,6 +90,9 @@ class LocalFs implements FsClient {
   }
   delete(path: string): Promise<{ path: string }> {
     return settle(deleteConfined(path));
+  }
+  pack(path: string): Promise<Readable> {
+    return settle(packConfined(path));
   }
 }
 
@@ -165,6 +170,41 @@ class WorkerFs implements FsClient {
     return this.call({ op: "delete", path }).then((response) => {
       if (!response.delete) throw new Error("fs worker 没有返回删除结果");
       return response.delete;
+    });
+  }
+
+  pack(path: string): Promise<Readable> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [WORKER_BIN, "--pack", path], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+          HOME: "/home/bot",
+          USER: "bot",
+          LOGNAME: "bot",
+          LANG: "C.UTF-8",
+        },
+      });
+      const out = new PassThrough({ highWaterMark: 64 * 1024 });
+      let errorText = "";
+      let delivered = false;
+      child.stdout.pipe(out, { end: false });
+      out.once("readable", () => { delivered = true; resolve(out); });
+      out.once("close", () => { if (child.exitCode === null) child.kill(); });
+      child.stderr.on("data", (chunk: Buffer) => { errorText = (errorText + chunk.toString("utf8")).slice(0, 4096); });
+      const fail = (error: Error) => {
+        if (delivered) out.destroy(error);
+        else { out.destroy(); reject(error); }
+      };
+      child.on("error", fail);
+      child.on("close", (code) => {
+        if (code === 0) {
+          if (!delivered) { delivered = true; resolve(out); }
+          out.end();
+          return;
+        }
+        fail(Object.assign(new Error(errorText.trim() || "打包失败"), { statusCode: 400 }));
+      });
     });
   }
 

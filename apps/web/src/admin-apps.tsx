@@ -63,7 +63,7 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
     queryKey: ["admin-apps"],
     queryFn: async () => {
       const body = await api<{ apps: AdminCatalogEntry[] }>(appApi.adminApps);
-      return { apps: Array.isArray(body.apps) ? body.apps.filter((app) => app.source !== "user") : [] };
+      return { apps: Array.isArray(body.apps) ? body.apps : [] };
     },
   });
   const users = useQuery({
@@ -246,7 +246,7 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
                           onClick={() => requestSelect(app.id)}
                         >
                           <span className="block break-all font-medium">{app.name}</span>
-                          <span className="mt-1 block text-sm text-neutral-400">{visibilityText(app.visibility)} · {app.versions.length} 个版本</span>
+                          <span className="mt-1 block text-sm text-neutral-400">{app.source === "user" ? `用户来源 · 所有者 ${app.ownerName ?? "未知"}` : visibilityText(app.visibility)} · {app.versions.length} 个版本</span>
                         </button>
                       </li>
                     ))}
@@ -428,7 +428,7 @@ function AppEditor({
       <div>
         <button className={`${appGhostClass} mb-3 lg:hidden`} type="button" onClick={onClose}>返回</button>
         <h2 ref={headingRef} tabIndex={-1} className="break-all text-xl font-semibold outline-none">{app.name}</h2>
-        <p className="mt-1 text-sm text-neutral-400">{visibilityText(app.visibility)}{dirty ? " · 未保存" : ""}</p>
+        <p className="mt-1 text-sm text-neutral-400" data-testid={app.source === "user" ? "admin-user-source" : undefined}>{app.source === "user" ? `用户来源 · 所有者 ${app.ownerName ?? "未知"}` : `${visibilityText(app.visibility)}${dirty ? " · 未保存" : ""}`}</p>
       </div>
       <section className="grid gap-3" aria-label="版本">
         <h3 className="font-medium">版本</h3>
@@ -461,7 +461,7 @@ function AppEditor({
           </div>
         ))}
       </section>
-      <section className="grid gap-3" aria-label="可见范围">
+      {app.source === "user" ? null : <section className="grid gap-3" aria-label="可见范围">
         <h3 className="font-medium">可见范围</h3>
         <div role="group" aria-label="可见范围选项" className="flex flex-wrap gap-2">
           {([
@@ -488,8 +488,8 @@ function AppEditor({
         <button className={appButtonClass} data-testid="admin-visibility-save" type="button" disabled={pending !== null || scope === "" || !visibilityDirty} onClick={() => void saveVisibility()}>
           {pending === "visibility" ? "正在保存…" : "保存可见范围"}
         </button>
-      </section>
-      <section className="grid gap-3" aria-label="推送">
+      </section>}
+      {app.source === "user" ? null : <section className="grid gap-3" aria-label="推送">
         <h3 className="font-medium">推送到机器</h3>
         {active.length === 0 ? <p className="text-sm text-neutral-400">没有可推送的版本。</p> : (
           <label className="grid gap-1 text-sm">
@@ -514,7 +514,7 @@ function AppEditor({
         <button className={appButtonClass} data-testid="admin-push" type="button" disabled={pending !== null || !versionId || targets.length === 0} onClick={() => void sendPush()}>
           {pending === "push" ? "正在提交…" : "开始推送"}
         </button>
-      </section>
+      </section>}
       {error ? <p role="alert" className="break-words text-sm text-red-300">出错：{error}</p> : null}
       {message ? <p role="status" className="text-sm text-emerald-300">{message}</p> : null}
       <PushProgressList pushes={pushes} users={users} apps={[app]} onForget={onForget} />

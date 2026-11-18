@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRootRoute, createRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { AdminApps } from "./admin-apps.js";
+import { AdminReviews } from "./admin-reviews.js";
 import { AdminLayout, AdminMachines, AdminSettings, AdminTemplates, AdminUsers } from "./admin.js";
 import { AppsPage } from "./apps-page.js";
 import { AdminAudit, AdminMetrics } from "./admin-metrics.js";
@@ -94,6 +95,12 @@ const adminAppsRoute = createRoute({
   component: AdminApps,
 });
 
+const adminReviewsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "app-reviews",
+  component: AdminReviews,
+});
+
 export const routeTree = rootRoute.addChildren([
   indexRoute,
   chatRoute,
@@ -107,6 +114,7 @@ export const routeTree = rootRoute.addChildren([
     adminMetricsRoute,
     adminAuditRoute,
     adminAppsRoute,
+    adminReviewsRoute,
   ]),
 ]);
 

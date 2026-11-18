@@ -13,7 +13,7 @@ import { proposalError } from "./propose-tool.js";
 import { ruleMatches } from "./rules.js";
 
 interface ApprovalRow {
-  id: string; task_id: string; tool: string; args_json: string; args_hash: string;
+  id: string; task_id: string; tool: string; summary: string; args_json: string; args_hash: string;
   state: string; user_id: string; bot_id: string;
 }
 
@@ -106,7 +106,7 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
       if (name === "propose_approval_rule") {
         const problem = proposalError(context.args);
         if (problem) return { block: true, reason: problem };
-      } else if (settings.approveNone) {
+      } else if (settings.approveNone && name !== "request_app_publish") {
         const gated = name === "update_bot_profile" ? profileNeedsApproval(context.args) : Boolean(category);
         if (gated) {
           auditRepository(options.db).write(adminScope(bot.user_id), "approval.skip_all", bot.id, { note: "全部免审批", taskId, tool: name });
@@ -189,6 +189,15 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
         return { block: true, reason: "用户正在接管，已拒绝执行" };
       }
       if (state === "allowed" && !signal?.aborted) {
+        if (name === "request_app_publish" && options.summarize) {
+          try {
+            if (options.summarize(taskId, name, currentArgs) !== row(approvalId)?.summary) {
+              return { block: true, reason: "批准后的应用包已改变，请重新申请" };
+            }
+          } catch {
+            return { block: true, reason: "无法校验批准的应用包，请重新申请" };
+          }
+        }
         const consumed = db.prepare("update approvals set consumed_at=? where id=? and state='allowed' and consumed_at is null and args_hash=?")
           .run(new Date().toISOString(), approvalId, hash).changes;
         if (consumed) return undefined;
@@ -199,7 +208,7 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
     } };
   }
   function autoRule(taskId: string, botId: string, userId: string, tool: string, args: unknown, category: ReturnType<typeof approvalClass>): boolean {
-    if (tool === "install_mcp" || tool === "update_bot_profile" || tool === "bulk_delete_action" || tool === "propose_approval_rule") return false;
+    if (tool === "install_mcp" || tool === "request_app_publish" || tool === "update_bot_profile" || tool === "bulk_delete_action" || tool === "propose_approval_rule") return false;
     if (category !== "browser" && category !== "shell" && category !== "fs_write" && category !== "mcp") return false;
     if (category === "browser" && tool !== "browser_open") return false;
     const rules = approvalRuleRepository(options.db).active(userScope(userId), botId);

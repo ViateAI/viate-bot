@@ -56,6 +56,8 @@ import { maskDeep, maskSecrets } from "./text.js";
 import { appendMcpTools, MachinedMcpClient, mcpFailureCategory } from "./mcp-client.js";
 import { describeInstall, installMcpBlock, installMcpTool, scrubInstallPlaintext, searchAppsTool, type InstallMcpBinding } from "./app-tools.js";
 import { installsForModelContext, privateSkillStorage, resolveMcpLaunch, type CatalogDeps, type CatalogInstaller } from "../apps/catalog.js";
+import { packageAppTool } from "../apps/package-app.js";
+import { describePublish, requestAppPublishTool } from "../apps/publish-request.js";
 import { markRemoteUncertain, remoteUncertain } from "./remote-uncertain.js";
 import { skillHttpMachine, skillPrompt, skillTools } from "./skill-tools.js";
 import { machineTools } from "./tools.js";
@@ -444,11 +446,15 @@ export function createChatService(deps: ChatServiceDeps) {
         if (!current) return tool;
         return profileSummary({ ...current, enabledAppIds: installsForModelContext(catalogDeps(deps), current.userId, current.botId).map((app) => app.installId) }, args);
       }
-      if (tool !== "install_mcp") return tool;
+      if (tool !== "install_mcp" && tool !== "request_app_publish") return tool;
       const owner = deps.db.$client.prepare(
         "select b.user_id as userId from tasks t join bots b on b.id=t.bot_id where t.id=?",
       ).get(taskId) as { userId: string } | undefined;
       if (!owner) return tool;
+      if (tool === "request_app_publish") {
+        const published = describePublish(catalogDeps(deps), owner.userId, args);
+        return published ? JSON.stringify(published) : tool;
+      }
       const card = describeInstall(catalogDeps(deps), owner.userId, args);
       return card ? JSON.stringify(card) : tool;
     },
@@ -977,7 +983,19 @@ export function createChatService(deps: ChatServiceDeps) {
         ...(deps.config.visionModels.includes(bot.model) ? [browserScreenshotTool(bound)] : []),
         secretTool,
         searchAppsTool(catalog, live.userId),
+        packageAppTool({
+          userId: live.userId,
+          catalog,
+          client: files,
+          secrets: () => broker.known(live.userId, live.id).map((item) => item.value),
+        }),
         installMcpTool(installBinding),
+        requestAppPublishTool({
+          userId: live.userId,
+          botId: bot.id,
+          taskId: live.id,
+          catalog,
+        }),
         ...skillTools({
           ownerUserId: live.userId,
           machine: skillMachine,

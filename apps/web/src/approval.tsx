@@ -21,6 +21,19 @@ interface InstallCard {
   runsInstallScript: boolean;
 }
 
+interface PublishCard {
+  kind: "app_publish";
+  name: string;
+  version: string;
+  sha256: string;
+  kinds: string[];
+  files: number;
+  command: string;
+  routines: number;
+  note: string;
+  warning: string;
+}
+
 export function ApprovalList({ taskId }: { taskId?: string }) {
   const client = useQueryClient();
   const approvals = useQuery({ queryKey: ["approvals"], queryFn: () => api<{ approvals: Approval[] }>("/api/approvals"), refetchInterval: 3000 });
@@ -38,12 +51,12 @@ export function ApprovalList({ taskId }: { taskId?: string }) {
     {approvals.isPending ? <p className="text-sm text-neutral-400">正在加载待批准操作…</p> : null}
     {approvals.data && items.length === 0 ? <p>{taskId ? "这条任务没有待批准操作" : "没有待批准操作"}</p> : null}
     {items.map((item) => <article key={item.id} className="grid min-w-0 gap-3 rounded-2xl border border-neutral-300 bg-white p-4" data-testid="approval-item">
-      {item.tool === "install_mcp" ? <InstallApproval item={item} /> : item.tool === "update_bot_profile" ? <ProfileApproval item={item} /> : item.tool === "propose_approval_rule" ? <RuleProposal item={item} /> : <>
+      {item.tool === "install_mcp" ? <InstallApproval item={item} /> : item.tool === "request_app_publish" ? <PublishApproval item={item} /> : item.tool === "update_bot_profile" ? <ProfileApproval item={item} /> : item.tool === "propose_approval_rule" ? <RuleProposal item={item} /> : <>
         <h3 className="font-medium">{item.tool}</h3>
         <pre className="overflow-auto whitespace-pre-wrap break-all">{JSON.stringify(item.args, null, 2)}</pre>
       </>}
       <div className="flex gap-2">
-        <button className="rounded-full bg-neutral-900 px-3 py-2 text-white disabled:opacity-50" disabled={decide.isPending || (item.tool === "install_mcp" && !installCard(item.summary))} data-testid={`allow-approval-${item.id}`} onClick={() => decide.mutate({ id: item.id, decision: "allow" })}>允许</button>
+        <button className="rounded-full bg-neutral-900 px-3 py-2 text-white disabled:opacity-50" disabled={decide.isPending || (item.tool === "install_mcp" && !installCard(item.summary)) || (item.tool === "request_app_publish" && !publishCard(item.summary))} data-testid={`allow-approval-${item.id}`} onClick={() => decide.mutate({ id: item.id, decision: "allow" })}>允许</button>
         <button className="rounded-full border border-neutral-400 px-3 py-2 disabled:opacity-50" disabled={decide.isPending} data-testid={`deny-approval-${item.id}`} onClick={() => decide.mutate({ id: item.id, decision: "deny" })}>拒绝</button>
         {canRemember(item.tool) ? <RememberRule id={item.id} /> : null}
       </div>
@@ -93,6 +106,53 @@ function installCard(summary: string | undefined): InstallCard | undefined {
       reason: parsed.reason,
       riskyTools: parsed.riskyTools.filter((name): name is string => typeof name === "string"),
       runsInstallScript: parsed.runsInstallScript === true,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function PublishApproval({ item }: { item: Approval }) {
+  const card = publishCard(item.summary);
+  if (!card) {
+    return <>
+      <h3 className="font-medium">申请公开应用</h3>
+      <p className="text-sm" role="alert">发布详情不完整，不能批准。请拒绝后重新申请。</p>
+    </>;
+  }
+  return <div data-testid="publish-approval">
+    <h3 className="font-medium">申请公开应用</h3>
+    <p className="break-all text-sm">{card.name} {card.version}</p>
+    <p className="break-all text-sm">SHA-256 {card.sha256}</p>
+    <p className="break-all text-sm">类型：{card.kinds.join("、") || "未识别"}</p>
+    <p className="text-sm">文件数：{card.files}</p>
+    <p className="whitespace-pre-wrap break-all text-sm">MCP：{card.command}</p>
+    <p className="text-sm">定时任务：{card.routines}</p>
+    <p className="whitespace-pre-wrap break-all text-sm">说明：{card.note}</p>
+    <p className="text-sm font-medium">{card.warning}</p>
+  </div>;
+}
+
+function publishCard(summary: string | undefined): PublishCard | undefined {
+  if (!summary) return undefined;
+  try {
+    const parsed = JSON.parse(summary) as Partial<PublishCard>;
+    if (parsed.kind !== "app_publish") return undefined;
+    if (typeof parsed.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(parsed.sha256)) return undefined;
+    if (typeof parsed.name !== "string" || typeof parsed.version !== "string" || typeof parsed.command !== "string" || typeof parsed.note !== "string" || typeof parsed.warning !== "string") return undefined;
+    if (!parsed.warning.includes("批准后会提交给管理员") || !parsed.warning.includes("所有用户可见可安装")) return undefined;
+    if (typeof parsed.files !== "number" || typeof parsed.routines !== "number" || !Array.isArray(parsed.kinds)) return undefined;
+    return {
+      kind: "app_publish",
+      name: parsed.name,
+      version: parsed.version,
+      sha256: parsed.sha256,
+      kinds: parsed.kinds.filter((item): item is string => typeof item === "string"),
+      files: parsed.files,
+      command: parsed.command,
+      routines: parsed.routines,
+      note: parsed.note,
+      warning: parsed.warning,
     };
   } catch {
     return undefined;

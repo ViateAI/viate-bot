@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { readQuotaForm } from "./quota-input.js";
 import { Link, Outlet } from "@tanstack/react-router";
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { api, type Me } from "./api.js";
 
 interface AdminUser {
@@ -59,6 +59,12 @@ export function AdminLayout() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<Me>("/api/me") });
   if (me.isPending) return <p className="px-6 py-10 text-neutral-400">正在确认登录…</p>;
   if (!me.data?.isAdmin) return <p data-testid="not-found" className="px-6 py-10">404 页面不存在</p>;
+  return <AdminShell />;
+}
+
+function AdminShell() {
+  const reviews = useQuery({ queryKey: ["admin-app-reviews"], queryFn: () => api<{ pendingCount: number }>("/api/admin/app-reviews") });
+  const pending = reviews.data?.pendingCount ?? 0;
   return (
     <section>
       <nav className="flex gap-1 border-b border-neutral-800 px-4 text-sm" aria-label="管理">
@@ -69,13 +75,16 @@ export function AdminLayout() {
         <AdminTab to="/admin/metrics" testId="admin-metrics-link">看板</AdminTab>
         <AdminTab to="/admin/audit" testId="admin-audit-link">审计</AdminTab>
         <AdminTab to="/admin/apps" testId="admin-apps-link">应用</AdminTab>
+        <AdminTab to="/admin/app-reviews" testId="admin-reviews-link">
+          应用审批{pending > 0 ? <span data-testid="publish-review-badge"> {pending}</span> : null}
+        </AdminTab>
       </nav>
       <Outlet />
     </section>
   );
 }
 
-function AdminTab({ to, testId, children }: { to: "/admin" | "/admin/machines" | "/admin/templates" | "/admin/settings" | "/admin/metrics" | "/admin/audit" | "/admin/apps"; testId: string; children: string }) {
+function AdminTab({ to, testId, children }: { to: "/admin" | "/admin/machines" | "/admin/templates" | "/admin/settings" | "/admin/metrics" | "/admin/audit" | "/admin/apps" | "/admin/app-reviews"; testId: string; children: ReactNode }) {
   return (
     <Link
       to={to}

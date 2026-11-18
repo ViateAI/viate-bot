@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { parseSkillMarkdown } from "@viate-bot/protocol";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
@@ -16,6 +17,12 @@ const supportedPlaceholders = (s: string) => !/\$\{(?!PLUGIN_ROOT\}|PLUGIN_DATA\
 
 export interface PackageFile { path: string; data: Buffer; executable?: boolean }
 export interface ValidatedPackage { name: string; manifest: Record<string, unknown>; extension: Record<string, unknown>; skills: string[]; servers: Record<string, unknown>; warnings: string[]; files: PackageFile[]; archive: Buffer; sha256: string }
+
+export function readPackageFiles(archivePath: string, sha256: string): PackageFile[] {
+  const bytes = readFileSync(archivePath);
+  if (createHash("sha256").update(bytes).digest("hex") !== sha256) throw new Error("应用包校验失败");
+  return readTar(bytes);
+}
 
 function safePath(path: string): string {
   if (!path || path.includes("\\") || path.includes("\0") || path.startsWith("/") || /^[A-Za-z]:/.test(path)) throw new Error("Invalid archive path");

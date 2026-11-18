@@ -70,17 +70,19 @@ const ALWAYS: Record<string, true> = {
   risky_tool: true,
 };
 
-export type ApprovalCategory = AlwaysAllow | "app_install" | "bot_profile" | "rule_proposal";
+export type ApprovalCategory = AlwaysAllow | "app_install" | "app_publish" | "bot_profile" | "rule_proposal";
 
-/** app_install、bot_profile、rule_proposal 不是 alwaysAllow 的合法值。数组里即使有这些字符串也不跳过审批。 */
+/** app_install、app_publish、bot_profile、rule_proposal 不是 alwaysAllow 的合法值。数组里即使有这些字符串也不跳过审批。 */
 export function skipsApproval(category: ApprovalCategory | undefined, settings: BotRuntimeSettings): boolean {
   if (!category) return true;
-  if (category === "app_install" || category === "bot_profile" || category === "rule_proposal") return false;
+  if (category === "app_install" || category === "app_publish" || category === "bot_profile" || category === "rule_proposal") return false;
   return settings.alwaysAllow.includes(category);
 }
 
 export function approvalClass(name: string, risky?: ReadonlySet<string>): ApprovalCategory | undefined {
   if (name === "install_mcp") return "app_install";
+  if (name === "request_app_publish") return "app_publish";
+  if (name === "package_app") return undefined;
   if (name === "update_bot_profile") return "bot_profile";
   if (name === "propose_approval_rule") return "rule_proposal";
   if (READ_ONLY_TOOLS[name] || CONTROL_PLANE_TOOLS[name]) return undefined;

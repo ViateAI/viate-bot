@@ -31,6 +31,8 @@ const TOOL_LABELS: Record<string, string> = {
   install_mcp: "正在请求安装应用",
   propose_routine: "正在创建定时任务",
   search_apps: "正在搜索应用",
+  package_app: "正在打包应用",
+  request_app_publish: "正在申请公开应用",
   update_bot_profile: "正在修改资料",
   propose_approval_rule: "正在提议自动审批规则",
   bulk_delete_action: "正在删除文件",
