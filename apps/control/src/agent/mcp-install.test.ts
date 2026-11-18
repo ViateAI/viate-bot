@@ -207,10 +207,13 @@ describe("bot installs an MCP in the same task", () => {
 
   it("does not install after a denial, and app_install in alwaysAllow still prompts", async () => {
     const machine = await fakeMachine();
-    const started = await start(machine.port, () => namedToolSse("install_mcp", JSON.stringify({
+    const started = await start(machine.port, (body) => {
+      if (body.includes("用户拒绝安装")) return textSse("好的，不装了");
+      return namedToolSse("install_mcp", JSON.stringify({
       remote: { name: "demo-remote", url: "https://example.com/mcp" },
       reason: "需要远程工具",
-    })));
+      }));
+    });
     const bot = await createBot(depsOf(started), userScope("user-a"), { name: "Ada", model: "gpt-test" });
     started.ctx.db.$client.prepare("update bots set settings_json=? where id=?").run(JSON.stringify({ alwaysAllow: ["app_install", "mcp"] }), bot.id);
     const sent = await started.service.send({ userId: "user-a", botId: bot.id, text: "安装", mode: "queue" });

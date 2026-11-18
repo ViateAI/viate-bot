@@ -15,7 +15,8 @@ import type { MachineEndpoint } from "@viate-bot/protocol";
 import { BrowserPool } from "./browser-session.js";
 import type { BoundBrowser } from "./browser-session.js";
 import { browserApprovalUrl } from "./browser-session.js";
-import { taskUsageJson } from "../gateway/stream.js";
+import { holdTaskClock, pauseTaskClock, taskUsageJson } from "../gateway/stream.js";
+import { durationLimitText, elapsedActiveMs, resolveTaskMaxDurationSec, restoreActive, watchActiveLimit } from "../task-limits.js";
 import { browserScreenshotTool, browserTools } from "./browser-tools.js";
 import { approvalTools } from "./approval-tools.js";
 import { createApprovalGate } from "../approvals/gate.js";
@@ -420,12 +421,19 @@ export function createChatService(deps: ChatServiceDeps) {
       return names;
     },
     onWaiting(taskId) {
+      holdRun(taskId, true);
       const live = running.get(taskId);
       if (!live) return;
       const task = chat.findTask(userScope(live.userId), taskId);
       if (!task?.conversationId) return;
       publishTask(live.userId, task.conversationId, taskId);
       if (task.trigger === "routine") notifyTaskSettled(deps.db, { userId: live.userId, botId: live.botId, taskId, outcome: "needs_user" });
+    },
+    onHold(taskId) {
+      holdRun(taskId, true);
+    },
+    onRelease(taskId) {
+      holdRun(taskId, false);
     },
     summarize(taskId, tool, args) {
       if (tool === "propose_approval_rule") return proposalSummary(args);
@@ -750,6 +758,7 @@ export function createChatService(deps: ChatServiceDeps) {
       try { usage = JSON.parse(previous?.usageJson ?? "{}") ?? {}; } catch { /* Older tasks may have no snapshot. */ }
       live.lengthContinuations = usage.lengthContinuations ?? 0;
       const tokenBudget = usage.tokenBudget ?? resolveTaskTokenBudget(deps.db, live.userId, deps.config.taskTokenBudget);
+      const restored = restoreActive(typeof usage.activeMs === "number" && Number.isFinite(usage.activeMs) ? usage.activeMs : 0, now().getTime());
       chat.updateTask(scope, live.id, { state: "running", startedAt: previous?.startedAt ?? now().toISOString(), error: null });
       publishTask(live.userId, live.conversationId, live.id);
       const endpoint = await deps.prepareEndpoint(live.userId, (phase) => {
@@ -775,6 +784,8 @@ export function createChatService(deps: ChatServiceDeps) {
         modelCalls: usage.modelCalls ?? 0,
         lengthContinuations: live.lengthContinuations,
         startedAt: now().getTime(),
+        activeMs: restored.activeMs,
+        segmentStartedAt: restored.segmentStartedAt,
         tokenBudget,
       };
       chat.updateTask(scope, live.id, { usageJson: taskUsageJson(gatewayTask) });
@@ -824,6 +835,60 @@ export function createChatService(deps: ChatServiceDeps) {
         return;
       }
       const mcpTools = installedMcp.tools;
+      const durationCap = () => resolveTaskMaxDurationSec(deps.db, live.userId, deps.config.maxTaskDurationSec);
+      const confineTool = (signal: AbortSignal | undefined): { signal: AbortSignal | undefined; settle: () => string | undefined } => {
+        const maxSec = durationCap();
+        if (maxSec <= 0) return { signal, settle: () => undefined };
+        const controller = new AbortController();
+        const stop = watchActiveLimit(
+          () => ({ activeMs: gatewayTask.activeMs, segmentStartedAt: gatewayTask.segmentStartedAt }),
+          () => now().getTime(),
+          maxSec,
+          () => controller.abort(),
+        );
+        let settled = false;
+        return {
+          signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
+          settle: () => {
+            if (settled) return undefined;
+            settled = true;
+            stop();
+            if (signal?.aborted || live.stopRequested) return undefined;
+            const elapsed = elapsedActiveMs(
+              { activeMs: gatewayTask.activeMs, segmentStartedAt: gatewayTask.segmentStartedAt },
+              now().getTime(),
+            );
+            if (elapsed >= maxSec * 1000) return durationLimitText(elapsed);
+            return undefined;
+          },
+        };
+      };
+      const durationToolResult = (text: string): AgentToolResult => {
+        live.failReason = text;
+        return { content: [{ type: "text", text }], details: {}, isError: true, terminate: true };
+      };
+      const runLimitedTool = async (
+        signal: AbortSignal | undefined,
+        run: (signal: AbortSignal | undefined) => Promise<AgentToolResult>,
+      ): Promise<AgentToolResult> => {
+        const limited = confineTool(signal);
+        try {
+          const result = await run(limited.signal);
+          const expired = limited.settle();
+          if (expired) return durationToolResult(expired);
+          return result;
+        } catch (error) {
+          const expired = limited.settle();
+          if (error instanceof Error && error.message === "remote_unconfirmed" && !live.remoteUnconfirmed) {
+            live.remoteUnconfirmed = true;
+            chat.updateTask(scope, live.id, { error: "remote_unconfirmed" });
+            markRemoteUncertain(deps.db, { userId: live.userId, botId: live.botId, taskId: live.id });
+            publishTask(live.userId, live.conversationId, live.id);
+          }
+          if (expired) return durationToolResult(expired);
+          throw error;
+        }
+      };
       const dress = (incoming: AgentTool[]): AgentTool[] => {
         const guarded = incoming.map((tool) => {
           const execute = tool.execute.bind(tool);
@@ -831,17 +896,7 @@ export function createChatService(deps: ChatServiceDeps) {
             if (tool.name !== "request_takeover" && !READ_ONLY_TOOLS[tool.name] && remoteUncertain(deps.db, live.userId)) {
               throw new Error("远端可能仍在执行。需要单独确认后才能继续写操作。");
             }
-            try {
-              return await execute(toolCallId, params, signal, onUpdate);
-            } catch (error) {
-              if (tool.name === "shell_exec" && error instanceof Error && error.message === "remote_unconfirmed") {
-                live.remoteUnconfirmed = true;
-                chat.updateTask(scope, live.id, { error: "remote_unconfirmed" });
-                markRemoteUncertain(deps.db, { userId: live.userId, botId: live.botId, taskId: live.id });
-                publishTask(live.userId, live.conversationId, live.id);
-              }
-              throw error;
-            }
+            return runLimitedTool(signal, (limited) => execute(toolCallId, params, limited, onUpdate));
           };
           return tool;
         });
@@ -977,17 +1032,7 @@ export function createChatService(deps: ChatServiceDeps) {
           if (tool.name !== "request_takeover" && !READ_ONLY_TOOLS[tool.name] && remoteUncertain(deps.db, live.userId)) {
             throw new Error("远端可能仍在执行。需要单独确认后才能继续写操作。");
           }
-          try {
-            return await execute(toolCallId, params, signal, onUpdate);
-          } catch (error) {
-            if (tool.name === "shell_exec" && error instanceof Error && error.message === "remote_unconfirmed") {
-              live.remoteUnconfirmed = true;
-              chat.updateTask(scope, live.id, { error: "remote_unconfirmed" });
-              markRemoteUncertain(deps.db, { userId: live.userId, botId: live.botId, taskId: live.id });
-              publishTask(live.userId, live.conversationId, live.id);
-            }
-            throw error;
-          }
+          return runLimitedTool(signal, (limited) => execute(toolCallId, params, limited, onUpdate));
         };
         return tool;
       });
@@ -1153,6 +1198,17 @@ export function createChatService(deps: ChatServiceDeps) {
           compactLive(next, true, overflowSignal),
         ),
         finishTurn: (event) => {
+          if (!live.stopRequested) {
+            const maxSec = durationCap();
+            const elapsed = elapsedActiveMs(
+              { activeMs: gatewayTask.activeMs, segmentStartedAt: gatewayTask.segmentStartedAt },
+              now().getTime(),
+            );
+            if (maxSec > 0 && elapsed >= maxSec * 1000) {
+              live.failReason = durationLimitText(elapsed);
+              return { action: "end" as const };
+            }
+          }
           const overBudget = budgetFailure(gatewayTask);
           if (overBudget) {
             live.failReason = overBudget;
@@ -1342,9 +1398,15 @@ export function createChatService(deps: ChatServiceDeps) {
     usage?: string,
   ): void {
     if (live.preserveWait) return;
+    const gateway = deps.tasks.get(live.id);
+    if (gateway) {
+      pauseTaskClock(gateway, now().getTime());
+      usage = taskUsageJson(gateway);
+    }
+    const shown = live.remoteUnconfirmed ? "remote_unconfirmed" : error;
     chat.updateTask(scope, live.id, {
       state,
-      error: live.remoteUnconfirmed ? "remote_unconfirmed" : error,
+      error: shown,
       endedAt: now().toISOString(),
       stepCount,
       ...(usage !== undefined ? { usageJson: usage } : {}),
@@ -1409,15 +1471,23 @@ export function createChatService(deps: ChatServiceDeps) {
   }
 
   function markWaiting(userId: string, taskId: string): void {
+    holdRun(taskId, true);
     chat.updateTask(userScope(userId), taskId, { state: "waiting_input", error: null });
     const task = chat.findTask(userScope(userId), taskId);
     if (task?.conversationId) publishTask(userId, task.conversationId, taskId);
   }
 
   function markRunning(userId: string, taskId: string): void {
+    holdRun(taskId, false);
     chat.updateTask(userScope(userId), taskId, { state: "running", error: null });
     const task = chat.findTask(userScope(userId), taskId);
     if (task?.conversationId) publishTask(userId, task.conversationId, taskId);
+  }
+
+  function holdRun(taskId: string, waiting: boolean): void {
+    const task = deps.tasks.get(taskId);
+    if (!task || !holdTaskClock(task, waiting, now().getTime())) return;
+    chat.updateTask(userScope(task.userId), taskId, { usageJson: taskUsageJson(task) });
   }
 
   function resumeWaiting(userId: string, taskId: string, text: string, isError: boolean): void {

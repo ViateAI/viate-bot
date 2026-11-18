@@ -92,6 +92,8 @@ describe("loadConfig", () => {
     expect(config.taskTokenBudget).toBe(2_000_000);
     expect(config.modelRateUserPerMin).toBe(120);
     expect(config.modelRateBotPerMin).toBe(60);
+    expect(config.maxTaskSteps).toBe(200);
+    expect(config.maxTaskDurationSec).toBe(3600);
     expect(config.defaultMaxBots).toBe(5);
     expect(config.defaultMaxConcurrentTasks).toBe(2);
     expect(config.defaultMaxRoutines).toBe(10);
@@ -108,9 +110,13 @@ describe("loadConfig", () => {
     expect(custom.modelMaxTokens).toBe(128);
     expect(custom.taskTokenBudget).toBe(10);
     expect(loadConfig({ VB_TASK_TOKEN_BUDGET: "0" }).taskTokenBudget).toBe(0);
+    expect(loadConfig({ VB_MAX_TASK_STEPS: "0" }).maxTaskSteps).toBe(0);
+    expect(loadConfig({ VB_MAX_TASK_DURATION_SEC: "0" }).maxTaskDurationSec).toBe(0);
     expect(loadConfig({ VB_MODEL_RATE_USER: "0", VB_MODEL_RATE_BOT: "0" }).modelRateUserPerMin).toBe(0);
     expect(loadConfig({ VB_MODEL_RATE_BOT: "0" }).modelRateBotPerMin).toBe(0);
     expect(() => loadConfig({ VB_MODEL_API: "anthropic" })).toThrow(/VB_MODEL_API/);
     expect(() => loadConfig({ VB_MODEL_MAX_TOKENS: "0" })).toThrow(/VB_MODEL_MAX_TOKENS/);
+    expect(() => loadConfig({ VB_MAX_TASK_STEPS: "-1" })).toThrow(/VB_MAX_TASK_STEPS/);
+    expect(() => loadConfig({ VB_MAX_TASK_DURATION_SEC: "-1" })).toThrow(/VB_MAX_TASK_DURATION_SEC/);
   });
 });

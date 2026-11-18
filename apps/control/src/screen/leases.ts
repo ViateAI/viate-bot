@@ -27,6 +27,7 @@ export function createTakeoverLeases(deps: {
   secretWaitMs: number;
   now?: () => Date;
   onWaiting?: (taskId: string) => void;
+  onResumed?: (taskId: string) => void;
   flights?: UserFlights;
   /** 远端是否已停止还不确定时，不允许发放接管。 */
   writesBlocked?: (userId: string) => boolean;
@@ -156,6 +157,7 @@ export function createTakeoverLeases(deps: {
         if (voided()) {
           transition(lease, "revoked");
           deps.db.update(tasks).set({ state: "running" }).where(and(eq(tasks.id, input.taskId), eq(tasks.state, "waiting_takeover"))).run();
+          deps.onResumed?.(input.taskId);
           throw new Error("接管已取消");
         }
         const id = lease.id;
@@ -177,6 +179,7 @@ export function createTakeoverLeases(deps: {
         } finally {
           if (!inputHeld.has(input.userId)) {
             deps.db.update(tasks).set({ state: "running" }).where(and(eq(tasks.id, input.taskId), eq(tasks.state, "waiting_takeover"))).run();
+            deps.onResumed?.(input.taskId);
           }
         }
       } finally {

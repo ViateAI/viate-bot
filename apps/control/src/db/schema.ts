@@ -144,6 +144,10 @@ export const quotas = sqliteTable("quotas", {
   maxRoutines: integer("max_routines").notNull(),
   /** null 表示沿用全局预算。0 表示不限制。 */
   taskTokenBudget: integer("task_token_budget"),
+  /** null 表示沿用全局步数上限。0 表示不限制。 */
+  taskMaxSteps: integer("task_max_steps"),
+  /** null 表示沿用全局时长上限。0 表示不限制。 */
+  taskMaxDurationSec: integer("task_max_duration_sec"),
 });
 
 export const settings = sqliteTable("settings", {

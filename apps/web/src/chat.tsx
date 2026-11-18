@@ -1,15 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { api, taskLabel, type Bot, type ChatMessage, type MemoryItem, type Step, type Task } from "./api.js";
+import { showContinueButton } from "./task-limit.js";
+import { activityLine } from "./activity.js";
+import { usesMarkdown } from "./markdown-policy.js";
 import { ApprovalList, ApprovalRules } from "./approval.js";
 import { Computer } from "./computer.js";
 import { BotMark } from "./presence.js";
+import { botAvatarUrl } from "./avatar-url.js";
+import { transcriptNearBottom } from "./transcript.js";
 import { Routines } from "./routines.js";
+
+// The parser stays out of the first screen. Login and the bot list should not download it.
+const MarkdownView = lazy(() => import("./markdown.js"));
 
 export function ChatPage({ botId }: { botId: string }) {
   const queryClient = useQueryClient();
   const scroller = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState<"queue" | "steer">("queue");
@@ -46,7 +55,7 @@ export function ChatPage({ botId }: { botId: string }) {
   const tasks = useQuery({
     queryKey: ["tasks", conversationId],
     enabled: Boolean(conversationId),
-    queryFn: () => api<{ tasks: Task[] }>(`/api/conversations/${conversationId}/tasks`),
+    queryFn: () => api<{ tasks: Task[]; showProcess?: boolean }>(`/api/conversations/${conversationId}/tasks`),
     refetchInterval: (query) => {
       const latest = query.state.data?.tasks[0];
       return latest && ["queued", "running", "waiting_input", "waiting_approval", "waiting_takeover"].includes(latest.state) ? 1000 : false;
@@ -71,6 +80,14 @@ export function ChatPage({ botId }: { botId: string }) {
   const secret = task?.state === "waiting_input" ? pendingSecret(steps.data?.steps ?? []) : undefined;
   const name = bot.data?.bot.name ?? "对话";
   const status = taskLabel(task?.state ?? "", machine, task?.error, task?.waitingRate);
+  const line = activityLine({
+    state: task?.state ?? "",
+    waitingRate: task?.waitingRate,
+    stream,
+    detail: tasks.data?.showProcess === true,
+    elapsedMs: task?.elapsedMs ?? 0,
+    steps: steps.data?.steps ?? [],
+  });
 
   useEffect(() => {
     setSheet(false);
@@ -102,11 +119,21 @@ export function ChatPage({ botId }: { botId: string }) {
     return () => socket.close();
   }, [botId, conversationId, queryClient]);
 
+  const activityVisible = line !== null;
   useEffect(() => {
     const node = scroller.current;
     if (!node) return;
+    const onScroll = () => {
+      stick.current = transcriptNearBottom(node.scrollTop, node.scrollHeight, node.clientHeight);
+    };
+    node.addEventListener("scroll", onScroll, { passive: true });
+    return () => node.removeEventListener("scroll", onScroll);
+  }, [conversationId]);
+  useEffect(() => {
+    const node = scroller.current;
+    if (!node || !stick.current) return;
     node.scrollTop = node.scrollHeight;
-  }, [messages.data, stream, secret, task?.error, error]);
+  }, [messages.data, stream, secret, task?.error, error, activityVisible]);
 
   useEffect(() => {
     const node = inputRef.current;
@@ -166,6 +193,7 @@ export function ChatPage({ botId }: { botId: string }) {
   }
 
   const items = messages.data?.messages ?? [];
+  const canContinue = showContinueButton((tasks.data?.tasks ?? []).map((item) => ({ state: item.state, error: item.error })));
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1">
@@ -193,12 +221,20 @@ export function ChatPage({ botId }: { botId: string }) {
             ))}
             {stream ? (
               <li className="flex justify-start">
-                <div className="max-w-[75%] rounded-[1.25rem] bg-[#e9e9e9] px-4 py-2.5 text-[15px] leading-6 text-neutral-800">
-                  <p className="whitespace-pre-wrap break-words">{stream}</p>
+                <div className="min-w-0 max-w-[75%] rounded-[1.25rem] bg-[#e9e9e9] px-4 py-2.5 text-[15px] leading-6 text-neutral-800">
+                  <Suspense fallback={<p className="whitespace-pre-wrap break-words">{stream}</p>}>
+                    <MarkdownView text={stream} />
+                  </Suspense>
                 </div>
               </li>
             ) : null}
-            {items.length === 0 && !stream ? <li className="py-16 text-center text-sm text-neutral-400">发一条消息，开始和 {name} 对话</li> : null}
+            {line ? (
+              <li data-testid="activity-status" className="flex items-center gap-2 px-1 text-sm text-neutral-500">
+                <span aria-hidden className="size-1.5 rounded-full bg-neutral-400 motion-safe:animate-pulse" />
+                {line}
+              </li>
+            ) : null}
+            {items.length === 0 && !stream && !line ? <li className="py-16 text-center text-sm text-neutral-400">发一条消息，开始和 {name} 对话</li> : null}
           </ol>
         </div>
         {secret && task ? (
@@ -230,7 +266,20 @@ export function ChatPage({ botId }: { botId: string }) {
             ) : null}
           </div>
         ) : task?.error ? (
-          <pre className="mx-auto mb-3 max-h-48 w-full max-w-3xl overflow-auto whitespace-pre-wrap break-all rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">{task.error}</pre>
+          <div className="mx-auto mb-3 w-full max-w-3xl px-4">
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">{task.error}</pre>
+            {canContinue ? (
+              <button
+                type="button"
+                data-testid="continue-task"
+                className="mt-2 rounded-full bg-neutral-900 px-4 py-2 text-sm text-white disabled:opacity-40"
+                disabled={send.isPending}
+                onClick={() => send.mutate("继续")}
+              >
+                继续
+              </button>
+            ) : null}
+          </div>
         ) : null}
         {error ? <p className="mx-auto mb-3 w-full max-w-3xl px-4 text-sm text-red-700">{error}</p> : null}
         <form className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))]" onSubmit={onSubmit}>
@@ -290,7 +339,7 @@ export function ChatPage({ botId }: { botId: string }) {
         botId={botId}
         name={name}
         bio={bot.data?.bot.bio ?? ""}
-        avatarUrl={bot.data?.bot.avatar ? `/api/bots/${botId}/avatar?v=${bot.dataUpdatedAt}` : undefined}
+        avatarUrl={botAvatarUrl(botId, bot.data?.bot.avatar, bot.data?.bot.updatedAt)}
         model={bot.data?.bot.model ?? ""}
         instructions={bot.data?.bot.instructions ?? ""}
         machine={machine}
@@ -478,6 +527,14 @@ function MessageItem({ message, previous }: { message: ChatMessage; previous?: C
         <li className="flex justify-end">
           <div className="max-w-[75%] rounded-[1.25rem] bg-white px-4 py-2.5 text-[15px] leading-6 text-neutral-900 shadow-sm ring-1 ring-black/5">
             <p className="whitespace-pre-wrap break-words">{text}</p>
+          </div>
+        </li>
+      ) : usesMarkdown(message.role, message.isError) ? (
+        <li className="flex justify-start">
+          <div className="min-w-0 max-w-[75%] rounded-[1.25rem] bg-[#e9e9e9] px-4 py-2.5 text-[15px] leading-6 text-neutral-900">
+            <Suspense fallback={<p className="whitespace-pre-wrap break-words">{text}</p>}>
+              <MarkdownView text={text} />
+            </Suspense>
           </div>
         </li>
       ) : (

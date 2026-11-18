@@ -15,7 +15,7 @@ import { openDatabase, type AppDatabase } from "./db/index.js";
 import { identityRepository } from "./db/identities.js";
 import { machineRepository } from "./db/machines.js";
 import { ensureDevUser, userRepository } from "./db/users.js";
-import { createGateway, type GatewayTask } from "./gateway/stream.js";
+import { createGateway, holdTaskClock, taskUsageJson, type GatewayTask } from "./gateway/stream.js";
 import { taskActivityProbe } from "./machines/activity.js";
 import { DockerDriver } from "./machines/docker.js";
 import { reconcileOnce } from "./machines/loop.js";
@@ -100,6 +100,11 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
   runtimes.set(app, runtime);
   registerAuth(app, { db, key, config, runtime, now });
   const tasks = new Map<string, GatewayTask>();
+  function holdRun(taskId: string, waiting: boolean): void {
+    const task = tasks.get(taskId);
+    if (!task || !holdTaskClock(task, waiting, now().getTime())) return;
+    db.$client.prepare("update tasks set usage_json=? where id=?").run(taskUsageJson(task), taskId);
+  }
   const flights = options.flights ?? createUserFlights();
   const inputDrain = createScreenInputDrain();
   const leases =
@@ -112,10 +117,14 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     writesBlocked: (userId) => remoteUncertain(db, userId),
     drainInput: (botId) => inputDrain.revoke(botId),
     onWaiting(taskId) {
+      holdRun(taskId, true);
       const row = db.$client
         .prepare("select t.trigger as trigger, t.bot_id as botId, b.user_id as userId from tasks t join bots b on b.id=t.bot_id where t.id=?")
         .get(taskId) as { trigger: string; botId: string; userId: string } | undefined;
       if (row?.trigger === "routine") notifyTaskSettled(db, { userId: row.userId, botId: row.botId, taskId, outcome: "needs_user" });
+    },
+    onResumed(taskId) {
+      holdRun(taskId, false);
     },
     quiesce: async (botId) => {
       const row = db.$client.prepare("select user_id as userId from bots where id=?").get(botId) as { userId: string } | undefined;
@@ -179,6 +188,8 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     credentials: runtime.credentials,
     providerId: runtime.identity.id,
     ensureMachine,
+    tasks,
+    now,
   });
   registerAdminRoutes(app, {
     db,

@@ -24,6 +24,7 @@ import { settingsRepository } from "../db/settings.js";
 import { assertModelLimit, ModelLimitRejected, readModelLimits, saveModelLimit } from "../model-limits.js";
 import { ModelRateRejected, readModelRate, saveModelRate } from "../model-rate.js";
 import { readGlobalTaskTokenBudget, saveGlobalTaskTokenBudget, TaskBudgetRejected } from "../task-budget.js";
+import { readGlobalTaskMaxDurationSec, readGlobalTaskMaxSteps, saveGlobalTaskMaxDurationSec, saveGlobalTaskMaxSteps, TaskLimitRejected } from "../task-limits.js";
 import { adminRepository } from "../db/admin.js";
 import { users } from "../db/schema.js";
 import { eq } from "drizzle-orm";
@@ -68,6 +69,8 @@ export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & 
         ...(typeof body.maxConcurrentTasks === "number" ? { maxConcurrentTasks: body.maxConcurrentTasks } : {}),
         ...(typeof body.maxRoutines === "number" ? { maxRoutines: body.maxRoutines } : {}),
         ...("taskTokenBudget" in body && body.taskTokenBudget !== null ? { taskTokenBudget: body.taskTokenBudget as number } : {}),
+        ...("taskMaxSteps" in body && body.taskMaxSteps !== null ? { taskMaxSteps: body.taskMaxSteps as number } : {}),
+        ...("taskMaxDurationSec" in body && body.taskMaxDurationSec !== null ? { taskMaxDurationSec: body.taskMaxDurationSec as number } : {}),
       });
       return reply.code(201).send(result);
     } catch (error) {
@@ -85,11 +88,21 @@ export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & 
       if ("taskTokenBudget" in body && budget !== null && (typeof budget !== "number" || !Number.isInteger(budget) || budget < 0)) {
         return reply.code(400).send({ error: "token 预算必须是非负整数" });
       }
+      const steps = body.taskMaxSteps;
+      if ("taskMaxSteps" in body && steps !== null && (typeof steps !== "number" || !Number.isInteger(steps) || steps < 0)) {
+        return reply.code(400).send({ error: "步数上限必须是非负整数" });
+      }
+      const duration = body.taskMaxDurationSec;
+      if ("taskMaxDurationSec" in body && duration !== null && (typeof duration !== "number" || !Number.isInteger(duration) || duration < 0)) {
+        return reply.code(400).send({ error: "时长上限必须是非负整数" });
+      }
       updateQuota(deps.db, scope, request.params.id, {
         ...(typeof body.maxBots === "number" ? { maxBots: body.maxBots } : {}),
         ...(typeof body.maxConcurrentTasks === "number" ? { maxConcurrentTasks: body.maxConcurrentTasks } : {}),
         ...(typeof body.maxRoutines === "number" ? { maxRoutines: body.maxRoutines } : {}),
         ...("taskTokenBudget" in body ? { taskTokenBudget: budget === null ? null : (budget as number) } : {}),
+        ...("taskMaxSteps" in body ? { taskMaxSteps: steps === null ? null : (steps as number) } : {}),
+        ...("taskMaxDurationSec" in body ? { taskMaxDurationSec: duration === null ? null : (duration as number) } : {}),
         ...(spec ? { spec } : {}),
       });
       return { ok: true };
@@ -206,6 +219,8 @@ export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & 
         maxTokens: deps.config.modelMaxTokens,
       },
       taskTokenBudget: readGlobalTaskTokenBudget(deps.db) ?? deps.config.taskTokenBudget,
+      taskMaxSteps: readGlobalTaskMaxSteps(deps.db) ?? deps.config.maxTaskSteps,
+      taskMaxDurationSec: readGlobalTaskMaxDurationSec(deps.db) ?? deps.config.maxTaskDurationSec,
       models: deps.config.models,
       provisionDefaults: {
         maxBots: deps.config.defaultMaxBots,
@@ -247,6 +262,34 @@ export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & 
       return { taskTokenBudget: saved };
     } catch (error) {
       if (error instanceof TaskBudgetRejected) return reply.code(400).send({ error: error.message });
+      return sendError(reply, error);
+    }
+  });
+
+  app.put("/api/admin/task-max-steps", async (request, reply) => {
+    const scope = actor(request);
+    if (!scope) return reply.code(404).send({ error: "找不到" });
+    const value = record(request.body).value;
+    try {
+      const saved = saveGlobalTaskMaxSteps(deps.db, value as number);
+      auditRepository(deps.db).write(scope, "task.max_steps", "settings", { value: saved });
+      return { taskMaxSteps: saved };
+    } catch (error) {
+      if (error instanceof TaskLimitRejected) return reply.code(400).send({ error: error.message });
+      return sendError(reply, error);
+    }
+  });
+
+  app.put("/api/admin/task-max-duration-sec", async (request, reply) => {
+    const scope = actor(request);
+    if (!scope) return reply.code(404).send({ error: "找不到" });
+    const value = record(request.body).value;
+    try {
+      const saved = saveGlobalTaskMaxDurationSec(deps.db, value as number);
+      auditRepository(deps.db).write(scope, "task.max_duration_sec", "settings", { value: saved });
+      return { taskMaxDurationSec: saved };
+    } catch (error) {
+      if (error instanceof TaskLimitRejected) return reply.code(400).send({ error: error.message });
       return sendError(reply, error);
     }
   });

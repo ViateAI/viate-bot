@@ -12,6 +12,7 @@ export interface BotRecord {
   model: string;
   instructions: string;
   modelCredentialId: string | null;
+  updatedAt: string;
 }
 
 export interface BotDraft {
@@ -144,5 +145,6 @@ function toRecord(row: typeof bots.$inferSelect): BotRecord {
     model: row.model,
     instructions: row.instructions,
     modelCredentialId: row.modelCredentialId,
+    updatedAt: row.updatedAt,
   };
 }

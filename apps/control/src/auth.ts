@@ -14,6 +14,7 @@ import {
 import { decrypt, encrypt } from "./crypto.js";
 import type { AppDatabase } from "./db/index.js";
 import { quotaRepository } from "./db/quotas.js";
+import { userShowsProcess } from "./agent/process-detail.js";
 import { sessionRepository } from "./db/sessions.js";
 import { LoginRejected, acceptIdentity } from "./login.js";
 import { newTransaction } from "./oidc.js";
@@ -148,6 +149,7 @@ export function registerAuth(app: FastifyInstance, deps: AuthDeps): void {
       status: user.status,
       isAdmin: user.isAdmin,
       provisioned: quotaRepository(deps.db).find(userScope(user.id)) !== undefined,
+      showProcess: userShowsProcess(deps.db, userScope(user.id)),
       csrf: resolved.session.csrf,
     };
   });

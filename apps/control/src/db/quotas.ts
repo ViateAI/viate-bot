@@ -12,6 +12,10 @@ export interface QuotaRecord {
   maxRoutines: number;
   /** null 表示沿用全局预算。0 表示不限制。 */
   taskTokenBudget: number | null;
+  /** null 表示沿用全局步数上限。0 表示不限制。 */
+  taskMaxSteps: number | null;
+  /** null 表示沿用全局时长上限。0 表示不限制。 */
+  taskMaxDurationSec: number | null;
 }
 
 /** ensureDevUser 写入的默认配额。已有测试靠这一行继续能建 bot。 */
@@ -29,10 +33,16 @@ export interface QuotaDraft {
   maxRoutines: number;
   /** 省略或 null 表示沿用全局预算。 */
   taskTokenBudget?: number | null;
+  /** 省略或 null 表示沿用全局步数上限。 */
+  taskMaxSteps?: number | null;
+  /** 省略或 null 表示沿用全局时长上限。 */
+  taskMaxDurationSec?: number | null;
 }
 
 export interface QuotaPatch extends Partial<QuotaDraft> {
   taskTokenBudget?: number | null;
+  taskMaxSteps?: number | null;
+  taskMaxDurationSec?: number | null;
 }
 
 export function quotaRepository(db: AppDatabase) {
@@ -53,6 +63,8 @@ export function quotaRepository(db: AppDatabase) {
           maxConcurrentTasks: draft.maxConcurrentTasks,
           maxRoutines: draft.maxRoutines,
           ...(draft.taskTokenBudget !== undefined ? { taskTokenBudget: draft.taskTokenBudget } : {}),
+          ...(draft.taskMaxSteps !== undefined ? { taskMaxSteps: draft.taskMaxSteps } : {}),
+          ...(draft.taskMaxDurationSec !== undefined ? { taskMaxDurationSec: draft.taskMaxDurationSec } : {}),
         })
         .run();
     },
@@ -67,6 +79,8 @@ export function quotaRepository(db: AppDatabase) {
             maxConcurrentTasks: draft.maxConcurrentTasks,
             maxRoutines: draft.maxRoutines,
             ...(draft.taskTokenBudget !== undefined ? { taskTokenBudget: draft.taskTokenBudget } : {}),
+            ...(draft.taskMaxSteps !== undefined ? { taskMaxSteps: draft.taskMaxSteps } : {}),
+            ...(draft.taskMaxDurationSec !== undefined ? { taskMaxDurationSec: draft.taskMaxDurationSec } : {}),
           })
           .run();
         return true;
@@ -85,6 +99,8 @@ export function quotaRepository(db: AppDatabase) {
           ...(patch.maxConcurrentTasks !== undefined ? { maxConcurrentTasks: patch.maxConcurrentTasks } : {}),
           ...(patch.maxRoutines !== undefined ? { maxRoutines: patch.maxRoutines } : {}),
           ...("taskTokenBudget" in patch ? { taskTokenBudget: patch.taskTokenBudget ?? null } : {}),
+          ...("taskMaxSteps" in patch ? { taskMaxSteps: patch.taskMaxSteps ?? null } : {}),
+          ...("taskMaxDurationSec" in patch ? { taskMaxDurationSec: patch.taskMaxDurationSec ?? null } : {}),
         })
         .where(eq(quotas.userId, userId))
         .run();
@@ -106,6 +122,8 @@ function toRecord(row: typeof quotas.$inferSelect): QuotaRecord {
     maxConcurrentTasks: row.maxConcurrentTasks,
     maxRoutines: row.maxRoutines,
     taskTokenBudget: row.taskTokenBudget ?? null,
+    taskMaxSteps: row.taskMaxSteps ?? null,
+    taskMaxDurationSec: row.taskMaxDurationSec ?? null,
   };
 }
 

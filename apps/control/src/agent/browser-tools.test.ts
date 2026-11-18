@@ -114,10 +114,12 @@ describe("browser tools", () => {
     const bodies: string[] = [];
     const modelPort = await listen(async (_req, res, body) => {
       bodies.push(body);
-      const parsed = JSON.parse(body) as { messages: Array<{ role: string }> };
+      const parsed = JSON.parse(body) as { messages: Array<{ role: string; content?: unknown }> };
       const count = toolsSinceUser(parsed.messages);
       res.writeHead(200, { "content-type": "text/event-stream" });
-      if (count === 0) res.end(toolSse("call_open", "browser_open", { url: "http://login.test" }));
+      const sawImage = parsed.messages.some((message) => JSON.stringify(message.content ?? "").includes("data:image/jpeg;base64"));
+      if (sawImage) res.end(textSse("看到了"));
+      else if (count === 0) res.end(toolSse("call_open", "browser_open", { url: "http://login.test" }));
       else if (count === 1) res.end(toolSse("call_shot", "browser_screenshot", {}));
       else res.end(textSse("看到了"));
     });

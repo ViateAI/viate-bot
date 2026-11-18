@@ -36,6 +36,7 @@ export interface Me {
   name: string;
   isAdmin: boolean;
   provisioned: boolean;
+  showProcess: boolean;
   csrf: string;
 }
 
@@ -52,6 +53,8 @@ export interface Bot {
   avatar: string | null;
   model: string;
   instructions: string;
+  updatedAt?: string;
+  busy?: boolean;
 }
 
 export interface Conversation {
@@ -78,6 +81,7 @@ export interface Task {
   conversationId: string | null;
   remoteUncertain?: boolean;
   waitingRate?: boolean;
+  elapsedMs?: number;
 }
 
 export interface Step {

@@ -22,6 +22,7 @@ import { usageRepository } from "../db/usage.js";
 import { ulid } from "../id.js";
 import { markRateWait, readModelRate, subscribeModelRate } from "../model-rate.js";
 import { budgetFailure } from "../task-budget.js";
+import { durationLimitText, elapsedActiveMs, pauseActive, resolveTaskMaxDurationSec, resolveTaskMaxSteps, resumeActive, runLimitFailure, watchActiveLimit, type ActiveRun } from "../task-limits.js";
 import { classifyFinish } from "./finish-reason.js";
 import { createRateLimiter, systemRateClock, type RateClock } from "./rate-limit.js";
 import { withPlatformPrompt } from "../agent/prompt.js";
@@ -40,6 +41,10 @@ export interface GatewayTask {
   cacheWriteTokens: number;
   modelCalls: number;
   startedAt: number;
+  /** Flushed running time. Waits and downtime stay out of this. */
+  activeMs: number;
+  /** Open running segment. Null while the task is waiting. */
+  segmentStartedAt: number | null;
   /** 任务开始时的预算快照。0 表示不限制。缺省时用环境配置。 */
   tokenBudget?: number;
   lengthContinuations?: number;
@@ -95,7 +100,7 @@ export function createGateway(deps: GatewayDeps): (
         return;
       }
       const secret = currentTask.secret;
-      const limit = limitReason(deps.config, currentTask, stamp());
+      const limit = limitReason(deps, currentTask, stamp());
       if (limit) {
         pushError(target, current, limit);
         record(deps, currentTask, current.id, emptyUsage(), now(), 0, limit, "model.request");
@@ -106,9 +111,10 @@ export function createGateway(deps: GatewayDeps): (
         record(deps, currentTask, current.id, emptyUsage(), now(), 0, `模型不在白名单内: ${current.id}`, "model.request");
         return;
       }
-      const deadline = currentTask.startedAt + deps.config.maxTaskDurationSec * 1000;
       const unsubscribe = subscribeModelRate(() => limiter.poke());
+      pauseTaskClock(currentTask, stamp());
       markRateWait(currentTask.taskId, true);
+      persistUsage(deps, currentTask);
       const slot = await limiter.acquire({
         userKey: `user:${currentTask.userId}`,
         botKey: `bot:${currentTask.botId}`,
@@ -116,23 +122,24 @@ export function createGateway(deps: GatewayDeps): (
           userPerMin: deps.config.modelRateUserPerMin,
           botPerMin: deps.config.modelRateBotPerMin,
         }),
-        deadline,
+        deadline: Number.POSITIVE_INFINITY,
         ...(signal ? { signal } : {}),
       }).finally(() => {
         unsubscribe();
         markRateWait(currentTask.taskId, false);
+        resumeTaskClock(currentTask, stamp());
       });
       if (!slot.ok) {
         if (slot.reason === "aborted" || signal?.aborted) {
           pushAborted(target, current);
           return;
         }
-        const expired = limitReason(deps.config, currentTask, stamp()) ?? "已达到时长上限，这次先停下来。回复后可以继续。";
+        const expired = limitReason(deps, currentTask, stamp()) ?? durationLimitText(elapsedActiveMs(readRun(currentTask), stamp()));
         pushError(target, current, expired);
         record(deps, currentTask, current.id, emptyUsage(), now(), 0, expired, "model.request");
         return;
       }
-      const afterWait = limitReason(deps.config, currentTask, stamp());
+      const afterWait = limitReason(deps, currentTask, stamp());
       if (afterWait) {
         pushError(target, current, afterWait);
         record(deps, currentTask, current.id, emptyUsage(), now(), 0, afterWait, "model.request");
@@ -146,13 +153,21 @@ export function createGateway(deps: GatewayDeps): (
       const started = now();
       let attempts = 0;
       let lastError = "模型请求失败";
+      let networkTimedOut = false;
       while (attempts <= delays.length) {
         if (signal?.aborted) {
           pushAborted(target, current);
           return;
         }
+        const beforeAttempt = durationFailure(deps, currentTask, stamp());
+        if (beforeAttempt) {
+          pushError(target, current, beforeAttempt);
+          record(deps, currentTask, current.id, emptyUsage(), started, attempts, beforeAttempt, "model.request");
+          return;
+        }
         attempts += 1;
         let emitted = false;
+        const bound = bindRequestSignal(deps, currentTask, signal, stamp);
         try {
           const response = await fetchImpl(endpoint(deps.config, current), {
             method: "POST",
@@ -161,8 +176,15 @@ export function createGateway(deps: GatewayDeps): (
               "content-type": "application/json",
             },
             body: JSON.stringify(requestBody(deps.config, current, systemPrompt, messages, tools, maxTokens)),
-            signal: combineSignal(signal),
+            signal: bound.signal,
           });
+          const overdue = durationFailure(deps, currentTask, stamp());
+          if (overdue) {
+            void response.body?.cancel();
+            pushError(target, current, overdue);
+            record(deps, currentTask, current.id, emptyUsage(), started, attempts, overdue, "model.request");
+            return;
+          }
           if (response.status >= 500) {
             lastError = redactSecret(await readError(response), secret);
             if (attempts <= delays.length) {
@@ -177,34 +199,106 @@ export function createGateway(deps: GatewayDeps): (
             record(deps, currentTask, current.id, emptyUsage(), started, attempts, lastError, "model.request");
             return;
           }
+          let blocked: string | undefined;
           const usage = await readModelStream(response, current, target, () => {
             emitted = true;
+          }, () => {
+            blocked = durationFailure(deps, currentTask, stamp());
+            return blocked;
           });
           addUsage(currentTask, usage);
-          record(deps, currentTask, current.id, usage, started, attempts, null, "model.request");
+          record(deps, currentTask, current.id, usage, started, attempts, blocked ?? null, "model.request");
           return;
         } catch (error) {
           if (signal?.aborted) {
             pushAborted(target, current);
             return;
           }
+          if (bound.durationHit()) {
+            const overdue = durationFailure(deps, currentTask, stamp()) ?? durationLimitText(elapsedActiveMs(readRun(currentTask), stamp()));
+            pushError(target, current, overdue);
+            record(deps, currentTask, current.id, emptyUsage(), started, attempts, overdue, "model.request");
+            return;
+          }
+          networkTimedOut = bound.networkTimedOut();
+          if (!networkTimedOut) {
+            const overdue = durationFailure(deps, currentTask, stamp());
+            if (overdue) {
+              pushError(target, current, overdue);
+              record(deps, currentTask, current.id, emptyUsage(), started, attempts, overdue, "model.request");
+              return;
+            }
+          }
           lastError = redactSecret(error instanceof Error ? error.message : "网络错误", secret);
           if (emitted || attempts > delays.length) break;
           await sleep(delays[attempts - 1] ?? 0, signal);
+        } finally {
+          bound.stop();
         }
       }
-      pushError(target, current, lastError);
-      record(deps, currentTask, current.id, emptyUsage(), started, attempts, lastError, "model.request");
+      const overdue = !signal?.aborted && !networkTimedOut ? durationFailure(deps, currentTask, stamp()) : undefined;
+      if (signal?.aborted) pushAborted(target, current);
+      else {
+        pushError(target, current, overdue ?? lastError);
+        record(deps, currentTask, current.id, emptyUsage(), started, attempts, overdue ?? lastError, "model.request");
+      }
     }
   };
 }
 
-function limitReason(config: ControlConfig, task: GatewayTask, nowMs: number): string | undefined {
-  const budget = budgetFailure(task, task.tokenBudget === undefined ? config.taskTokenBudget : undefined);
+function limitReason(deps: GatewayDeps, task: GatewayTask, nowMs: number): string | undefined {
+  const budget = budgetFailure(task, task.tokenBudget === undefined ? deps.config.taskTokenBudget : undefined);
   if (budget) return budget;
-  if (task.modelCalls >= config.maxTaskSteps) return "已达到步数上限，这次先停下来。回复后可以继续。";
-  if (nowMs - task.startedAt >= config.maxTaskDurationSec * 1000) return "已达到时长上限，这次先停下来。回复后可以继续。";
-  return undefined;
+  return runLimitFailure({
+    modelCalls: task.modelCalls,
+    activeMs: task.activeMs,
+    segmentStartedAt: task.segmentStartedAt,
+    nowMs,
+    maxSteps: resolveTaskMaxSteps(deps.db, task.userId, deps.config.maxTaskSteps),
+    maxDurationSec: resolveTaskMaxDurationSec(deps.db, task.userId, deps.config.maxTaskDurationSec),
+  });
+}
+
+function readRun(task: GatewayTask): ActiveRun {
+  return { activeMs: task.activeMs, segmentStartedAt: task.segmentStartedAt };
+}
+
+function writeRun(task: GatewayTask, run: ActiveRun): void {
+  task.activeMs = run.activeMs;
+  task.segmentStartedAt = run.segmentStartedAt;
+}
+
+export function pauseTaskClock(task: GatewayTask, nowMs: number): void {
+  writeRun(task, pauseActive(readRun(task), nowMs));
+}
+
+export function resumeTaskClock(task: GatewayTask, nowMs: number): void {
+  writeRun(task, resumeActive(readRun(task), nowMs));
+}
+
+/** True when the caller should persist the updated active time. */
+export function holdTaskClock(task: GatewayTask, waiting: boolean, nowMs: number): boolean {
+  if (waiting) {
+    if (task.segmentStartedAt === null) return false;
+    pauseTaskClock(task, nowMs);
+    return true;
+  }
+  if (task.segmentStartedAt !== null) return false;
+  resumeTaskClock(task, nowMs);
+  return true;
+}
+
+function checkpointRun(task: GatewayTask, nowMs: number): void {
+  writeRun(task, pauseActive(readRun(task), nowMs));
+  task.segmentStartedAt = nowMs;
+}
+
+function persistUsage(deps: GatewayDeps, task: GatewayTask): void {
+  try {
+    deps.db.$client.prepare("update tasks set usage_json=? where id=?").run(taskUsageJson(task), task.taskId);
+  } catch (caught) {
+    console.error("模型记录写入失败", caught instanceof Error ? caught.message : "unknown");
+  }
 }
 
 type ConversationMessage = UserMessage | AssistantMessage | ToolResultMessage;
@@ -358,11 +452,12 @@ async function readModelStream(
   model: Model<Api>,
   stream: ModelEventStream,
   onEmit: () => void,
+  rejectIf?: () => string | undefined,
 ): Promise<Usage> {
   const type = response.headers.get("content-type") ?? "";
   if (!type.includes("text/event-stream")) {
     const json = (await response.json()) as Record<string, unknown>;
-    return emitCompletion(model, stream, json, onEmit);
+    return emitCompletion(model, stream, json, onEmit, rejectIf);
   }
   if (!response.body) throw new Error("模型响应没有正文");
   const partial = blank(model);
@@ -436,7 +531,7 @@ async function readModelStream(
   } finally {
     reader.releaseLock();
   }
-  finishPartial(partial, calls, finish, usage, textIndex, stream);
+  finishPartial(partial, calls, finish, usage, textIndex, stream, rejectIf);
   return usage;
 }
 
@@ -498,6 +593,7 @@ function emitCompletion(
   stream: ModelEventStream,
   json: Record<string, unknown>,
   onEmit: () => void,
+  rejectIf?: () => string | undefined,
 ): Usage {
   const choice = firstChoice(json);
   const message = choice?.message as { content?: string | null; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> } | undefined;
@@ -522,7 +618,7 @@ function emitCompletion(
     : typeof choice?.finish_reason === "string"
       ? choice.finish_reason
       : json.status === "completed" ? "stop" : "missing";
-  finishPartial(partial, calls, finish, usage, partial.content.length > 0 ? 0 : -1, stream);
+  finishPartial(partial, calls, finish, usage, partial.content.length > 0 ? 0 : -1, stream, rejectIf);
   return usage;
 }
 
@@ -533,7 +629,17 @@ function finishPartial(
   usage: Usage,
   textIndex: number,
   stream: ModelEventStream,
+  rejectIf?: () => string | undefined,
 ): void {
+  const blocked = rejectIf?.();
+  if (blocked) {
+    partial.content = [{ type: "text", text: blocked }];
+    partial.usage = usage;
+    partial.stopReason = "error";
+    partial.errorMessage = blocked;
+    stream.push({ type: "error", reason: "error", error: snapshot(partial) });
+    return;
+  }
   if (textIndex >= 0) {
     const block = partial.content[textIndex];
     if (block && block.type === "text") {
@@ -607,6 +713,7 @@ function record(
   type: string,
 ): void {
   const now = deps.now?.() ?? new Date();
+  checkpointRun(task, deps.clock ? deps.clock.now() : now.getTime());
   const attrs = {
     taskId: task.taskId,
     model,
@@ -619,7 +726,7 @@ function record(
     error,
   };
   try {
-    deps.db.$client.prepare("update tasks set usage_json=? where id=?").run(taskUsageJson(task), task.taskId);
+    persistUsage(deps, task);
     emitOps(deps.db, opsMinutes, {
       id: ulid(now.getTime()),
       ts: now.toISOString(),
@@ -658,6 +765,7 @@ export function taskUsageJson(task: GatewayTask): string {
     totalTokens: task.tokensUsed,
     tokenBudget: task.tokenBudget,
     modelCalls: task.modelCalls,
+    activeMs: task.activeMs,
     lengthContinuations: task.lengthContinuations ?? 0,
   });
 }
@@ -721,9 +829,43 @@ function parseArgs(raw: string): JsonObject {
   return {};
 }
 
-function combineSignal(signal: AbortSignal | undefined): AbortSignal {
+/** Duration cap only. Step checks stay at the start of the call so the allowed call is not rejected mid-flight. */
+function durationFailure(deps: GatewayDeps, task: GatewayTask, nowMs: number): string | undefined {
+  const maxSec = resolveTaskMaxDurationSec(deps.db, task.userId, deps.config.maxTaskDurationSec);
+  if (maxSec <= 0) return undefined;
+  const elapsed = elapsedActiveMs(readRun(task), nowMs);
+  if (elapsed >= maxSec * 1000) return durationLimitText(elapsed);
+  return undefined;
+}
+
+/** 120 秒网络超时始终生效。有时长上限时再叠加剩余时长，谁先到按谁。 */
+function bindRequestSignal(
+  deps: GatewayDeps,
+  task: GatewayTask,
+  user: AbortSignal | undefined,
+  nowMs: () => number,
+): { signal: AbortSignal; stop: () => void; durationHit: () => boolean; networkTimedOut: () => boolean } {
+  const maxSec = resolveTaskMaxDurationSec(deps.db, task.userId, deps.config.maxTaskDurationSec);
   const timeout = AbortSignal.timeout(120_000);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+  const parts: AbortSignal[] = [timeout];
+  let stop = () => {};
+  let duration: AbortSignal | undefined;
+  if (maxSec > 0) {
+    const controller = new AbortController();
+    duration = controller.signal;
+    stop = watchActiveLimit(() => readRun(task), nowMs, maxSec, () => {
+      controller.abort();
+    });
+    parts.push(controller.signal);
+  }
+  if (user) parts.push(user);
+  const signal = AbortSignal.any(parts);
+  return {
+    signal,
+    stop,
+    durationHit: () => duration?.aborted === true && signal.reason === duration.reason,
+    networkTimedOut: () => timeout.aborted && signal.reason === timeout.reason,
+  };
 }
 
 class ModelEventStream implements AsyncIterable<AssistantMessageEvent> {

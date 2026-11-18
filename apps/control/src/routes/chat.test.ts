@@ -275,6 +275,35 @@ describe("chat http and websocket", () => {
     const models = await app.inject({ method: "GET", url: "/api/models", headers: { cookie: cookie(alice.token) } });
     expect(models.json()).toEqual({ models: ["gpt-test"], unrestricted: false });
   });
+
+  it("returns persisted running time and marks only the busy bot", async () => {
+    const { app, ctx, alice } = await boot({ VB_MODEL_BASE_URL: "http://127.0.0.1:9/v1" }, { host: "127.0.0.1", port: 9, token: "t" });
+    const headers = { cookie: cookie(alice.token), "x-vb-csrf": alice.csrf, "content-type": "application/json" };
+    const created = await app.inject({ method: "POST", url: "/api/bots", headers, payload: { name: "Ada", model: "gpt-test" } });
+    const idle = await app.inject({ method: "POST", url: "/api/bots", headers, payload: { name: "Bea", model: "gpt-test" } });
+    const botId = created.json().bot.id as string;
+    const now = new Date().toISOString();
+    ctx.db.$client.prepare("insert into conversations (id, bot_id, title, created_at, updated_at) values (?, ?, ?, ?, ?)").run("conv-busy", botId, "Ada", now, now);
+    ctx.db.$client.prepare(
+      "insert into tasks (id, bot_id, conversation_id, state, trigger, step_count, usage_json, started_at) values (?, ?, ?, 'running', 'user', 1, ?, ?)",
+    ).run("task-busy", botId, "conv-busy", JSON.stringify({ activeMs: 133000 }), now);
+    const tasks = await app.inject({
+      method: "GET",
+      url: "/api/conversations/conv-busy/tasks",
+      headers: { cookie: cookie(alice.token) },
+    });
+    expect(tasks.statusCode).toBe(200);
+    expect(tasks.json().tasks[0].elapsedMs).toBe(133000);
+    const listed = await app.inject({ method: "GET", url: "/api/bots", headers: { cookie: cookie(alice.token) } });
+    const bots = listed.json().bots as Array<{ id: string; busy?: boolean }>;
+    expect(bots.find((bot) => bot.id === botId)?.busy).toBe(true);
+    expect(bots.find((bot) => bot.id === idle.json().bot.id)?.busy).toBe(false);
+    const hidden = await app.inject({ method: "GET", url: "/api/me", headers: { cookie: cookie(alice.token) } });
+    expect(hidden.json().showProcess).toBe(false);
+    ctx.db.$client.prepare("update users set show_process=1 where id=?").run("user-a");
+    const shown = await app.inject({ method: "GET", url: "/api/me", headers: { cookie: cookie(alice.token) } });
+    expect(shown.json().showProcess).toBe(true);
+  });
 });
 
 function contextFor(config: ControlConfig): ControlContext {

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { api, type Bot, type Me } from "./api.js";
+import { botAvatarUrl } from "./avatar-url.js";
 import { BotMark, initials } from "./presence.js";
 
 /** Suggestions when the server publishes no whitelist. Creation still accepts any name. */
@@ -34,7 +35,7 @@ export function BotSidebar({ activeId, onLogout }: { activeId?: string | undefin
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<Me>("/api/me") });
-  const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<{ bots: Bot[] }>("/api/bots") });
+  const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<{ bots: Bot[] }>("/api/bots"), refetchInterval: 1000 });
   const models = useQuery({
     queryKey: ["models"],
     queryFn: () => api<{ models: string[]; unrestricted: boolean }>("/api/models"),
@@ -175,9 +176,12 @@ export function BotSidebar({ activeId, onLogout }: { activeId?: string | undefin
                         aria-current={selected ? "page" : undefined}
                         className={`flex items-center gap-3 rounded-2xl px-2 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 ${selected ? "bg-white shadow-sm ring-1 ring-black/5" : "hover:bg-black/[0.04]"}`}
                       >
-                        <BotMark name={bot.name} avatarUrl={bot.avatar ? `/api/bots/${bot.id}/avatar?v=${bots.dataUpdatedAt}` : undefined} className="size-12 rounded-full text-sm" />
+                        <BotMark name={bot.name} avatarUrl={botAvatarUrl(bot.id, bot.avatar, bot.updatedAt)} className="size-12 rounded-full text-sm" />
                         <span className="min-w-0">
-                          <span className="block truncate text-[15px] font-medium text-neutral-900">{bot.name}</span>
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="truncate text-[15px] font-medium text-neutral-900">{bot.name}</span>
+                            {bot.busy ? <span data-testid="bot-busy" aria-label="进行中" className="size-1.5 shrink-0 rounded-full bg-neutral-800 motion-safe:animate-pulse" /> : null}
+                          </span>
                           <span className="block truncate text-sm text-neutral-500">{preview(bot)}</span>
                         </span>
                       </Link>

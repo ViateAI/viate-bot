@@ -134,6 +134,8 @@ describe("admin http", () => {
         { method: "PUT" as const, url: "/api/admin/model-limits", payload: { model: "fake", contextTokens: 32000, maxTokens: 1000 } },
         { method: "PUT" as const, url: "/api/admin/model-rate", payload: { userPerMin: 0, botPerMin: 2 } },
         { method: "PUT" as const, url: "/api/admin/task-token-budget", payload: { value: 0 } },
+        { method: "PUT" as const, url: "/api/admin/task-max-steps", payload: { value: 0 } },
+        { method: "PUT" as const, url: "/api/admin/task-max-duration-sec", payload: { value: 0 } },
         { method: "PATCH" as const, url: "/api/admin/users/user-1/process-detail", payload: { enabled: true } },
       ];
       for (const input of cases) {
@@ -148,9 +150,27 @@ describe("admin http", () => {
       }
       expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({
         modelLimits: { fake: { contextTokens: 32000, maxTokens: 1000 } }, taskTokenBudget: 0,
+        taskMaxSteps: 0,
+        taskMaxDurationSec: 0,
         modelRate: { userPerMin: 0, botPerMin: 2 },
         provisionDefaults: { maxBots: 5, maxConcurrentTasks: 2, maxRoutines: 10, models: [] },
       });
+      const { quotaRepository } = await import("../db/quotas.js");
+      quotaRepository(db).insert(adminScope("admin-1"), "user-1", {
+        maxBots: 2,
+        spec: { cpu: 1, memMb: 512, diskGb: 10 },
+        maxConcurrentTasks: 1,
+        maxRoutines: 0,
+      });
+      const saved = await app.inject({
+        method: "PATCH",
+        url: "/api/admin/users/user-1/quota",
+        headers: headers(admin, true),
+        payload: { taskMaxSteps: 0, taskMaxDurationSec: 12 },
+      });
+      expect(saved.statusCode).toBe(200);
+      expect(quotaRepository(db).find(userScope("user-1"))).toMatchObject({ taskMaxSteps: 0, taskMaxDurationSec: 12 });
+      expect((await app.inject({ method: "PATCH", url: "/api/admin/users/user-1/quota", headers: headers(admin, true), payload: { taskMaxSteps: -1 } })).statusCode).toBe(400);
     } finally {
       await app.close();
       db.$client.close();

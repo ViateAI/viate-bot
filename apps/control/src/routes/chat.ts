@@ -6,6 +6,7 @@ import { ChatError } from "../agent/service.js";
 import { messageView, stepView, taskView } from "../agent/view.js";
 import { taskRateWaiting } from "../model-rate.js";
 import { redactMessage, redactMessages, redactStep, userShowsProcess } from "../agent/process-detail.js";
+import { reportedElapsedMs } from "../task-limits.js";
 import { authenticated } from "../auth.js";
 import { BotRejected, createBot, deleteBot } from "../bot-service.js";
 import type { ControlConfig } from "../config.js";
@@ -27,6 +28,8 @@ export interface ChatRouteDeps {
   credentials: CredentialProvider;
   providerId: string;
   ensureMachine: (userId: string) => Promise<void>;
+  tasks: Map<string, { activeMs: number; segmentStartedAt: number | null }>;
+  now: () => Date;
 }
 
 export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): void {
@@ -48,7 +51,8 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
   app.get("/api/bots", async (request, reply) => {
     const scope = scopeOf(request, reply);
     if (!scope) return;
-    return { bots: bots.list(scope).map(botView) };
+    const busy = chat.busyBotIds(scope);
+    return { bots: bots.list(scope).map((bot) => ({ ...botView(bot), busy: busy.has(bot.id) })) };
   });
 
   app.post("/api/bots", async (request, reply) => {
@@ -169,7 +173,9 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
         ...taskView(row),
         waitingRate: taskRateWaiting(row.id),
         remoteUncertain: row.error === "remote_unconfirmed" && remoteUncertain(deps.db, scope.userId),
+        elapsedMs: reportedElapsedMs(row.usageJson, deps.tasks.get(row.id), deps.now().getTime()),
       })),
+      showProcess: userShowsProcess(deps.db, scope),
     };
   });
 
@@ -192,7 +198,14 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!scope) return;
     const row = chat.findTask(scope, request.params.id);
     if (!row) return reply.code(404).send({ error: "找不到任务" });
-    return { task: { ...taskView(row), waitingRate: taskRateWaiting(row.id), remoteUncertain: remoteUncertain(deps.db, scope.userId) } };
+    return {
+      task: {
+        ...taskView(row),
+        waitingRate: taskRateWaiting(row.id),
+        remoteUncertain: remoteUncertain(deps.db, scope.userId),
+        elapsedMs: reportedElapsedMs(row.usageJson, deps.tasks.get(row.id), deps.now().getTime()),
+      },
+    };
   });
 
   app.get<{ Params: { id: string } }>("/api/tasks/:id/steps", async (request, reply) => {
@@ -281,8 +294,8 @@ function scopeOf(request: { id?: string }, reply: { code: (status: number) => { 
   return userScope(resolved.user.id);
 }
 
-function botView(bot: { id: string; name: string; bio: string; avatar: string | null; model: string; instructions: string }) {
-  return { id: bot.id, name: bot.name, bio: bot.bio, avatar: bot.avatar, model: bot.model, instructions: bot.instructions };
+function botView(bot: { id: string; name: string; bio: string; avatar: string | null; model: string; instructions: string; updatedAt: string }) {
+  return { id: bot.id, name: bot.name, bio: bot.bio, avatar: bot.avatar, model: bot.model, instructions: bot.instructions, updatedAt: bot.updatedAt };
 }
 
 function record(body: unknown): Record<string, unknown> {

@@ -77,6 +77,15 @@ export function chatRepository(db: AppDatabase) {
         .all()
         .map(toConversation);
     },
+    busyBotIds(scope: UserScope): Set<string> {
+      const rows = db
+        .select({ botId: tasks.botId })
+        .from(tasks)
+        .innerJoin(bots, eq(bots.id, tasks.botId))
+        .where(and(eq(bots.userId, scope.userId), isNull(bots.deletedAt), inArray(tasks.state, ACTIVE_STATES)))
+        .all();
+      return new Set(rows.map((row) => row.botId));
+    },
     findConversation(scope: UserScope, id: string): ConversationRecord | undefined {
       const row = db
         .select({ conversation: conversations })

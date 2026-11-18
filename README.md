@@ -110,8 +110,8 @@ Read from the process environment only. Defaults are the values in `apps/control
 | `VB_TASK_TOKEN_BUDGET` | `2000000` | Per-task token budget. `0` means unlimited. Admins can change the global value and override it per user. Counts input and output, not cache reads or writes |
 | `VB_MODEL_RATE_USER` | `120` | Per-user model requests per minute. Non-negative integer. `0` means unlimited. An admin override applies on the next call. Over the limit, the task waits. It does not fail |
 | `VB_MODEL_RATE_BOT` | `60` | Per-bot model requests per minute. Counted only when both the user window and the bot window have room |
-| `VB_MAX_TASK_STEPS` | `16` | Per-task step cap, positive integer |
-| `VB_MAX_TASK_DURATION_SEC` | `600` | Per-task duration cap in seconds, positive integer |
+| `VB_MAX_TASK_STEPS` | `200` | Per-task step cap. Non-negative integer. `0` means unlimited. Admins can change the global value and override it per user. Changes apply to running tasks immediately |
+| `VB_MAX_TASK_DURATION_SEC` | `3600` | Per-task active run time cap in seconds. Non-negative integer. `0` means unlimited. Waiting for approval, takeover, user input, or rate limits does not count. Used time is stored and keeps counting after a restart; downtime does not count. Admins can change the global value and override it per user. Each model request still has its own 120 s network timeout |
 | `VB_DEFAULT_MAX_BOTS` | `5` | Bot cap written into a quota when an admin provisions a user. Existing quota rows are not rewritten |
 | `VB_DEFAULT_MAX_CONCURRENT_TASKS` | `2` | Per-user concurrent task cap written at provision time |
 | `VB_DEFAULT_MAX_ROUTINES` | `10` | Routine cap written at provision time. A user whose quota is already 0 is not rewritten |

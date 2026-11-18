@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { readQuotaForm } from "./quota-input.js";
 import { Link, Outlet } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { api, type Me } from "./api.js";
@@ -17,6 +18,8 @@ interface AdminUser {
   maxConcurrentTasks: number | null;
   maxRoutines: number | null;
   taskTokenBudget: number | null;
+  taskMaxSteps: number | null;
+  taskMaxDurationSec: number | null;
   showProcess: boolean;
 }
 
@@ -109,6 +112,8 @@ export function AdminUsers() {
   const [maxConcurrentTasks, setMaxConcurrentTasks] = useState<string | null>(null);
   const [maxRoutines, setMaxRoutines] = useState<string | null>(null);
   const [taskTokenBudget, setTaskTokenBudget] = useState("");
+  const [taskMaxSteps, setTaskMaxSteps] = useState("");
+  const [taskMaxDurationSec, setTaskMaxDurationSec] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -137,6 +142,12 @@ export function AdminUsers() {
       const budgetText = taskTokenBudget.trim();
       const budget = budgetText === "" ? null : Number(budgetText);
       if (budget !== null && (!Number.isInteger(budget) || budget < 0)) nextErrors.taskTokenBudget = "token 预算必须是非负整数";
+      const stepsText = taskMaxSteps.trim();
+      const steps = stepsText === "" ? null : Number(stepsText);
+      if (steps !== null && (!Number.isInteger(steps) || steps < 0)) nextErrors.taskMaxSteps = "步数上限必须是非负整数";
+      const durationText = taskMaxDurationSec.trim();
+      const duration = durationText === "" ? null : Number(durationText);
+      if (duration !== null && (!Number.isInteger(duration) || duration < 0)) nextErrors.taskMaxDurationSec = "时长上限必须是非负整数";
       if (!modelValue.trim()) nextErrors.model = "没有可用模型";
       else if (configuredModels.length > 0 && !configuredModels.includes(modelValue)) nextErrors.model = `模型不在白名单内: ${modelValue}`;
       setFieldErrors(nextErrors);
@@ -155,6 +166,8 @@ export function AdminUsers() {
           maxConcurrentTasks: tasks,
           maxRoutines: routines,
           ...(budget === null ? {} : { taskTokenBudget: budget }),
+          ...(steps === null ? {} : { taskMaxSteps: steps }),
+          ...(duration === null ? {} : { taskMaxDurationSec: duration }),
         }),
       });
     },
@@ -169,7 +182,7 @@ export function AdminUsers() {
     },
   });
   const quota = useMutation({
-    mutationFn: (input: { id: string; maxBots: number; maxConcurrentTasks: number; maxRoutines: number; taskTokenBudget: number | null }) =>
+    mutationFn: (input: { id: string; maxBots: number; maxConcurrentTasks: number; maxRoutines: number; taskTokenBudget: number | null; taskMaxSteps: number | null; taskMaxDurationSec: number | null }) =>
       api(`/api/admin/users/${input.id}/quota`, {
         method: "PATCH",
         body: JSON.stringify({
@@ -177,6 +190,8 @@ export function AdminUsers() {
           maxConcurrentTasks: input.maxConcurrentTasks,
           maxRoutines: input.maxRoutines,
           taskTokenBudget: input.taskTokenBudget,
+          taskMaxSteps: input.taskMaxSteps,
+          taskMaxDurationSec: input.taskMaxDurationSec,
         }),
       }),
     onSuccess: async () => {
@@ -266,6 +281,16 @@ export function AdminUsers() {
           <input data-testid="provision-budget" className={field} value={taskTokenBudget} placeholder="沿用全局" onChange={(event) => setTaskTokenBudget(event.target.value)} />
           {fieldErrors.taskTokenBudget ? <span className="text-red-300">{fieldErrors.taskTokenBudget}</span> : null}
         </label>
+        <label className="grid gap-1 text-sm">
+          单任务步数上限（留空用全局值，0 表示不限制）
+          <input data-testid="provision-steps" className={field} value={taskMaxSteps} placeholder="沿用全局" onChange={(event) => setTaskMaxSteps(event.target.value)} />
+          {fieldErrors.taskMaxSteps ? <span className="text-red-300">{fieldErrors.taskMaxSteps}</span> : null}
+        </label>
+        <label className="grid gap-1 text-sm">
+          单任务时长上限秒（留空用全局值，0 表示不限制）
+          <input data-testid="provision-duration" className={field} value={taskMaxDurationSec} placeholder="沿用全局" onChange={(event) => setTaskMaxDurationSec(event.target.value)} />
+          {fieldErrors.taskMaxDurationSec ? <span className="text-red-300">{fieldErrors.taskMaxDurationSec}</span> : null}
+        </label>
         {(["cpu", "memMb", "diskGb"] as const).map((key) => (
           <label key={key} className="grid gap-1 text-sm">
             {{ cpu: "CPU", memMb: "内存 MB", diskGb: "磁盘 GB" }[key]}
@@ -328,13 +353,16 @@ function QuotaEditor({
   onProcess,
 }: {
   user: AdminUser;
-  onSave: (values: { maxBots: number; maxConcurrentTasks: number; maxRoutines: number; taskTokenBudget: number | null }) => void;
+  onSave: (values: { maxBots: number; maxConcurrentTasks: number; maxRoutines: number; taskTokenBudget: number | null; taskMaxSteps: number | null; taskMaxDurationSec: number | null }) => void;
   onProcess: (enabled: boolean) => void;
 }) {
   const [maxBots, setMaxBots] = useState(String(user.maxBots ?? 5));
   const [maxConcurrentTasks, setMaxConcurrentTasks] = useState(String(user.maxConcurrentTasks ?? 2));
   const [maxRoutines, setMaxRoutines] = useState(String(user.maxRoutines ?? 10));
   const [taskTokenBudget, setTaskTokenBudget] = useState(user.taskTokenBudget === null || user.taskTokenBudget === undefined ? "" : String(user.taskTokenBudget));
+  const [taskMaxSteps, setTaskMaxSteps] = useState(user.taskMaxSteps === null || user.taskMaxSteps === undefined ? "" : String(user.taskMaxSteps));
+  const [taskMaxDurationSec, setTaskMaxDurationSec] = useState(user.taskMaxDurationSec === null || user.taskMaxDurationSec === undefined ? "" : String(user.taskMaxDurationSec));
+  const [quotaError, setQuotaError] = useState("");
   return (
     <div className="grid gap-2">
     <form
@@ -342,19 +370,30 @@ function QuotaEditor({
       className="flex flex-wrap gap-2"
       onSubmit={(event) => {
         event.preventDefault();
-        onSave({
-          maxBots: Number(maxBots),
-          maxConcurrentTasks: Number(maxConcurrentTasks),
-          maxRoutines: Number(maxRoutines),
-          taskTokenBudget: taskTokenBudget.trim() === "" ? null : Number(taskTokenBudget),
-        });
+        try {
+          const values = readQuotaForm({
+            maxBots,
+            maxConcurrentTasks,
+            maxRoutines,
+            taskTokenBudget,
+            taskMaxSteps,
+            taskMaxDurationSec,
+          });
+          setQuotaError("");
+          onSave(values);
+        } catch (caught) {
+          setQuotaError(caught instanceof Error ? caught.message : "必须是非负整数");
+        }
       }}
     >
       <label className="text-xs text-neutral-400">bot <input data-testid="quota-bots" className={`${field} w-16`} value={maxBots} onChange={(event) => setMaxBots(event.target.value)} /></label>
       <label className="text-xs text-neutral-400">并发 <input data-testid="quota-tasks" className={`${field} w-16`} value={maxConcurrentTasks} onChange={(event) => setMaxConcurrentTasks(event.target.value)} /></label>
       <label className="text-xs text-neutral-400">定时 <input data-testid="quota-routines" className={`${field} w-16`} value={maxRoutines} onChange={(event) => setMaxRoutines(event.target.value)} /></label>
       <label className="text-xs text-neutral-400">预算 <input data-testid="quota-budget" className={`${field} w-24`} placeholder="沿用全局" value={taskTokenBudget} onChange={(event) => setTaskTokenBudget(event.target.value)} /></label>
+      <label className="text-xs text-neutral-400">步数 <input data-testid="quota-steps" className={`${field} w-20`} placeholder="沿用全局" value={taskMaxSteps} onChange={(event) => setTaskMaxSteps(event.target.value)} /></label>
+      <label className="text-xs text-neutral-400">时长秒 <input data-testid="quota-duration" className={`${field} w-24`} placeholder="沿用全局" value={taskMaxDurationSec} onChange={(event) => setTaskMaxDurationSec(event.target.value)} /></label>
       <button className="text-sm text-neutral-300" type="submit">保存</button>
+      {quotaError ? <p role="alert" className="text-xs text-red-400">{quotaError}</p> : null}
     </form>
     <label className="flex items-center gap-2 text-xs text-neutral-300">
       <input data-testid="process-detail" type="checkbox" checked={user.showProcess} onChange={(event) => onProcess(event.target.checked)} />
@@ -569,18 +608,26 @@ export function AdminSettings() {
   );
 }
 
-function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { contextTokens: number; maxTokens: number }>; modelDefaults: { contextTokens: number; maxTokens: number }; taskTokenBudget?: number; models: string[]; modelRate?: { userPerMin: number; botPerMin: number } } | undefined }) {
+function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { contextTokens: number; maxTokens: number }>; modelDefaults: { contextTokens: number; maxTokens: number }; taskTokenBudget?: number; taskMaxSteps?: number; taskMaxDurationSec?: number; models: string[]; modelRate?: { userPerMin: number; botPerMin: number } } | undefined }) {
   const client = useQueryClient();
   const [model, setModel] = useState("");
   const [contextTokens, setContextTokens] = useState("");
   const [maxTokens, setMaxTokens] = useState("");
   const [budget, setBudget] = useState<string | null>(null);
+  const [steps, setSteps] = useState<string | null>(null);
+  const [duration, setDuration] = useState<string | null>(null);
   const [userRate, setUserRate] = useState<string | null>(null);
   const [botRate, setBotRate] = useState<string | null>(null);
   const [error, setError] = useState("");
   const loadedBudget = settings?.taskTokenBudget;
+  const loadedSteps = settings?.taskMaxSteps;
+  const loadedDuration = settings?.taskMaxDurationSec;
   const draft = budget !== null ? budget : loadedBudget === undefined ? "" : String(loadedBudget);
+  const stepsDraft = steps !== null ? steps : loadedSteps === undefined ? "" : String(loadedSteps);
+  const durationDraft = duration !== null ? duration : loadedDuration === undefined ? "" : String(loadedDuration);
   const budgetReady = loadedBudget !== undefined && /^\d+$/.test(draft);
+  const stepsReady = loadedSteps !== undefined && /^\d+$/.test(stepsDraft);
+  const durationReady = loadedDuration !== undefined && /^\d+$/.test(durationDraft);
   const save = useMutation({
     mutationFn: (clear: boolean) => api("/api/admin/model-limits", {
       method: "PUT",
@@ -612,6 +659,38 @@ function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { c
           <input data-testid="task-token-budget" className={field} value={draft} onChange={(event) => setBudget(event.target.value)} />
         </label>
         <button className={button} type="submit" disabled={!budgetReady}>保存预算</button>
+      </form>
+      <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => {
+        event.preventDefault();
+        if (!stepsReady) {
+          setError("步数上限必须是非负整数");
+          return;
+        }
+        void api("/api/admin/task-max-steps", { method: "PUT", body: JSON.stringify({ value: Number(stepsDraft) }) }).then(async () => {
+          setError("");
+          await client.invalidateQueries({ queryKey: ["admin-settings"] });
+        }).catch((caught: Error) => setError(caught.message));
+      }}>
+        <label className="grid gap-1 text-sm">单任务步数上限（0 表示不限制）
+          <input data-testid="task-max-steps" className={field} value={stepsDraft} onChange={(event) => setSteps(event.target.value)} />
+        </label>
+        <button className={button} type="submit" disabled={!stepsReady}>保存步数</button>
+      </form>
+      <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => {
+        event.preventDefault();
+        if (!durationReady) {
+          setError("时长上限必须是非负整数");
+          return;
+        }
+        void api("/api/admin/task-max-duration-sec", { method: "PUT", body: JSON.stringify({ value: Number(durationDraft) }) }).then(async () => {
+          setError("");
+          await client.invalidateQueries({ queryKey: ["admin-settings"] });
+        }).catch((caught: Error) => setError(caught.message));
+      }}>
+        <label className="grid gap-1 text-sm">单任务时长上限秒（0 表示不限制，只计实际运行）
+          <input data-testid="task-max-duration" className={field} value={durationDraft} onChange={(event) => setDuration(event.target.value)} />
+        </label>
+        <button className={button} type="submit" disabled={!durationReady}>保存时长</button>
       </form>
       <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => {
         event.preventDefault();

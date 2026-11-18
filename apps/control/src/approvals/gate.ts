@@ -23,6 +23,8 @@ export interface ApprovalGateOptions {
   riskyToolNames?: ReadonlySet<string> | ((botId: string) => ReadonlySet<string>);
   onRearm?: (taskId: string, approvalId: string) => void;
   onWaiting?: (taskId: string) => void;
+  onHold?: (taskId: string) => void;
+  onRelease?: (taskId: string) => void;
   /** 审批卡片用。不能改执行参数，也不能写入配置值。 */
   summarize?: (taskId: string, tool: string, args: unknown) => string;
   browserUrl?: (taskId: string, tool: string, args: unknown) => Promise<string | undefined>;
@@ -168,9 +170,14 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
       let state = current?.state;
       if (state === "pending") {
         db.prepare("update tasks set state='waiting_approval' where id=? and state='running'").run(taskId);
+        options.onHold?.(taskId);
         const pending = Promise.withResolvers<string>();
         waiters.set(approvalId, pending.resolve);
-        state = await pending.promise;
+        try {
+          state = await pending.promise;
+        } finally {
+          options.onRelease?.(taskId);
+        }
       }
       signal?.removeEventListener("abort", abort);
       db.prepare("update tasks set state='running' where id=? and state='waiting_approval'").run(taskId);

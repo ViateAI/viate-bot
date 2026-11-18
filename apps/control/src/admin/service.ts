@@ -70,6 +70,10 @@ export interface ProvisionInput {
   maxRoutines?: number;
   /** null 或省略表示不覆盖全局预算。 */
   taskTokenBudget?: number | null;
+  /** null 或省略表示不覆盖全局步数上限。 */
+  taskMaxSteps?: number | null;
+  /** null 或省略表示不覆盖全局时长上限。 */
+  taskMaxDurationSec?: number | null;
 }
 
 export interface ProvisionDeps {
@@ -120,12 +124,16 @@ async function provisionLocked(deps: ProvisionDeps, scope: AdminScope, input: Pr
     const spec = input.spec ?? devSpec;
     assertSpec(spec);
     const taskTokenBudget = readTaskTokenBudget(input.taskTokenBudget);
+    const taskMaxSteps = readTaskLimit(input.taskMaxSteps, "步数上限");
+    const taskMaxDurationSec = readTaskLimit(input.taskMaxDurationSec, "时长上限");
     const quota: QuotaDraft = {
       maxBots: positive(input.maxBots, deps.config.defaultMaxBots, "maxBots"),
       spec,
       maxConcurrentTasks: positive(input.maxConcurrentTasks, deps.config.defaultMaxConcurrentTasks, "maxConcurrentTasks"),
       maxRoutines: nonNegative(input.maxRoutines, deps.config.defaultMaxRoutines, "maxRoutines"),
       ...(taskTokenBudget === undefined ? {} : { taskTokenBudget }),
+      ...(taskMaxSteps === undefined ? {} : { taskMaxSteps }),
+      ...(taskMaxDurationSec === undefined ? {} : { taskMaxDurationSec }),
     };
     const channelId = await resolveChannel(deps, user.id, input.channelId);
     const machines = machineRepository(deps.db);
@@ -169,6 +177,8 @@ async function provisionLocked(deps: ProvisionDeps, scope: AdminScope, input: Pr
         maxConcurrentTasks: quota.maxConcurrentTasks,
         maxRoutines: quota.maxRoutines,
         taskTokenBudget: quota.taskTokenBudget ?? null,
+        taskMaxSteps: quota.taskMaxSteps ?? null,
+        taskMaxDurationSec: quota.taskMaxDurationSec ?? null,
       },
     };
   } catch (error) {
@@ -319,6 +329,8 @@ export interface AdminUserRow {
   maxConcurrentTasks: number | null;
   maxRoutines: number | null;
   taskTokenBudget: number | null;
+  taskMaxSteps: number | null;
+  taskMaxDurationSec: number | null;
   showProcess: boolean;
 }
 
@@ -351,6 +363,8 @@ export async function listAdminUsers(
       maxConcurrentTasks: quota?.maxConcurrentTasks ?? null,
       maxRoutines: quota?.maxRoutines ?? null,
       taskTokenBudget: quota?.taskTokenBudget ?? null,
+      taskMaxSteps: quota?.taskMaxSteps ?? null,
+      taskMaxDurationSec: quota?.taskMaxDurationSec ?? null,
       showProcess: user.showProcess,
     });
   }
@@ -377,6 +391,8 @@ export async function listAdminUsers(
         maxConcurrentTasks: null,
         maxRoutines: null,
         taskTokenBudget: null,
+        taskMaxSteps: null,
+        taskMaxDurationSec: null,
         showProcess: false,
       });
     }
@@ -411,6 +427,8 @@ export function updateQuota(db: AppDatabase, scope: AdminScope, userId: string, 
       throw new AdminRejected("token 预算必须是非负整数", 400);
     }
   }
+  if ("taskMaxSteps" in patch) readTaskLimit(patch.taskMaxSteps, "步数上限");
+  if ("taskMaxDurationSec" in patch) readTaskLimit(patch.taskMaxDurationSec, "时长上限");
   const quotas = quotaRepository(db);
   if (!quotas.find(userScope(userId))) throw new AdminRejected("用户尚未开通", 404);
   if (!quotas.update(scope, userId, patch)) throw new AdminRejected("找不到配额", 404);
@@ -419,6 +437,8 @@ export function updateQuota(db: AppDatabase, scope: AdminScope, userId: string, 
     ...(patch.maxConcurrentTasks !== undefined ? { maxConcurrentTasks: patch.maxConcurrentTasks } : {}),
     ...(patch.maxRoutines !== undefined ? { maxRoutines: patch.maxRoutines } : {}),
     ...("taskTokenBudget" in patch ? { taskTokenBudget: patch.taskTokenBudget ?? null } : {}),
+    ...("taskMaxSteps" in patch ? { taskMaxSteps: patch.taskMaxSteps ?? null } : {}),
+    ...("taskMaxDurationSec" in patch ? { taskMaxDurationSec: patch.taskMaxDurationSec ?? null } : {}),
     ...(patch.spec ? { spec: patch.spec } : {}),
   });
 }
@@ -601,6 +621,12 @@ function assertSpec(spec: MachineSpec): void {
 function readTaskTokenBudget(value: number | null | undefined): number | undefined {
   if (value === undefined || value === null) return undefined;
   if (!Number.isInteger(value) || value < 0) throw new AdminRejected("taskTokenBudget 必须是非负整数", 400);
+  return value;
+}
+
+function readTaskLimit(value: number | null | undefined, label: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Number.isInteger(value) || value < 0) throw new AdminRejected(`${label}必须是非负整数`, 400);
   return value;
 }
 
