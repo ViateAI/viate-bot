@@ -6,6 +6,13 @@ describe("loadConfig", () => {
     const config = loadConfig({});
     expect(config.dataDir).toBe("/data");
     expect(config.machineImage).toBe("viate-bot/machine:dev");
+    expect(loadConfig({ VB_MACHINE_IMAGE_DEFAULT: "ghcr.io/viateai/viate-bot-machine:v0.1.0" }).machineImage).toBe(
+      "ghcr.io/viateai/viate-bot-machine:v0.1.0",
+    );
+    expect(loadConfig({
+      VB_MACHINE_IMAGE_DEFAULT: "ghcr.io/viateai/viate-bot-machine:v0.1.0",
+      VB_MACHINE_IMAGE: "viate-bot/machine:dev",
+    }).machineImage).toBe("viate-bot/machine:dev");
     expect(config.idleStopMinutes).toBe(120);
     expect(config.maxRunningTasks).toBe(20);
     expect(config.secretKeyPath).toBe("/data/secret.key");

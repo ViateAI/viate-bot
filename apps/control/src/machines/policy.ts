@@ -97,7 +97,7 @@ type HostConfig = NonNullable<ContainerCreateOptions["HostConfig"]> & {
   CgroupnsMode?: string;
 };
 
-/** 第 6.4 节的硬性规则。只接受白名单里的容器形态，创建之前必须调用。 */
+/** 只接受白名单里的容器形态，创建之前必须调用。 */
 export function assertMachinePolicy(userId: string, options: ContainerCreateOptions): void {
   const host: HostConfig = options.HostConfig ?? {};
   const binds = stringList(host.Binds, "Binds");
@@ -182,8 +182,7 @@ export function buildCreateOptions(input: MachineCreateInput): ContainerCreateOp
       ],
       CapDrop: ["ALL"],
       CapAdd: ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER"],
-      // no-new-privileges 对 setuid 二进制生效，不阻止 root 进程调用 setuid(2) 降权。
-      // 引擎默认 seccomp 仍然生效。见 TECH-DESIGN 6.4 实现备注。
+      // no-new-privileges 对 setuid 二进制生效，不阻止 root 进程调用 setuid(2) 降权。引擎默认 seccomp 仍然生效。
       SecurityOpt: ["no-new-privileges"],
       ReadonlyRootfs: false,
       Tmpfs: {

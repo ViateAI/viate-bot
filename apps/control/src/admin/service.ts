@@ -50,7 +50,7 @@ export interface MachineControl {
   start(userId: string): Promise<void>;
   stop(userId: string): Promise<void>;
   restart(userId: string): Promise<void>;
-  rebuild(userId: string, spec: MachineSpec, image: string): Promise<void>;
+  rebuild(userId: string, spec: MachineSpec): Promise<void>;
   /** 只删容器和网络，保留卷。 */
   remove(userId: string): Promise<void>;
   stats(userId: string): Promise<{ cpuPct: number; memMb: number }>;
@@ -551,8 +551,9 @@ export async function rebuildMachine(control: MachineControl, db: AppDatabase, s
   }
   const quota = quotaRepository(db).find(userScope(machine.userId));
   const spec = quota?.spec ?? machine.spec;
-  await control.rebuild(machine.userId, spec, machine.imageVersion);
-  auditRepository(db).write(scope, "machine.rebuild", machine.id, { userId: machine.userId, image: machine.imageVersion });
+  await control.rebuild(machine.userId, spec);
+  const rebuilt = requireMachine(db, scope, id);
+  auditRepository(db).write(scope, "machine.rebuild", machine.id, { userId: machine.userId, image: rebuilt.imageVersion });
 }
 
 export async function deleteMachine(control: MachineControl, db: AppDatabase, scope: AdminScope, id: string, email: string) {
@@ -587,6 +588,7 @@ function publicMachine(machine: MachineAdminRecord) {
     image: machine.imageVersion,
     createdAt: machine.createdAt,
     lastHeartbeatAt: machine.lastHeartbeatAt,
+    statusDetail: machine.statusDetail,
   };
 }
 

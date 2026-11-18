@@ -1,6 +1,5 @@
 /**
  * 核心只依赖这三个接口。viate 的实现由 compose.ts 按 VB_INTEGRATION 接进来。
- * 签名相对设计文档的细化写在 TECH-DESIGN 第 4 节的实现备注里。
  */
 
 export interface ExternalIdentity {

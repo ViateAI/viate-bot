@@ -37,7 +37,7 @@ const PLATFORM_PROMPT_LINES = [
 const HUMAN_CHECK_RULE =
   "遇到人机验证，可以按页面提示尝试一次（例如点击复选框）；没有通过就停止，告诉用户卡在哪个网站、什么验证，请用户决定。不要反复尝试，也不要寻求绕过或破解验证。";
 
-/** 第 9 步之前自动写入的内置提示词。只用来认出没人改过的版本 1。 */
+/** 加上人机验证规则之前自动写入的内置提示词。只用来认出没人改过的版本 1。 */
 const PREVIOUS_BUILTIN_PLATFORM_PROMPT = PLATFORM_PROMPT_LINES.join("\n");
 
 export const DEFAULT_PLATFORM_PROMPT = [...PLATFORM_PROMPT_LINES, HUMAN_CHECK_RULE].join("\n");

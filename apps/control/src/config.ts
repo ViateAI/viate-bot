@@ -84,7 +84,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig 
       .map((email) => email.trim().toLowerCase())
       .filter((email) => email.length > 0),
     dataDir,
-    machineImage: optional(env, "VB_MACHINE_IMAGE", "viate-bot/machine:dev"),
+    machineImage: optional(env, "VB_MACHINE_IMAGE", optional(env, "VB_MACHINE_IMAGE_DEFAULT", "viate-bot/machine:dev")),
     idleStopMinutes: integer(env, "VB_IDLE_STOP_MINUTES", 120),
     maxRunningTasks: integer(env, "VB_MAX_RUNNING_TASKS", 20),
     metricsToken: optional(env, "VB_METRICS_TOKEN", ""),

@@ -14,6 +14,8 @@ export interface MachineRecord {
   imageVersion: string;
   spec: MachineSpec;
   tokenEnc: string;
+  /** 最近一次协议拒绝的原因。没有拒绝时为空。 */
+  statusDetail?: string | null;
 }
 
 /** 管理端可以改的字段。不含 machined token。 */
@@ -28,6 +30,7 @@ export interface MachinePatch {
   spec?: MachineSpec;
   tokenEnc?: string;
   lastHeartbeatAt?: string | null;
+  statusDetail?: string | null;
 }
 
 /** 管理端能看到的机器元数据。不含 machined token。 */
@@ -47,6 +50,7 @@ export interface MachineAdminRecord {
   createdAt: string;
   updatedAt: string;
   lastHeartbeatAt: string | null;
+  statusDetail: string | null;
 }
 
 export interface MachineStore {
@@ -129,6 +133,7 @@ export function machineRepository(db: AppDatabase): MachineStore {
           createdAt: machines.createdAt,
           updatedAt: machines.updatedAt,
           lastHeartbeatAt: machines.lastHeartbeatAt,
+          statusDetail: machines.statusDetail,
         })
         .from(machines)
         .all()
@@ -145,6 +150,7 @@ export function machineRepository(db: AppDatabase): MachineStore {
           createdAt: machines.createdAt,
           updatedAt: machines.updatedAt,
           lastHeartbeatAt: machines.lastHeartbeatAt,
+          statusDetail: machines.statusDetail,
         })
         .from(machines)
         .where(eq(machines.id, id))
@@ -179,6 +185,7 @@ function toAdmin(row: {
   createdAt: string;
   updatedAt: string;
   lastHeartbeatAt: string | null;
+  statusDetail: string | null;
 }): MachineAdminRecord {
   return {
     id: row.id,
@@ -189,6 +196,7 @@ function toAdmin(row: {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     lastHeartbeatAt: row.lastHeartbeatAt,
+    statusDetail: row.statusDetail,
   };
 }
 
@@ -203,6 +211,7 @@ function toRecord(row: typeof machines.$inferSelect): MachineRecord {
     imageVersion: row.imageVersion,
     spec: readSpec(row.specJson),
     tokenEnc: row.machinedTokenEnc,
+    statusDetail: row.statusDetail,
   };
 }
 
@@ -216,6 +225,7 @@ function columns(patch: MachinePatch): Partial<typeof machines.$inferInsert> {
     ...(patch.spec !== undefined ? { specJson: JSON.stringify(patch.spec) } : {}),
     ...(patch.tokenEnc !== undefined ? { machinedTokenEnc: patch.tokenEnc } : {}),
     ...(patch.lastHeartbeatAt !== undefined ? { lastHeartbeatAt: patch.lastHeartbeatAt } : {}),
+    ...(patch.statusDetail !== undefined ? { statusDetail: patch.statusDetail } : {}),
   };
 }
 

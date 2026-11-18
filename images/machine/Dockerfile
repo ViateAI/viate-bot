@@ -21,12 +21,13 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 # Playwright 打包的 Chromium 同时有 linux/amd64 和 linux/arm64。
 # Debian 的 chromium 包在容器里依赖不完整；Google Chrome stable 没有 arm64。
 ARG PLAYWRIGHT_VERSION=1.56.1
-RUN npm install --global playwright-core@${PLAYWRIGHT_VERSION} \
+ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org
+RUN npm install --registry="$NPM_CONFIG_REGISTRY" --global playwright-core@${PLAYWRIGHT_VERSION} \
     && playwright-core install --with-deps chromium \
     && rm -rf /root/.npm
 
 # 运行时不再依赖 node 解析 playwright-core，把浏览器路径写进镜像。
-# openbox、x11vnc 只安装，M1 不启动。
+# openbox、x11vnc 只安装，这个镜像的默认进程不启动它们。
 RUN mkdir -p /opt/viate \
     && node -e "process.stdout.write(require('/usr/local/lib/node_modules/playwright-core').chromium.executablePath())" > /opt/viate/chromium-bin \
     && test -x "$(cat /opt/viate/chromium-bin)" \
@@ -46,6 +47,7 @@ RUN usermod --login bot --home /home/bot --move-home node \
 
 COPY machined.mjs /opt/viate/machined.mjs
 COPY fs-worker.mjs /opt/viate/fs-worker.mjs
+COPY LICENSE /opt/viate/LICENSE
 COPY run-as-bot.mjs /opt/viate/run-as-bot.mjs
 COPY chromium.sh /opt/viate/chromium.sh
 COPY xvfb.sh /opt/viate/xvfb.sh
@@ -55,6 +57,20 @@ RUN chmod 755 /opt/viate/machined.mjs /opt/viate/fs-worker.mjs /opt/viate/run-as
     && sed -i 's/\r$//' /opt/viate/chromium.sh /opt/viate/xvfb.sh
 
 EXPOSE 7070
+
+COPY source_manifest.py /usr/local/lib/viate-bot/source_manifest.py
+RUN python3 /usr/local/lib/viate-bot/source_manifest.py
+
+# MACHINE_PROTOCOL 必须和 packages/protocol 的 MACHINE_PROTOCOL_VERSION 一致。
+ARG MACHINE_PROTOCOL=1
+ARG IMAGE_VERSION=0.0.0
+ARG IMAGE_REVISION=unknown
+ARG IMAGE_SOURCE=https://github.com/ViateAI/viate-bot
+LABEL ai.viate.bot.machine-protocol=$MACHINE_PROTOCOL \
+      org.opencontainers.image.version=$IMAGE_VERSION \
+      org.opencontainers.image.source=$IMAGE_SOURCE \
+      org.opencontainers.image.revision=$IMAGE_REVISION \
+      org.opencontainers.image.licenses=MIT
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]

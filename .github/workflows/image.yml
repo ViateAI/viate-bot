@@ -1,0 +1,162 @@
+name: Image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release-tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    if: inputs.release-tag != '' || github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    outputs:
+      machine_ref: ${{ steps.tags.outputs.machine_ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release-tag || (github.event_name == 'release' && github.event.release.tag_name) || github.sha }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.16.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bundle machined and write tags
+        id: tags
+        env:
+          EVENT_NAME: ${{ inputs.release-tag != '' && 'release' || github.event_name }}
+          RELEASE_TAG: ${{ inputs.release-tag || github.event.release.tag_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          pnpm install --frozen-lockfile
+          SHA=$(git rev-parse HEAD)
+          pnpm --filter @viate-bot/protocol build
+          pnpm --filter @viate-bot/browser build
+          pnpm --filter @viate-bot/machined build
+          cp apps/machined/dist/machined.mjs images/machine/machined.mjs
+          cp apps/machined/dist/fs-worker.mjs images/machine/fs-worker.mjs
+          cp LICENSE images/machine/LICENSE
+          protocol=$(sed -n 's/^export const MACHINE_PROTOCOL_VERSION = \([0-9][0-9]*\);/\1/p' packages/protocol/src/index.ts)
+          test -n "$protocol"
+          case "$EVENT_NAME" in
+            release)
+              version="${RELEASE_TAG#v}"
+              machine_ref="ghcr.io/viateai/viate-bot-machine:${RELEASE_TAG}"
+              printf '%s\n' "ghcr.io/viateai/viate-bot-control:latest" "ghcr.io/viateai/viate-bot-control:${RELEASE_TAG}" > "${RUNNER_TEMP}/control-tags.txt"
+              printf '%s\n' "ghcr.io/viateai/viate-bot-machine:latest" "ghcr.io/viateai/viate-bot-machine:${RELEASE_TAG}" > "${RUNNER_TEMP}/machine-tags.txt"
+              ;;
+            workflow_dispatch)
+              version="sha-${SHA}"
+              machine_ref="ghcr.io/viateai/viate-bot-machine:sha-${SHA}"
+              printf '%s\n' "ghcr.io/viateai/viate-bot-control:sha-${SHA}" > "${RUNNER_TEMP}/control-tags.txt"
+              printf '%s\n' "ghcr.io/viateai/viate-bot-machine:sha-${SHA}" > "${RUNNER_TEMP}/machine-tags.txt"
+              ;;
+            *)
+              echo "unexpected event: ${EVENT_NAME}" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "version=${version}"
+            echo "revision=${SHA}"
+            echo "protocol=${protocol}"
+            echo "machine_ref=${machine_ref}"
+            echo "control<<EOF"
+            cat "${RUNNER_TEMP}/control-tags.txt"
+            echo "EOF"
+            echo "machine<<EOF"
+            cat "${RUNNER_TEMP}/machine-tags.txt"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push the machine image
+        uses: docker/build-push-action@v6
+        with:
+          context: images/machine
+          file: images/machine/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.machine }}
+          cache-from: type=gha,scope=machine
+          cache-to: type=gha,scope=machine,mode=max
+          build-args: |
+            IMAGE_VERSION=${{ steps.tags.outputs.version }}
+            IMAGE_REVISION=${{ steps.tags.outputs.revision }}
+            IMAGE_SOURCE=https://github.com/ViateAI/viate-bot
+            MACHINE_PROTOCOL=${{ steps.tags.outputs.protocol }}
+
+      - name: Build and push the control image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: images/control/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.control }}
+          cache-from: type=gha,scope=control
+          cache-to: type=gha,scope=control,mode=max
+          build-args: |
+            IMAGE_VERSION=${{ steps.tags.outputs.version }}
+            IMAGE_REVISION=${{ steps.tags.outputs.revision }}
+            IMAGE_SOURCE=https://github.com/ViateAI/viate-bot
+            MACHINE_IMAGE_REF=${{ steps.tags.outputs.machine_ref }}
+
+  release-sources:
+    needs: image
+    if: inputs.release-tag != '' || github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract architecture-specific source inventories and attach to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release-tag || github.event.release.tag_name }}
+          MACHINE_REF: ${{ needs.image.outputs.machine_ref }}
+        run: |
+          set -eu
+          cid=
+          trap 'if [ -n "$cid" ]; then docker rm "$cid"; fi' EXIT
+          for arch in amd64 arm64; do
+            docker pull --platform "linux/$arch" "$MACHINE_REF"
+            cid=$(docker create --platform "linux/$arch" "$MACHINE_REF")
+            file="$RUNNER_TEMP/machine-sources-linux-$arch.txt"
+            docker cp "$cid:/usr/share/doc/viate-bot/SOURCES.txt" "$file"
+            docker rm "$cid"
+            cid=
+            gh release upload "$RELEASE_TAG" "$file" --clobber
+          done

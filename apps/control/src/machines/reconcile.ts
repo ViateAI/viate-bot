@@ -28,7 +28,7 @@ const HEARTBEAT_FAILURES_BEFORE_RESTART = 3;
 const RESTART_FAILURES_BEFORE_ERROR = 3;
 const STOP_WAIT_SEC = 60;
 
-/** 第 6.6 节对账表。纯函数，不碰 Docker。 */
+/** 对账决策表。纯函数，不碰 Docker。 */
 export function decideReconcile(observation: ReconcileObservation): ReconcileAction {
   const { desired, actual } = observation;
   if (desired === "deleted") return actual === "missing" ? { type: "none" } : { type: "delete" };

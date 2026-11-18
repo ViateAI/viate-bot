@@ -1,5 +1,6 @@
 import type { MachineEndpoint } from "@viate-bot/protocol";
 import { decrypt, encrypt } from "../crypto.js";
+import { acceptMachineProtocol, noteMachineProtocolMismatch, ProtocolMismatchError, protocolCompatible, protocolMismatch, reportedProtocol } from "./protocol.js";
 import type { AppDatabase } from "../db/index.js";
 import { machineRepository } from "../db/machines.js";
 import { quotaRepository } from "../db/quotas.js";
@@ -71,6 +72,17 @@ export async function prepareMachineEndpoint(
           signal: AbortSignal.timeout(2_000),
         });
         if (response.ok) {
+          const reported = reportedProtocol(await response.json().catch(() => null));
+          if (!protocolCompatible(reported)) {
+            noteMachineProtocolMismatch(ctx.db, record, reported);
+            try {
+              await ctx.driver.stop(userId);
+            } catch {
+              // 停不掉也拒绝继续使用。
+            }
+            throw protocolMismatch(reported);
+          }
+          acceptMachineProtocol(ctx.db, userId);
           onPhase("ready");
           const current = store.find(scope) ?? record;
           if (ctx.reconcileApps && current.containerId) {
@@ -78,7 +90,8 @@ export async function prepareMachineEndpoint(
           }
           return { host, port: MACHINED_PORT, token };
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof ProtocolMismatchError) throw error;
         // 容器刚起来时健康检查会失败，继续等。
       }
     }

@@ -3,14 +3,17 @@ import { machineRepository } from "../db/machines.js";
 import type { AppDatabase } from "../db/index.js";
 import type { DockerDriver } from "../machines/docker.js";
 import type { MachineSpec } from "../machines/policy.js";
+import { prepareMachineEndpoint, type MachineHost } from "../machines/ready.js";
 import { userScope } from "../scope.js";
 
-export function dockerMachineControl(db: AppDatabase, driver: DockerDriver): MachineControl {
+export function dockerMachineControl(host: MachineHost): MachineControl {
+  const { db, driver } = host;
   const store = machineRepository(db);
   return {
     async start(userId) {
       await driver.start(userId);
       store.update(userScope(userId), { state: "running" });
+      await prepareMachineEndpoint(host, userId, () => {});
     },
     async stop(userId) {
       await driver.stop(userId);
@@ -20,9 +23,11 @@ export function dockerMachineControl(db: AppDatabase, driver: DockerDriver): Mac
       await driver.stop(userId);
       await driver.start(userId);
       store.update(userScope(userId), { state: "running" });
+      await prepareMachineEndpoint(host, userId, () => {});
     },
-    async rebuild(userId, spec: MachineSpec, image: string) {
-      await driver.rebuild(store, userScope(userId), spec, image);
+    async rebuild(userId, spec: MachineSpec) {
+      const record = await driver.rebuild(store, userScope(userId), spec);
+      if (record.state === "running") await prepareMachineEndpoint(host, userId, () => {});
     },
     async remove(userId) {
       const scope = userScope(userId);

@@ -192,7 +192,7 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
       options.waitHealthy ??
       (bypass ? async () => {} : (userId) => prepareMachineEndpoint(ctx, userId, () => {}, options.fetch ?? fetch).then(() => undefined)),
     deleteMachine: options.deleteMachine ?? ((userId) => deleteCreatedMachine(db, driver, userId)),
-    machineControl: options.machineControl ?? dockerMachineControl(db, driver),
+    machineControl: options.machineControl ?? dockerMachineControl(ctx),
     now,
   });
   registerWebsocket(app, { db, key, config, runtime, hub, now });

@@ -1,51 +1,27 @@
 # viate-bot
 
-给每个用户一台容器机器（浏览器、终端、文件系统）和一个控制面。用户在网页上和自己的 bot 对话；bot 可以跑定时任务，也可以使用管理员推送的应用（Skill、MCP、CLI）。用户之间隔离；同一用户的 bot 共享这台机器。
+中文：[README.zh-CN.md](README.zh-CN.md)
 
-要求 Node.js 24 或更高，pnpm 12.16.1（`packageManager` 字段）。
+Each user gets one container machine (browser, terminal, filesystem) and a control plane. People talk to their own bots in the web UI. A bot can run routines and use apps an administrator pushed (Skill, MCP, CLI). Users are isolated from each other. Bots that belong to the same user share that user's machine.
 
-## 开发
+Requires Node.js 24 or newer and pnpm 12.16.1 (the `packageManager` field).
 
-控制面不读取 `.env` 文件。先把变量放进当前进程的环境，再启动。仓库根目录：
+## Architecture
+
+`apps/web` is the UI. `apps/control` handles login, bots, chat tasks, approvals, routines, and the admin UI. State is SQLite. Each user has one machine container. `machined` inside that image runs commands, reads and writes files, drives the browser, and loads pushed apps. The control plane connects out to machined. It does not join the user's bridge.
+
+## Run the published images
+
+After the first release, images are on GHCR. The published control image defaults its machine image to the machine image with the same tag. `VB_MACHINE_IMAGE` still overrides that.
 
 ```sh
-cp .env.example .env
-set -a
-source .env
-set +a
-pnpm install --frozen-lockfile
-pnpm --filter @viate-bot/control dev
+docker pull ghcr.io/viateai/viate-bot-control:v0.1.0
+docker pull ghcr.io/viateai/viate-bot-machine:v0.1.0
 ```
 
-PowerShell 没有仓库里的导入脚本。在 Windows 上按下表逐项设置进程环境，或在 WSL 里 `source`。
-
-| 命令 | 作用 |
-| --- | --- |
-| `pnpm install --frozen-lockfile` | 按锁文件安装 |
-| `pnpm dev` | 并行跑各包已有的 `dev`：控制面、machined、网页 |
-| `pnpm --filter @viate-bot/control dev` | 只跑控制面（`tsx src/main.ts`） |
-| `pnpm --filter @viate-bot/machined dev` | 只跑本机 machined |
-| `pnpm --filter @viate-bot/web dev` | Vite，端口 4420，把 `/api`、`/auth`、`/ws` 代理到 `VITE_CONTROL_ORIGIN`（缺省 `http://127.0.0.1:4418`） |
-| `pnpm typecheck` | 先构建 protocol，再做各包类型检查 |
-| `pnpm test` | 各包测试 |
-| `pnpm build` | 构建 protocol，再构建其余有 `build` 的包 |
-| `pnpm --filter @viate-bot/web build` | 网页构建到 `apps/web/dist`；控制面同源提供这个目录 |
-| `pnpm --filter @viate-bot/control machine <create\|start\|stop\|rebuild\|delete\|inspect> <userId>` | 开发机器命令。必须 `VB_DEV=1` |
-| `pnpm --filter @viate-bot/machined image [tag] [platform]` | 构建 machined 并 `docker buildx build --load`。缺省标签 `viate-bot/machine:dev` |
-| `pnpm --filter @viate-bot/control exec tsx scripts/load-control.ts` | 控制面压测。只绑 `127.0.0.1` 的 4418、4421、4422，不进测试套件 |
-
-开发时浏览器走 Vite（4420）的话，`VB_PUBLIC_URL` 必须是浏览器打开的源，`VB_CONTROL_PORT` 必须和 `VITE_CONTROL_ORIGIN` 的端口一致。例如控制面 `4418`、公开地址 `http://127.0.0.1:4420`、`VITE_CONTROL_ORIGIN=http://127.0.0.1:4418`。控制面自己提供构建好的网页时，公开地址和控制面端口用同一个源。
-
-控制面构建会把 `src` 中的 JavaScript（包括 `apps/link-mcp.mjs`）一并输出到 `dist`。部署前执行 `pnpm --filter @viate-bot/control build && pnpm --filter @viate-bot/control check:dist`，检查编译后的安装模块和服务端导入图可直接加载，不依赖 `src`。镜像在 `deploy --prod` 后再跑同一检查，防止开发依赖掩盖运行依赖缺失。部署仍需 `apps/control/drizzle` 迁移文件、工作区依赖和构建好的网页。
-
-## 控制面镜像
-
-在仓库根目录构建。Node 24 基础镜像按 digest 固定，pnpm 版本与根 `packageManager` 一致，锁文件冻结；先复制工作区清单安装依赖，源码改动不会重新安装依赖。镜像只打包网页、迁移、编译产物和生产依赖，不含工作区源码、测试或环境文件，运行用户是 `node`。
-
-控制面创建机器时只连接 `/var/run/docker.sock`，目前不读取 `DOCKER_HOST`。必须挂入实际 Docker daemon 的 socket，且容器里的非 root 用户要有该 socket 的组权限。以下运行示例在 **Docker daemon 所在的 Linux 环境**执行（Rancher Desktop 为其 WSL 环境）；先确认 socket 所属 GID，不能直接套用 Mac/Windows 代理 socket 的 GID。
+Run the control plane on the Linux host where the Docker daemon runs (for Rancher Desktop, that is its WSL distro). Check the socket GID there. Do not reuse the GID of a Mac or Windows proxy socket.
 
 ```sh
-docker build -f images/control/Dockerfile -t viate-bot/control:dev .
 docker run --rm --network host \
   --group-add "$(stat -c '%g' /var/run/docker.sock)" \
   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -53,90 +29,147 @@ docker run --rm --network host \
   -e VB_OIDC_ISSUER=https://id.example/ \
   -e VB_OIDC_CLIENT_ID=bot \
   -e VB_OIDC_CLIENT_SECRET=replace-me \
+  -e VB_ADMIN_EMAILS=admin@example.com \
   -e VB_MODEL_BASE_URL=https://model.example/v1 \
   -e VB_MODEL_API_KEY=replace-me \
+  -e VB_MODELS=your-model-id \
   -v viate-bot-data:/data \
-  viate-bot/control:dev
+  ghcr.io/viateai/viate-bot-control:v0.1.0
 ```
 
-`/data` 挂载保存 SQLite 和密钥。登录、模型地址和密钥按上一节的环境变量传入，不要写进镜像。构建阶段会编译 `better-sqlite3`，并让 `esbuild` 下载对应平台的二进制；这两项在 `pnpm-workspace.yaml` 的 `allowBuilds` 里，其余依赖安装脚本不运行。
+`/data` holds SQLite and the encryption key. Pass login and model settings as environment variables. Do not bake them into the image. `--network host` is required so the control plane can open connections to machined. Putting the control plane on the user bridge does not work: the firewall drops new connections that originate on that bridge, including the control plane. See [firewall boundaries](deploy/rancher-desktop/README.md#实际策略与边界). On the host network, ports listen on the host. Put a reverse proxy and a host firewall in front of them.
 
-Docker socket 访问相当于该 daemon 的 root 权限；不要用 `chmod 666` 或开放未认证的 Docker TCP 端口解决权限问题。绑定宿主目录到 `/data` 时还须允许 UID 1000 写入。`--network host` 使控制面从 daemon 宿主网络主动连接用户机器，和现有 Rancher Desktop 防火墙相容；仅把控制面加入用户网桥会被私网规则拦截，不能视为受支持的部署方式。详见 [防火墙部署边界](deploy/rancher-desktop/README.md#实际策略与边界)。Host 网络下端口直接在宿主监听，请由反向代理和宿主防火墙限制入口。
+Access to the Docker socket is root on that daemon. Do not `chmod 666` the socket or open unauthenticated Docker TCP. A bind-mounted `/data` must be writable by UID 1000.
 
-任务预算、用量和 length 续写次数在等待用户时也会持久化；重启恢复同一个任务不会重新获得预算。预算耗尽后不执行该轮返回的工具，任务失败且显示原因。缺少正常结束标记的模型响应，以及步数/时长耗尽，都不能伪造正常 `stop`。shell 自动规则只匹配可静态解析的字面词，含展开、环境变量覆盖或非默认工作目录时转人工审批；`fs_write` 不跟随路径中的符号链接。bot 禁用应用后，新任务不再加载该应用的 MCP 工具。
+Register `{VB_PUBLIC_URL}/auth/callback` at your IdP. Replace `admin@example.com` with your verified IdP email and `your-model-id` with a model served by your gateway. Sign in as that admin, then provision users in the admin UI. Install and verify the Rancher Desktop firewall before creating any user machine; a Docker bridge alone does not provide the documented egress isolation.
 
-## 配置
+## Development
 
-只读进程环境。缺省值是 `apps/control/src/config.ts` 里变量未设置或空字符串时的值。`.env.example` 把 `VB_DATA_DIR` 设成 `./data`，代码缺省是 `/data`。
+The control plane does not read a `.env` file. Export variables into the process, then start. From the repository root:
 
-| 变量 | 缺省 | 作用 |
+```sh
+cp .env.example .env
+set -a
+source .env
+set +a
+pnpm install --frozen-lockfile
+pnpm --filter @viate-bot/protocol build
+pnpm --filter @viate-bot/integration-viate build
+pnpm --filter @viate-bot/browser build
+pnpm --filter @viate-bot/control dev
+```
+
+PowerShell has no equivalent of the sourced file. On Windows, set each variable in the process, or use WSL.
+
+| Command | What it does |
+| --- | --- |
+| `pnpm install --frozen-lockfile` | Install from the lockfile |
+| `pnpm dev` | Run every package `dev` script that exists: control, machined, web |
+| `pnpm --filter @viate-bot/control dev` | Control plane only (`tsx src/main.ts`) |
+| `pnpm --filter @viate-bot/machined dev` | Local machined |
+| `pnpm --filter @viate-bot/web dev` | Vite on port 4420. Proxies `/api`, `/auth`, and `/ws` to `VITE_CONTROL_ORIGIN` (default `http://127.0.0.1:4418`) |
+| `pnpm typecheck` | Build protocol, then typecheck packages that have the script |
+| `pnpm test` | Package tests |
+| `pnpm build` | Build protocol, then every other package that has `build` |
+| `pnpm --filter @viate-bot/web build` | Web build in `apps/web/dist`. The control plane serves that directory when it is present |
+| `pnpm --filter @viate-bot/control machine <create\|start\|stop\|rebuild\|delete\|inspect> <userId>` | Dev machine command. Requires `VB_DEV=1` |
+| `pnpm --filter @viate-bot/machined image [tag] [platform]` | Build machined and `docker buildx build --load`. Default tag `viate-bot/machine:dev` |
+| `pnpm --filter @viate-bot/control exec tsx scripts/load-control.ts` | Control-plane load test. Binds `127.0.0.1` on 4418, 4421, and 4422. Not part of the test suite |
+
+When the browser uses Vite on 4420, `VB_PUBLIC_URL` must be the origin the browser opens, and `VB_CONTROL_PORT` must be the port in `VITE_CONTROL_ORIGIN`. Example: control `4418`, public URL `http://127.0.0.1:4420`, `VITE_CONTROL_ORIGIN=http://127.0.0.1:4418`. When the control plane serves the built web app itself, the public URL and the control port are the same origin.
+
+The control build copies JavaScript from `src`, including `apps/link-mcp.mjs`, into `dist`. Before deploy, run `pnpm --filter @viate-bot/control build && pnpm --filter @viate-bot/control check:dist`. That loads the compiled install module and the server import graph without `src`. Run the same check again after `deploy --prod` so development dependencies cannot hide a missing runtime package. A deploy still needs `apps/control/drizzle`, the workspace dependencies, and the built web app.
+
+The control image is built from the repository root. The Node 24 base image is pinned by digest, pnpm matches the root `packageManager`, and the lockfile is frozen. Manifests are copied before the source, so source edits do not reinstall dependencies. The image contains the web build, migrations, compiled output, and production dependencies. It does not contain workspace source, tests, or env files. The process user is `node`.
+
+The control plane connects only to `/var/run/docker.sock`. It does not read `DOCKER_HOST`. Mount the real daemon socket, and give the non-root user in the container access to that socket's group. See the GHCR example above.
+
+Building the image compiles `better-sqlite3` and lets `esbuild` download its platform binary. Both are allowed in `pnpm-workspace.yaml`. Other dependency install scripts do not run.
+
+Task budget, usage, and length-continuation counts are stored while waiting for the user. Resuming the same task after a restart does not grant a new budget. When the budget is spent, that turn's tools do not run, and the task fails with the reason. A model response without a normal finish marker, or a task that hits the step or duration limit, is not reported as a normal `stop`. An automatic shell rule matches only literal tokens that can be parsed statically. Expansion, an environment override, or a non-default working directory goes to a person. `fs_write` does not follow symlinks in the path. After a bot disables an app, new tasks do not load that app's MCP tools.
+
+## Configuration
+
+Read from the process environment only. Defaults are the values in `apps/control/src/config.ts` when a variable is unset or empty. `.env.example` sets `VB_DATA_DIR` to `./data`. The code default is `/data`.
+
+| Variable | Default | Purpose |
 | --- | --- | --- |
-| `VB_PUBLIC_URL` | `http://127.0.0.1:3000` | 浏览器所见的源。OIDC 回调和 WebSocket 的 Origin 检查用它 |
-| `VB_OIDC_ISSUER` | 空 | OIDC issuer。登录时三项都必须有值 |
-| `VB_OIDC_CLIENT_ID` | 空 | OIDC client id |
-| `VB_OIDC_CLIENT_SECRET` | 空 | OIDC client secret |
-| `VB_ALLOW_SIGNUP` | `false` | `true` 时，未知身份可以建一个还没有 bot 的用户。不会自动开通 bot |
-| `VB_OIDC_TRUST_EMAIL` | `false` | **全局邮箱信任开关，不仅用于管理员首登。** 关闭时只有 `email_verified=true` 才能按邮箱认管理员、自动绑定唯一未绑定用户或放行管理员首登。打开后这三条路径都信任 IdP 的未验证邮箱（含 `false` 或缺失），但仍须有非空邮箱声明。能在 IdP 拿到管理员邮箱的人可成为管理员；能拿到任意预开通邮箱的人也可绑定该唯一未绑定用户并访问其 bot、机器及数据，即使关闭注册且邮箱不在管理员列表。已绑定用户仍只按 `(provider, sub)` 匹配，不按邮箱合并。只有 IdP 不开放自助注册、或账号由管理员创建且邮箱不可由不可信用户任意修改时才应打开；对接其他 IdP 先确认。viate 的 `email_verified` 恒为 `false`，接 viate 时需要打开 |
-| `VB_MODEL_BASE_URL` | 空 | 模型网关地址。调用模型时必须有值 |
-| `VB_MODEL_API_KEY` | 空 | 共享 key。共享模式下调用模型时必须有值 |
-| `VB_MODELS` | 空 | 逗号分隔的模型白名单。空表示不额外限制 |
-| `VB_MODEL_API` | `openai-completions` | `openai-completions` 或 `openai-responses` |
-| `VB_MODEL_MAX_TOKENS` | `4096` | 单次生成上限，正整数 |
-| `VB_MODEL_CONTEXT_TOKENS` | `256000` | 上下文窗口，正整数。管理员可按模型覆盖；只影响之后开始的任务 |
-| `VB_SUMMARY_MAX_TOKENS` | `2000` | 上下文摘要单次输出上限，正整数 |
-| `VB_TASK_TOKEN_BUDGET` | `2000000` | 单任务 token 预算。`0` 表示不限制。管理员可在模型设置改全局值，在配额里按用户覆盖。计入输入和输出，不计缓存读写 |
-| `VB_MODEL_RATE_USER` | `120` | 每用户每分钟模型请求上限。非负整数，`0` 表示不限制。管理员可在模型设置覆盖，下一次调用即生效。超限会等待，不让任务失败 |
-| `VB_MODEL_RATE_BOT` | `60` | 每 bot 每分钟模型请求上限。非负整数，`0` 表示不限制。和用户窗口一起判断，两个都有空位才记一次 |
-| `VB_MAX_TASK_STEPS` | `16` | 单任务步数上限，正整数 |
-| `VB_MAX_TASK_DURATION_SEC` | `600` | 单任务时长上限（秒），正整数 |
-| `VB_DEFAULT_MAX_BOTS` | `5` | 管理员开通时写入配额的 bot 上限。已有配额行不会被这个值改写 |
-| `VB_DEFAULT_MAX_CONCURRENT_TASKS` | `2` | 开通时写入配额的单用户并发任务上限 |
-| `VB_DEFAULT_MAX_ROUTINES` | `10` | 开通时写入配额的定时任务上限。已有配额为 0 的用户不会被改写 |
-| `VB_INTEGRATION` | `none` | `none` 或 `viate` |
-| `VB_VIATE_URL` | 空 | 只在 `VB_INTEGRATION=viate` 时读。调服务接口时三项都必须有值 |
-| `VB_VIATE_CLIENT_ID` | 空 | viate 服务客户端 id |
-| `VB_VIATE_CLIENT_SECRET` | 空 | viate 服务客户端密钥 |
-| `VB_ADMIN_EMAILS` | 空 | 逗号分隔。可信邮箱命中则登录后是管理员 |
-| `VB_DATA_DIR` | `/data` | SQLite、密钥和应用归档目录。库文件是 `$VB_DATA_DIR/viate-bot.sqlite` |
-| `VB_MACHINE_IMAGE` | `viate-bot/machine:dev` | 新建机器使用的镜像标签 |
-| `VB_IDLE_STOP_MINUTES` | `120` | 空闲多久后停机，单位分钟。非负整数。`0` 表示空闲条件一满足就停机 |
-| `VB_MAX_RUNNING_TASKS` | `20` | 控制面全局同时处于运行中的任务上限。非负整数。`0` 表示不再开始新任务 |
-| `VB_METRICS_TOKEN` | 空 | `GET /metrics` 的 Bearer token。空则拒绝所有抓取 |
-| `VB_VISION_MODELS` | 空 | 逗号分隔。这些模型才注册 `browser_screenshot` |
-| `VB_SECRET_WAIT_MS` | `1800000` | `request_secret` 等待用户的毫秒数。超时后任务失败。正整数 |
-| `VB_CONTROL_PORT` | `3000` | 控制面监听端口。非负整数 |
-| `VB_DEV` | 关 | 只有 `1` 打开 `/dev/*` 和 `machine` 命令 |
+| `VB_PUBLIC_URL` | `http://127.0.0.1:3000` | Origin the browser uses. OIDC redirect and WebSocket Origin checks use it |
+| `VB_OIDC_ISSUER` | empty | OIDC issuer. Login needs all three OIDC variables |
+| `VB_OIDC_CLIENT_ID` | empty | OIDC client id |
+| `VB_OIDC_CLIENT_SECRET` | empty | OIDC client secret |
+| `VB_ALLOW_SIGNUP` | `false` | `true` lets an unknown identity create a user with no bot. It does not provision a bot |
+| `VB_OIDC_TRUST_EMAIL` | `false` | **Global email-trust switch, not only the first admin login.** Off: only `email_verified=true` can match an admin by email, bind the single unbound user, or pass the first admin login. On: those three paths trust an unverified email from the IdP (`false` or missing), but the email claim must be non-empty. Anyone who can obtain an admin email at the IdP becomes an admin. Anyone who can obtain a pre-provisioned email can bind that still-unbound user and reach their bots, machine, and data, even when signup is closed and the email is not an admin. Already-bound users still match only `(provider, sub)`, not email. Turn this on only when the IdP has no open signup, or accounts are created by an admin and untrusted users cannot change the email. Confirm that before using another IdP. viate always reports `email_verified=false`, so viate needs this on |
+| `VB_MODEL_BASE_URL` | empty | Model gateway. Required when calling a model |
+| `VB_MODEL_API_KEY` | empty | Shared key. Required in shared-key mode |
+| `VB_MODELS` | empty | Comma-separated model allowlist. Empty means no extra restriction |
+| `VB_MODEL_API` | `openai-completions` | `openai-completions` or `openai-responses` |
+| `VB_MODEL_MAX_TOKENS` | `4096` | Per-call generation cap, positive integer |
+| `VB_MODEL_CONTEXT_TOKENS` | `256000` | Context window, positive integer. An admin can override per model. Applies to tasks that start afterwards |
+| `VB_SUMMARY_MAX_TOKENS` | `2000` | Context-summary output cap, positive integer |
+| `VB_TASK_TOKEN_BUDGET` | `2000000` | Per-task token budget. `0` means unlimited. Admins can change the global value and override it per user. Counts input and output, not cache reads or writes |
+| `VB_MODEL_RATE_USER` | `120` | Per-user model requests per minute. Non-negative integer. `0` means unlimited. An admin override applies on the next call. Over the limit, the task waits. It does not fail |
+| `VB_MODEL_RATE_BOT` | `60` | Per-bot model requests per minute. Counted only when both the user window and the bot window have room |
+| `VB_MAX_TASK_STEPS` | `16` | Per-task step cap, positive integer |
+| `VB_MAX_TASK_DURATION_SEC` | `600` | Per-task duration cap in seconds, positive integer |
+| `VB_DEFAULT_MAX_BOTS` | `5` | Bot cap written into a quota when an admin provisions a user. Existing quota rows are not rewritten |
+| `VB_DEFAULT_MAX_CONCURRENT_TASKS` | `2` | Per-user concurrent task cap written at provision time |
+| `VB_DEFAULT_MAX_ROUTINES` | `10` | Routine cap written at provision time. A user whose quota is already 0 is not rewritten |
+| `VB_INTEGRATION` | `none` | `none` or `viate` |
+| `VB_VIATE_URL` | empty | Read only when `VB_INTEGRATION=viate`. All three service variables are required on the first service call |
+| `VB_VIATE_CLIENT_ID` | empty | viate service client id |
+| `VB_VIATE_CLIENT_SECRET` | empty | viate service client secret |
+| `VB_ADMIN_EMAILS` | empty | Comma-separated. A trusted email match makes the user an admin after login |
+| `VB_DATA_DIR` | `/data` | SQLite, key, and app archives. The database file is `$VB_DATA_DIR/viate-bot.sqlite` |
+| `VB_MACHINE_IMAGE` | `viate-bot/machine:dev` | Image tag for a new machine. If unset, `VB_MACHINE_IMAGE_DEFAULT` is used, then this default. Published images set `VB_MACHINE_IMAGE_DEFAULT` to `ghcr.io/viateai/viate-bot-machine:vX.Y.Z` for the same release. Leave that variable unset when running from source |
+| `VB_IDLE_STOP_MINUTES` | `120` | Minutes before an idle machine stops. Non-negative integer. `0` stops as soon as the idle conditions hold |
+| `VB_MAX_RUNNING_TASKS` | `20` | Global cap on tasks in the running state. Non-negative integer. `0` starts no new task |
+| `VB_METRICS_TOKEN` | empty | Bearer token for `GET /metrics`. Empty rejects every scrape |
+| `VB_VISION_MODELS` | empty | Comma-separated. Only these models get the `browser_screenshot` tool |
+| `VB_SECRET_WAIT_MS` | `1800000` | How long `request_secret` waits for the user, in milliseconds. The task fails after that. Positive integer |
+| `VB_CONTROL_PORT` | `3000` | Control-plane listen port. Non-negative integer |
+| `VB_DEV` | off | Only `1` enables `/dev/*` and the `machine` command |
 
-`VB_RATE_MBIT`、`VB_HASHLIMIT`、`VB_HASHLIMIT_BURST`、`VB_CONNLIMIT` 只给 WSL 里的防火墙脚本用，不是控制面配置。见 `deploy/rancher-desktop/README.md`。
+`VB_RATE_MBIT`, `VB_HASHLIMIT`, `VB_HASHLIMIT_BURST`, and `VB_CONNLIMIT` belong to the firewall script in WSL, not to the control plane. See `deploy/rancher-desktop/README.md`.
 
 ## Windows + Rancher Desktop
 
-目标机器是 Windows 上的 Rancher Desktop（WSL2、Alpine、amd64、dockerd/moby，关掉 Kubernetes）。控制面跑在 WSL 宿主网络命名空间里，主动连机器上的 machined。把控制面放进用户网桥并不能让它连上 machined，这一步还没有实现。
+The target is Rancher Desktop on Windows (WSL2, Alpine, amd64, dockerd/moby, Kubernetes off). The control plane runs in the WSL host network namespace and connects to machined. Putting the control plane on the user bridge does not make that connection work.
 
-防火墙的安装、策略和验收只写在 `deploy/rancher-desktop/README.md`。它使用同目录的 `deploy/rancher-desktop/vb-firewall.start` 和 `deploy/rancher-desktop/vb-firewall-check.sh`。先按那份文档把防火墙装上并验收，再跑用户机器。
+Install and check the firewall using `deploy/rancher-desktop/README.md` and the scripts next to it before running user machines.
 
-在部署机上构建机器镜像（Windows 上的 Docker 是 amd64）：
+Build the machine image on the deploy host (Docker on that Windows setup is amd64):
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm --filter @viate-bot/protocol build
+pnpm --filter @viate-bot/browser build
 pnpm --filter @viate-bot/machined image viate-bot/machine:dev linux/amd64
 ```
 
-标签要和 `VB_MACHINE_IMAGE` 一致。然后按上面的方式启动控制面。管理员登录后开通用户；开通会按当时的镜像标签建容器。
+The tag must match `VB_MACHINE_IMAGE`. Then start the control plane. An admin signs in and provisions users. Provisioning creates the container from the image tag configured at that moment.
 
-## 升级
+## Security model
 
-新的 machined 只存在于新建的容器里。只构建镜像、不重建已有机器的容器，跑着的仍是旧进程。
+- Mounting `docker.sock` is root on that Docker daemon. The control plane uses it to create user machines. Do not make the socket mode `0666`, and do not expose Docker over unauthenticated TCP.
+- `VB_OIDC_TRUST_EMAIL` is global. It is not limited to the first admin login. When it is on, an unverified email from the IdP is trusted: anyone who can obtain an admin email can become an admin, and anyone who can obtain a pre-provisioned email that is not bound yet can bind that user and use their bots and machine. Users that are already bound still match only `(provider, sub)`. Turn it on only when the IdP does not allow open signup, or an admin creates the accounts and untrusted users cannot change the email. viate always sends `email_verified=false`, so a viate IdP needs the switch on.
+- Each user gets their own Docker network. The machine container drops all capabilities and adds back only what it needs to drop privileges, sets `no-new-privileges`, and does not mount host directories. Isolation between machines also depends on the firewall in `deploy/rancher-desktop`: new connections to private-network destinations are dropped, new connections per source and TCP concurrency are limited, and bandwidth is shaped. Those rules are checked on the Rancher Desktop WSL host network.
+- Dangerous tools wait for a person by default. Admins can add automatic approval rules. **Skip all approvals** (「全部免审批」) bypasses the approval gate, including those rules. Prompt injection in a web page can then make the bot install an MCP server or rewrite its own prompt with nobody confirming. The settings page says so.
+- The control plane is not supported on the user bridge. Private-network rules drop new connections that come from that bridge, so the control plane cannot reach machined. The supported placement is the Docker daemon's host network, with the control plane connecting out to the machine.
 
-1. 停掉控制面进程，更新代码后再执行上一节的镜像命令。标签保持不变，让 `docker buildx build --load` 替换本地这个标签。
-2. 再启动控制面。数据库在 `VB_DATA_DIR`，升级不要删它。
-3. 对每一台已有机器重建容器：管理端「机器」页的「重建」，或 `POST /api/admin/machines/<machineId>/rebuild`。这会删掉旧容器并用该机器记录上的镜像标签新建一个。卷保留。有未完成任务时这个接口拒绝。
-4. 开发环境且 `VB_DEV=1` 时，对应的命令是 `pnpm --filter @viate-bot/control machine rebuild <userId>`。
-5. 防火墙脚本有变更时，按 `deploy/rancher-desktop/README.md` 重新下发并验收。不要只替换文件而不重跑 provisioning。
+## Upgrading
 
-## 接 viate
+A new machined exists only in containers created after the image is built. Building an image without rebuilding an existing machine leaves the old process running. If the machine image digest did not change, do not rebuild user machines. A protocol change does require a rebuild. See [UPGRADING.md](UPGRADING.md). The steps below are the usual path. That file is the full procedure.
 
-`VB_INTEGRATION=viate`。登录仍走下一节的 OIDC 变量，issuer 是 viate 的 OIDC issuer。服务接口（用户状态、模型 key、用量）另外读：
+1. Stop the control plane, update the code, and run the image command from the previous section. Keep the tag so `docker buildx build --load` replaces it locally.
+2. Start the control plane. The database stays in `VB_DATA_DIR`. Do not delete it during an upgrade.
+3. Rebuild only machines whose image changed: **重建** on the admin Machines page, or `POST /api/admin/machines/<machineId>/rebuild`. That deletes the old container and uses the control plane's current `VB_MACHINE_IMAGE` (including its published default), not the old machine's stored tag. The volume is kept. The call is rejected while a task is unfinished. Start a stopped rebuilt machine to check compatibility and clear any previous protocol error.
+4. With `VB_DEV=1`, the command is `pnpm --filter @viate-bot/control machine rebuild <userId>`.
+5. When the firewall scripts change, install and check them again from `deploy/rancher-desktop/README.md`. Do not only replace the files.
+
+## viate
+
+Set `VB_INTEGRATION=viate`. Login still uses the OIDC variables below. The issuer is viate's OIDC issuer. Service calls (user status, model key, usage) also need:
 
 ```sh
 VB_INTEGRATION=viate
@@ -145,11 +178,11 @@ VB_VIATE_CLIENT_ID=
 VB_VIATE_CLIENT_SECRET=
 ```
 
-缺任何一项不会阻止控制面启动；第一次调服务接口才报错。viate 作为 IdP 时 `email_verified` 恒为 `false`，所以接 viate 时要把 `VB_OIDC_TRUST_EMAIL` 设为 `true`。打开后，任何能在 IdP 里拿到某个管理员邮箱的人都能成为管理员；只有 IdP 不开放自助注册、或账号由管理员创建时才应打开。对接其他 IdP 时要先确认这一点。
+Missing values do not stop the process from starting. The first service call fails. viate always reports `email_verified=false`, so set `VB_OIDC_TRUST_EMAIL=true`. While that is on, anyone who can obtain an admin email at the IdP can become an admin. Use it only when the IdP has no open signup or an admin creates the accounts. Confirm that for any other IdP too.
 
-## 任意 OIDC
+## Any OIDC provider
 
-`VB_INTEGRATION=none`。登录要：
+`VB_INTEGRATION=none`. Login needs:
 
 ```sh
 VB_PUBLIC_URL=https://bot.example
@@ -161,21 +194,21 @@ VB_ALLOW_SIGNUP=false
 VB_ADMIN_EMAILS=admin@example.com
 ```
 
-提供方要有 `openid` scope、`id_token`、JWKS 和 `/.well-known/openid-configuration`。回调地址是 `{VB_PUBLIC_URL}/auth/callback`。`id_token` 缺邮箱、姓名或 `email_verified` 时，控制面用 access token 调 userinfo 补。管理员只能来自 `VB_ADMIN_EMAILS` 里的可信邮箱。
+The provider must offer the `openid` scope, `id_token`, JWKS, and `/.well-known/openid-configuration`. The redirect URL is `{VB_PUBLIC_URL}/auth/callback`. If the `id_token` lacks email, name, or `email_verified`, the control plane fills them from userinfo with the access token. Admins come only from trusted emails in `VB_ADMIN_EMAILS`.
 
-## 端到端测试
+## End-to-end tests
 
-`apps/e2e` 的浏览器套件不进 `pnpm test`（脚本是 `e2e` 和 `e2e:local`）。`pnpm test` 只跑域名解析参数的单元测试。浏览器套件用本机已安装的 Chrome 或 Edge（`channel`，或 `VB_E2E_BROWSER_PATH` 指向可执行文件），不下载 Playwright 自带浏览器。
+The browser suite in `apps/e2e` is not part of `pnpm test` (the scripts are `e2e` and `e2e:local`). `pnpm test` only runs the unit test for host-resolution arguments. The browser suite uses Chrome or Edge already installed on the machine (`channel`, or `VB_E2E_BROWSER_PATH`). It does not download Playwright's own browser.
 
-本地冒烟（假模型、假机器、内置 OIDC，不碰 Docker）：
+Local smoke (fake model, fake machine, built-in OIDC, no Docker):
 
 ```sh
 pnpm --filter @viate-bot/e2e e2e:local
 ```
 
-默认端口 4418、4420–4423。被占用时改用 4430–4434。截图目录默认 `/tmp/vb-polish1-shots`，可用 `VB_E2E_SHOTS` 改。
+Default ports are 4418 and 4420–4423. If they are taken, use 4430–4434. Screenshots default to `/tmp/vb-polish1-shots`, or `VB_E2E_SHOTS`.
 
-对着已部署环境时，单独准备登录模块和控制面地址：
+Against a deployed environment, point the suite at a login module and the control plane:
 
 ```sh
 VB_E2E_BASE_URL=https://bot.example \
@@ -187,9 +220,9 @@ VB_E2E_BROWSER_CHANNEL=chrome \
 pnpm --filter @viate-bot/e2e e2e
 ```
 
-登录模块导出 `login({ browser, baseURL, role })`，返回内存里的 Playwright `storageState`，不要写登录态文件。本地实现是 `apps/e2e/src/login-local.ts`。`VB_E2E_LOGIN_MODULE` 用绝对文件路径，或相对于命令发起目录的路径。截图不包含登录表单。
+The login module exports `login({ browser, baseURL, role })` and returns an in-memory Playwright `storageState`. Do not write a login-state file. The local implementation is `apps/e2e/src/login-local.ts`. `VB_E2E_LOGIN_MODULE` is an absolute path, or a path relative to the directory you started the command from. Screenshots do not include the login form.
 
-接 viate OIDC 的部署（下例中 viate 在 `https://viate.example.com`，登录页是 `/portal/oauth-login`）用 viate 登录模块。实现是 `apps/e2e/src/login-viate.ts`，邮箱和密码只从环境变量读，不写进仓库：
+A viate OIDC deployment (viate at `https://viate.example.com`, login page `/portal/oauth-login`) uses the viate login module, `apps/e2e/src/login-viate.ts`. Email and password come from the environment only:
 
 ```sh
 VB_E2E_BASE_URL=https://bot.example.com \
@@ -205,11 +238,11 @@ VB_E2E_HOST_RESOLVER_RULES="MAP bot.example.com 127.0.0.1,MAP viate.example.com 
 pnpm --filter @viate-bot/e2e e2e
 ```
 
-本地冒烟用 `fake`；真实部署默认 `deepseek-flash`，可用 `VB_E2E_MODEL` 指定白名单内模型。真实部署必须使用已开通的专用普通测试账号（机器已存在），并显式设置 `VB_E2E_ALLOW_ACCOUNT_MUTATION=1`。头像场景需要该账号机器上预先准备好的 PNG 文件，路径由 `VB_E2E_AVATAR_PATH` 提供。套件只删除自己新建的 bot、规则和定时任务，并卸载唯一测试名的新安装；临时用户配额/详细过程开关在 finally 恢复。模型设置测试使用独立随机模型名，不改正在使用的模型。审计和软删除历史保留。Windows/真实模型验收需要另外运行，不能以本地假模型结果替代。
+Local smoke uses `fake`. A real deployment defaults to `deepseek-flash`. `VB_E2E_MODEL` selects another allowlisted model. A real deployment must use a dedicated ordinary test account that is already provisioned (the machine already exists) and must set `VB_E2E_ALLOW_ACCOUNT_MUTATION=1`. The avatar case needs a PNG already on that machine, named by `VB_E2E_AVATAR_PATH`. The suite deletes only bots, rules, and routines it created, and uninstalls the one install it created under the test name. Temporary quota and process-detail switches are restored in `finally`. The model-settings test uses its own random model name and does not change the model in use. Audit rows and soft-delete history stay. A Windows or real-model check is a separate run. A local fake-model result does not replace it.
 
-Clash 的 fake-ip 会把部署域名指到错误地址。二选一：`VB_E2E_HOST_RESOLVER_RULES` 传给 Chromium 的 `--host-resolver-rules`；或 curl 形式的 `VB_E2E_RESOLVE=host:port:address`（逗号分隔），套件转成 `MAP host ip`。端口只为对齐 curl。交给 Chromium 的地址必须是 IPv4。设了这条规则后，接口请求改在页面里 `fetch`，因为 Playwright 自己的 HTTP 客户端不走这条规则。给了 `VB_E2E_BROWSER_PATH` 时不再使用 `channel`。
+If a local proxy answers DNS with an address the suite cannot use, either pass `VB_E2E_HOST_RESOLVER_RULES` through to Chromium's `--host-resolver-rules`, or pass curl-style `VB_E2E_RESOLVE=host:port:address` (comma-separated). The suite turns that into `MAP host ip`. The port only lines up with curl. The address given to Chromium must be IPv4. With that rule, API calls are `fetch` inside the page, because Playwright's own HTTP client ignores it. `VB_E2E_BROWSER_PATH` disables `channel`.
 
-Windows 宿主机是 Node 22，且没有 pnpm。`apps/e2e/docker-run.sh` 在 `mcr.microsoft.com/playwright:v1.49.1-noble` 里装 Node 24，再跑部署验收（镜像自带与 `playwright-core` 1.49 匹配的 Chromium）：
+A Windows host on Node 22 without pnpm can run `apps/e2e/docker-run.sh`. That script uses `mcr.microsoft.com/playwright:v1.49.1-noble`, installs Node 24, and runs the deployed check. The image includes the Chromium build that matches `playwright-core` 1.49.
 
 ```sh
 VB_E2E_BASE_URL=https://bot.example.com \
@@ -224,8 +257,30 @@ VB_E2E_RESOLVE="bot.example.com:443:host.docker.internal,viate.example.com:443:h
 apps/e2e/docker-run.sh
 ```
 
-容器里的 `127.0.0.1` 不是 Windows 宿主机。`host.docker.internal` 不会原样传给 `docker run --add-host`（Docker 会拒绝这个主机名）。脚本把它写成 `--add-host <域名>:host-gateway`，进容器后再解析成 IPv4，交给 Chromium。其它地址必须已经是 IPv4。截图在 `VB_E2E_STORAGE_DIR`（缺省是临时目录），登录会话只在内存中，不写入这个目录。镜像可用 `VB_E2E_IMAGE` 改，Node 版本缺省 `24.22.3`，可用 `VB_E2E_NODE_VERSION` 改。
+`127.0.0.1` inside that container is not the Windows host. `host.docker.internal` is not passed through `docker run --add-host` as that hostname (Docker rejects it). The script writes `--add-host <domain>:host-gateway`, resolves it to IPv4 inside the container, and gives that address to Chromium. Other addresses must already be IPv4. Screenshots go to `VB_E2E_STORAGE_DIR` (a temp directory by default). The login session stays in memory and is not written there. `VB_E2E_IMAGE` changes the image. Node defaults to `24.22.3` (`VB_E2E_NODE_VERSION`).
 
-`VB_E2E_IGNORE_HTTPS_ERRORS=1` 时，登录上下文以及管理员和普通用户两个浏览器上下文忽略 HTTPS 证书错误。不设置则校验证书。`VB_E2E_PACE_MS` 是真实模式下两次发消息的间隔，缺省 15000 毫秒，设为 `0` 关闭；`VB_E2E_LOCAL=1` 的本地冒烟不等待。这两个变量由 `docker-run.sh` 透传进容器。
+`VB_E2E_IGNORE_HTTPS_ERRORS=1` makes the login context and both browser contexts ignore HTTPS errors. Unset, certificates are checked. `VB_E2E_PACE_MS` is the pause between messages in real mode, default 15000, `0` disables it. `VB_E2E_LOCAL=1` does not wait. `docker-run.sh` forwards both.
 
-在 Windows Git Bash 里运行 `apps/e2e/docker-run.sh` 时，变量与上面的容器示例相同，主机名用部署环境自己的地址。Git Bash 会把以 `/` 开头的路径改写成 Windows 路径。脚本发现 `cygpath` 后，把仓库目录和截图目录转成盘符路径再挂载，并设置 `MSYS_NO_PATHCONV=1`，避免容器内的 `/work` 被改写。macOS 和 Linux 没有 `cygpath`，不改挂载路径。
+On Windows Git Bash, use the same variables as the container example and the deployment's own hostnames. Git Bash rewrites paths that start with `/` into Windows paths. If `cygpath` exists, the script converts the repo and screenshot directories before mounting them and sets `MSYS_NO_PATHCONV=1` so `/work` inside the container is left alone. macOS and Linux have no `cygpath` and do not rewrite mounts.
+
+## License
+
+MIT. See [LICENSE](LICENSE). Packages stay private and are not published to npm. Vulnerability reports: [SECURITY.md](SECURITY.md).
+
+Third-party dependencies retain their own licenses. The built web app serves `/third-party.html` and the exact, unmodified `@novnc/novnc` source and notices under `/third-party/novnc/` (MPL-2.0; version in `package.json`). See [Mozilla's distribution FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/).
+
+### Machine-image GPL/LGPL programs and sources
+
+The machine image includes independently licensed Debian programs such as Git, Openbox and x11vnc, and LGPL libraries such as glibc. They are separate programs/libraries in the image, not linked into machined; viate-bot's own code remains MIT. Their original licenses and copyright notices remain in `/usr/share/doc/<package>/copyright`. Playwright Chromium and other third-party components retain their own licenses too.
+
+Every machine image generates `/usr/share/doc/viate-bot/SOURCES.txt` from its installed dpkg metadata and copyright files during the build. It conservatively lists every Debian package with a GPL/LGPL reference (including alternative licenses and embedded components): binary package/version, source package/version, license references and a `snapshot.debian.org` URL pinned to that exact source version. Source versions are distinct from binary rebuild versions (`+bN`). Download the source files, Debian patches and build rules from those snapshot pages.
+
+Each Release attaches `machine-sources-linux-amd64.txt` and `machine-sources-linux-arm64.txt`, extracted from the corresponding published images. To inspect a local image without starting it:
+
+```sh
+id=$(docker create ghcr.io/viateai/viate-bot-machine:v0.1.0)
+docker cp "$id:/usr/share/doc/viate-bot/SOURCES.txt" ./machine-sources.txt
+docker rm "$id"
+```
+
+This release distributes a version-pinned source-location inventory, not source archives or a written source offer. Upstream third-party licenses continue to apply; this inventory does not relicense their code under MIT.

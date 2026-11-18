@@ -62,7 +62,7 @@ omit 10.0.0.0/8
 - ICMP/UDP（含 DNS、QUIC）同样受目的地址隔离；全协议 NEW 流量受 hashlimit，TCP 才有 connlimit。UDP conntrack NEW 可能连续多包，50/s 是保守上限，不承诺精确按 UDP 会话数计量。机器没有 NET_RAW/NET_ADMIN，不能以伪造 SYN-ACK 或源地址当作受支持的合法协议。
 - Docker 内置 DNS 是**容器 netns** 的 `127.0.0.11`。不在宿主 DNAT 到这个地址，也不开放宿主/网桥 `:53`。正常解析必须用实际行为验证，不能用 NAT 跳转存在代替。
 - IPv6 在 FORWARD/INPUT 对 `vb+` 全丢；同时网络策略禁止 EnableIPv6。必须打开 `bridge-nf-call-iptables` 与 `bridge-nf-call-ip6tables`，确保同桥隔离。它们是**全局开关**，会让默认 bridge 和其它桥接容器也经过现有 iptables/ip6tables FORWARD，可能触发别的默认 DROP/隔离规则。本脚本的跳转只匹配 `vb+`，但无法承诺其它应用完全不受该全局开关影响；部署前后都应冒烟其它容器。不要用关闭 bridge-nf 当作修复，否则同桥隔离消失。
-- **当前可验证部署：控制面在 WSL 宿主网络命名空间主动连 machined。仅把控制面容器加入用户网桥不足以支持它主动建连**：它也从 `vb+` 进入，私网规则会拦它。容器模式还需要可信控制面端点的单向发起许可（精确到可信 veth/身份，不能放开整段或整个网桥），控制面接入/断开协调也未由本脚本完成。采用设计中的容器部署前，该项必须实现并验收；不得用 `VB_ALLOW_CIDRS` 开洞。
+- **当前可验证部署：控制面在 WSL 宿主网络命名空间主动连 machined。仅把控制面容器加入用户网桥不足以支持它主动建连**：它也从 `vb+` 进入，私网规则会拦它。容器模式还需要可信控制面端点的单向发起许可（精确到可信 veth/身份，不能放开整段或整个网桥），控制面接入/断开协调也未由本脚本完成。把控制面放进用户网桥之前，必须先实现并验收这条单向许可；不得用 `VB_ALLOW_CIDRS` 开洞。
 - 下行：bridge root TBF；上行：每个宿主 veth ingress **在进入 bridge-nf 前**重定向到该桥专属 `vbi<12hex>` IFB，再 TBF，均为 50 Mbit/s。同桥所有端点共享上行桶；不是每机器覆盖配置。IFB alias 为 `viate-bot:<bridge>`。脚本只从 `ip -j -d link show` 的 `info_kind=ifb` 和 `ifalias` 判断所有权，不读 `/sys/class/net/*/ifalias`，也不另挂 sysfs。alias 为空或属于别的桥时拒绝改名或删除。删网后清理仅自有 IFB。旧版 bridge ingress→IFB 会破坏 conntrack，禁止恢复。
 - 规则用单次 `iptables-restore --noflush` filter 事务替换；缺模块/规则失败返回非零，不发布半条链。IPv4/IPv6 是各自事务，不是跨协议原子提交。监视器每 5 秒只修复缺失规则/tc，不反复清计数和限速桶；监督进程由 flock 保持唯一、重启异常退出的监视器。pid 校验含启动时间、命令参数和状态；成功周期超过 15 秒也自检失败。监督进程本身被终止/全体进程被杀时没有系统 init 自动恢复，须告警并重跑 provisioning/重启 RD。DOCKER-USER 跳转被删后，限连接规则最迟下一轮恢复；独立 FORWARD 的私网 guard 仍在。整个 FORWARD 表被外部清空时不能保证零窗口。
 
@@ -287,7 +287,7 @@ if ip link show dev "vbi$H" >/dev/null 2>&1; then echo "IFB removed exit:1"; els
 
 预期 `ip -d link` 里 alias 为 `viate-bot:vb<hash>`，删除后 exit:0。不要用 `/sys/class/net/.../ifalias` 判断：进 dockerd 网络命名空间时 /sys 仍可能是 init 的挂载。通过管理端重建用户机器：空旧网络被重建；仍挂控制面等端点的旧网络明确报错，不强拆端点；新网络的bridge选项必须为上面的稳定短名。删除机器后卷保留；监视器清理自有IFB。
 
-## 重启、升级、Windows 重启（设计10.2 必做）
+## 重启、升级、Windows 重启
 
 每项都在操作前保存行为基线，在操作后重新设置上述WSL变量，执行第1节全部命令、自检及连接限制探针：
 
@@ -295,6 +295,6 @@ if ip link show dev "vbi$H" >/dev/null 2>&1; then echo "IFB removed exit:1"; els
 2. 升级 Rancher Desktop 后首次启动，检查依赖/backend/module，再做同样验收。
 3. 重启 Windows，等待 Rancher Desktop 启动，再做同样验收。
 
-三项均须：宿主/内网/其它用户机器失败、公网与DNS成功、宿主主动连machined成功、限连接触发、双向tc完整。只验证链名存在不算通过。失败先停用户机器，保存 `/var/log/vb-firewall.log`，手动 `sh "$P/vb-firewall.start"` 再验；依然失败则禁止上线。设计12中的“控制面特权一次性容器重新下发”并未在本步实现自动化，不能将它当作现成恢复能力。
+三项均须：宿主/内网/其它用户机器失败、公网与DNS成功、宿主主动连machined成功、限连接触发、双向tc完整。只验证链名存在不算通过。失败先停用户机器，保存 `/var/log/vb-firewall.log`，手动 `sh "$P/vb-firewall.start"` 再验；依然失败则禁止上线。控制面用特权一次性容器重新下发防火墙并没有自动化，不能把它当作现成恢复能力。
 
 依据：[Rancher provisioning 启动顺序](https://docs.rancherdesktop.io/how-to-guides/provisioning-scripts/)、[Docker iptables/DOCKER-USER](https://docs.docker.com/engine/network/firewall-iptables/)、[Linux bridge netfilter](https://docs.kernel.org/networking/bridge.html)、[WSL 网络模式](https://learn.microsoft.com/en-us/windows/wsl/networking)。

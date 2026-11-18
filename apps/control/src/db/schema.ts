@@ -78,6 +78,8 @@ export const machines = sqliteTable(
     egressMode: text("egress_mode").notNull().default("direct"),
     lastHeartbeatAt: text("last_heartbeat_at"),
     lastStartedAt: text("last_started_at"),
+    /** 协议不兼容等原因。空表示没有需要展示的拒绝原因。 */
+    statusDetail: text("status_detail"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },

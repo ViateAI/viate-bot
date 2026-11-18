@@ -1,6 +1,12 @@
 {
   "name": "viate-bot",
+  "version": "0.0.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ViateAI/viate-bot.git"
+  },
   "type": "module",
   "packageManager": "pnpm@12.16.1",
   "engines": {

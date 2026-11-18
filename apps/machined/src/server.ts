@@ -8,14 +8,15 @@ import { readdir, readFile, statfs } from "node:fs/promises";
 import { Readable, type Readable as ReadableStream } from "node:stream";
 import { killProcessGroup } from "./process-group.js";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import type {
-  ExecEvent,
-  FsListResponse,
-  FsReadResponse,
-  FsSearchResponse,
-  FsWriteResponse,
-  HealthResponse,
-  MetricsResponse,
+import {
+  MACHINE_PROTOCOL_VERSION,
+  type ExecEvent,
+  type FsListResponse,
+  type FsReadResponse,
+  type FsSearchResponse,
+  type FsWriteResponse,
+  type HealthResponse,
+  type MetricsResponse,
 } from "@viate-bot/protocol";
 import { createAppRuntime, registerAppRoutes } from "./apps.js";
 import { attachBrowser } from "./browser-route.js";
@@ -67,6 +68,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
   app.get("/health", async (): Promise<HealthResponse> => ({
     ok: true,
     version: options.version ?? MACHINED_VERSION,
+    protocol: MACHINE_PROTOCOL_VERSION,
   }));
 
   app.get("/metrics", async (): Promise<MetricsResponse> => readMetrics());

@@ -12,6 +12,9 @@ if (!token) {
   process.exit(1);
 }
 
-const app = buildServer({ token, version: process.env.VB_MACHINED_VERSION ?? "0.0.0" });
+const app = buildServer({
+  token,
+  version: process.env.VB_MACHINED_VERSION ?? "0.0.0",
+});
 const port = Number(process.env.VB_MACHINED_PORT ?? 7070);
 await app.listen({ host: "0.0.0.0", port });

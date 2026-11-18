@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.16.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm --filter @viate-bot/web build
+      - run: pnpm --filter @viate-bot/control build
+      - run: pnpm --filter @viate-bot/control check:dist
+      - run: sh deploy/rancher-desktop/vb-firewall.test.sh
+      - run: python3 -m unittest discover -s images/machine -p 'test_*.py'
+      - name: Read machine protocol
+        id: protocol
+        run: |
+          version=$(sed -n 's/^export const MACHINE_PROTOCOL_VERSION = \([0-9][0-9]*\);/\1/p' packages/protocol/src/index.ts)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Bundle machined for the machine image
+        run: |
+          pnpm --filter @viate-bot/protocol build
+          pnpm --filter @viate-bot/browser build
+          pnpm --filter @viate-bot/machined build
+          cp apps/machined/dist/machined.mjs images/machine/machined.mjs
+          cp apps/machined/dist/fs-worker.mjs images/machine/fs-worker.mjs
+          cp LICENSE images/machine/LICENSE
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the control image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: images/control/Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=control
+          cache-to: type=gha,scope=control,mode=max
+          build-args: |
+            IMAGE_VERSION=0.0.0
+            IMAGE_REVISION=${{ github.sha }}
+            IMAGE_SOURCE=https://github.com/ViateAI/viate-bot
+            MACHINE_IMAGE_REF=viate-bot/machine:dev
+      - name: Build the machine image
+        uses: docker/build-push-action@v6
+        with:
+          context: images/machine
+          file: images/machine/Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=machine
+          cache-to: type=gha,scope=machine,mode=max
+          build-args: |
+            IMAGE_VERSION=0.0.0
+            IMAGE_REVISION=${{ github.sha }}
+            IMAGE_SOURCE=https://github.com/ViateAI/viate-bot
+            MACHINE_PROTOCOL=${{ steps.protocol.outputs.version }}
+
+  release-please:
+    needs: ci
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      direct_image: ${{ steps.auth.outputs.direct_image }}
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - id: auth
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "direct_image=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "direct_image=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          target-branch: main
+          config-file: .github/release-please-config.json
+          manifest-file: .github/release-please-manifest.json
+
+  release-image:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true' && needs.release-please.outputs.direct_image == 'true'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/image.yml
+    with:
+      release-tag: ${{ needs.release-please.outputs.tag_name }}

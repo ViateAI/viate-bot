@@ -39,6 +39,7 @@ interface AdminMachine {
   image: string;
   createdAt: string;
   lastHeartbeatAt: string | null;
+  statusDetail?: string | null;
 }
 
 interface AuditRow {
@@ -402,6 +403,7 @@ export function AdminMachines() {
           <li key={machine.id} data-testid="machine-row" className="rounded border border-neutral-800 p-4 text-sm">
             <p>{machine.email} · {machine.state} · {machine.spec.cpu} CPU / {machine.spec.memMb} MB</p>
             <p className="text-neutral-400">{machine.image} · {machine.createdAt} · 健康检查 {machine.lastHeartbeatAt ?? "无"}</p>
+            {machine.statusDetail ? <p data-testid="machine-status-detail" className="text-red-300">{machine.statusDetail}</p> : null}
             <div className="mt-3 flex flex-wrap gap-2">
               <button data-testid="machine-stop" className="rounded border border-neutral-600 px-3 py-1" type="button" onClick={() => run.mutate({ id: machine.id, action: "stop" })}>停止</button>
               <button data-testid="machine-start" className="rounded border border-neutral-600 px-3 py-1" type="button" onClick={() => run.mutate({ id: machine.id, action: "start" })}>启动</button>

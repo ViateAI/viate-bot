@@ -1,9 +1,15 @@
 /**
  * 控制面和 machined 之间的消息。
- * 应用代码、脚本和 MCP 连接都在用户机器里发生（设计第 7.3 节）。
+ * 应用代码、脚本和 MCP 连接都在用户机器里发生。
  * 这里不描述“控制面去连接某个应用地址”：远程 MCP 由 machined 从机器内发起，
  * 控制面只接收工具定义和调用结果这类数据。
  */
+
+/**
+ * machined 当前对外的协议版本。健康检查上报这个整数。
+ * 没有该字段的旧机器按版本 1 理解。改这个数时必须同时改 UPGRADING.md。
+ */
+export const MACHINE_PROTOCOL_VERSION = 1;
 
 /** machined 监听端口。只对控制面所在的 Docker 网络开放。 */
 export const MACHINED_PORT = 7070;
@@ -26,6 +32,8 @@ export interface BrowserRestartResponse {
 export interface HealthResponse {
   ok: true;
   version: string;
+  /** 缺省时控制面按协议版本 1 处理。 */
+  protocol?: number;
 }
 
 export interface MetricsResponse {

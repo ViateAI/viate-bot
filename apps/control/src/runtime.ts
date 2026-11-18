@@ -40,6 +40,7 @@ export function reconcileDeps(
     probe,
     idleStopMinutes: config.idleStopMinutes,
     key: loadOrCreateKey(config.secretKeyPath),
+    db,
     ...(reconcileApps ? { reconcileApps } : {}),
   };
 }

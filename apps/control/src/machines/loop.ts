@@ -1,5 +1,7 @@
 import { decrypt } from "../crypto.js";
+import type { AppDatabase } from "../db/index.js";
 import type { MachineRecord, MachineStore } from "../db/machines.js";
+import { acceptMachineProtocol, noteMachineProtocolMismatch, protocolCompatible, reportedProtocol } from "./protocol.js";
 import { userScope, type AdminScope, type UserScope } from "../scope.js";
 import {
   decideReconcile,
@@ -25,6 +27,7 @@ export interface ReconcileDeps {
   probe: ActivityProbe;
   idleStopMinutes: number;
   key: Buffer;
+  db?: AppDatabase;
   now?: () => Date;
   /** 测试替换健康检查。缺省打 machined /health。 */
   ping?: (record: MachineRecord) => Promise<boolean>;
@@ -94,7 +97,6 @@ export function resetReconcileRuntime(): void {
 
 async function reconcileUser(deps: ReconcileDeps, record: MachineRecord, now: Date): Promise<ReconcileAction["type"]> {
   const state = runtimeOf(record.userId);
-  const desired = nextDesired(deps, record, state, now);
   const actual = await deps.driver.actualState(record.userId);
   if (actual === "running") {
     const healthyAfter = state.healthyAfter ?? new Date(now.getTime() + STARTUP_GRACE_MS);
@@ -106,6 +108,14 @@ async function reconcileUser(deps: ReconcileDeps, record: MachineRecord, now: Da
     state.healthyAfter = null;
   }
 
+  // 健康检查可能拒绝协议，或清掉重建前的拒绝。不能用检查前的状态作停机/重启决策。
+  record = deps.store.find(userScope(record.userId)) ?? record;
+  if (record.state === "error" && record.statusDetail && actual === "running" && state.healthyAfter && now >= state.healthyAfter) {
+    await deps.driver.stop(record.userId);
+    state.stopRequestedAt = null;
+    return "stop";
+  }
+  const desired = nextDesired(deps, record, state, now);
   const stopWaitedSec = state.stopRequestedAt ? (now.getTime() - state.stopRequestedAt.getTime()) / 1000 : 0;
   const action = decideReconcile({
     desired,
@@ -176,6 +186,12 @@ async function ping(deps: ReconcileDeps, record: MachineRecord): Promise<boolean
       signal: AbortSignal.timeout(3_000),
     });
     if (!response.ok) return false;
+    const reported = reportedProtocol(await response.json().catch(() => null));
+    if (!protocolCompatible(reported)) {
+      if (deps.db) noteMachineProtocolMismatch(deps.db, record, reported);
+      return false;
+    }
+    if (deps.db) acceptMachineProtocol(deps.db, record.userId);
     deps.store.update(userScope(record.userId), { lastHeartbeatAt: new Date().toISOString() });
     return true;
   } catch {

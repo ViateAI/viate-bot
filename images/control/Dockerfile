@@ -37,8 +37,20 @@ RUN pnpm --filter @viate-bot/protocol build \
 
 FROM node:24-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553
 
+# 发布镜像把缺省机器镜像指到同一版本的 GHCR 标签。源码运行不设置这个变量。
+ARG MACHINE_IMAGE_REF=viate-bot/machine:dev
+ARG IMAGE_VERSION=0.0.0
+ARG IMAGE_REVISION=unknown
+ARG IMAGE_SOURCE=https://github.com/ViateAI/viate-bot
+ENV VB_MACHINE_IMAGE_DEFAULT=$MACHINE_IMAGE_REF
+LABEL org.opencontainers.image.version=$IMAGE_VERSION \
+      org.opencontainers.image.source=$IMAGE_SOURCE \
+      org.opencontainers.image.revision=$IMAGE_REVISION \
+      org.opencontainers.image.licenses=MIT
+
 RUN mkdir -p /data && chown node:node /data
 COPY --from=build --chown=node:node /out /app
+COPY LICENSE /app/LICENSE
 
 WORKDIR /app/apps/control
 ENV NODE_ENV=production \
