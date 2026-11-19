@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api.js";
+import { ScanRow } from "./scan-row.js";
 
 interface Overview {
   provisionedUsers: number;
@@ -43,7 +44,7 @@ export function AdminMetrics() {
     <section className="grid gap-6">
       <h2 className="text-lg">运维总览</h2>
       {overview.isPending ? <p className="text-neutral-400">正在加载…</p> : null}
-      {overview.isError ? <p className="text-red-300">看板加载失败</p> : null}
+      {overview.isError ? <p role="alert" className="rounded-md bg-red-100 px-3 py-2 text-sm text-red-900">看板加载失败</p> : null}
       {data ? (
         <>
           <dl className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
@@ -74,7 +75,7 @@ export function AdminMetrics() {
               {data.anomalies.length === 0 ? <li className="text-neutral-500">没有</li> : null}
               {data.anomalies.map((item) => (
                 <li key={`${item.machineId}-${item.kind}`}>
-                  {item.machineId} · {item.kind}
+                  <ScanRow tone="dark" subject={item.machineId} status={item.kind} />
                 </li>
               ))}
             </ul>
@@ -85,7 +86,7 @@ export function AdminMetrics() {
               {data.failureClasses.length === 0 ? <li className="text-neutral-500">没有</li> : null}
               {data.failureClasses.map((item) => (
                 <li key={item.errorClass}>
-                  {item.errorClass} · {item.count}
+                  <ScanRow tone="dark" subject={item.errorClass} status={String(item.count)} />
                 </li>
               ))}
             </ul>
@@ -95,7 +96,7 @@ export function AdminMetrics() {
             <ul className="grid gap-1 text-sm">
               {data.activeTrend.map((item) => (
                 <li key={item.day}>
-                  {item.day} · {item.count}
+                  <ScanRow tone="dark" subject={item.day} status={String(item.count)} />
                 </li>
               ))}
             </ul>
@@ -106,7 +107,7 @@ export function AdminMetrics() {
               {data.alerts.length === 0 ? <li className="text-neutral-500">没有</li> : null}
               {data.alerts.map((item) => (
                 <li key={`${item.kind}-${item.target}`}>
-                  {item.kind} · {item.target}
+                  <ScanRow tone="dark" subject={item.target} status={item.kind} />
                 </li>
               ))}
             </ul>
@@ -125,10 +126,13 @@ export function AdminAudit() {
   return (
     <section className="grid gap-3">
       <h2 className="text-lg">审计</h2>
-      <ul className="grid gap-1 text-sm text-neutral-300">
+      {audit.isPending ? <p className="text-sm text-neutral-400">正在加载…</p> : null}
+      {audit.isError ? <p role="alert" className="rounded-md bg-red-100 px-3 py-2 text-sm text-red-900">{audit.error.message}</p> : null}
+      {audit.data && audit.data.audit.length === 0 ? <p className="text-sm text-neutral-500">没有审计记录</p> : null}
+      <ul className="text-sm">
         {(audit.data?.audit ?? []).map((row) => (
           <li key={row.id}>
-            {row.ts} · {row.action} · {row.target}
+            <ScanRow tone="dark" subject={row.action} meta={`${row.ts} · ${row.target}`} />
           </li>
         ))}
       </ul>

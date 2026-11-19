@@ -6,6 +6,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type Me } from "./api.js";
+import { ScanRow } from "./scan-row.js";
 import {
   AppConfirmDialog,
   ArchivePicker,
@@ -238,15 +239,21 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
                     {listed.map((app) => (
                       <li key={app.id}>
                         <button
-                          className={`min-h-11 w-full rounded border px-4 py-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200 ${selectedId === app.id ? "border-neutral-200" : "border-neutral-800"}`}
+                          className={`min-h-11 w-full rounded border px-3 py-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200 ${selectedId === app.id ? "border-neutral-200" : "border-neutral-800"}`}
                           type="button"
                           data-testid="admin-app-row"
                           data-admin-app-id={app.id}
                           aria-pressed={selectedId === app.id}
                           onClick={() => requestSelect(app.id)}
                         >
-                          <span className="block break-all font-medium">{app.name}</span>
-                          <span className="mt-1 block text-sm text-neutral-400">{app.source === "user" ? `用户来源 · 所有者 ${app.ownerName ?? "未知"}` : visibilityText(app.visibility)} · {app.versions.length} 个版本</span>
+                          <ScanRow
+                            tone="dark"
+                            rule={false}
+                            pad={false}
+                            subject={app.name}
+                            status={app.source === "user" ? "用户" : visibilityText(app.visibility)}
+                            meta={app.source === "user" ? `所有者 ${app.ownerName ?? "未知"} · ${app.versions.length} 个版本` : `${app.versions.length} 个版本`}
+                          />
                         </button>
                       </li>
                     ))}
@@ -434,10 +441,15 @@ function AppEditor({
         <h3 className="font-medium">版本</h3>
         {app.versions.length === 0 ? <p className="text-sm text-neutral-400">没有版本。</p> : null}
         {app.versions.map((version) => (
-          <div key={version.id} className="grid gap-2 rounded border border-neutral-800 p-3 text-sm">
-            <p className="break-all">{version.version} · {version.status === "active" ? "可安装" : version.status === "retired" ? "已下架" : "状态未知"}{version.recommended ? " · 推荐" : ""}</p>
-            <p className="break-all text-neutral-400">SHA-256 {version.sha256}</p>
-            <div className="flex flex-wrap gap-2">
+          <div key={version.id} className="rounded border border-neutral-800 p-3 text-sm">
+            <ScanRow
+              tone="dark"
+              rule={false}
+              pad={false}
+              subject={version.version}
+              status={version.status === "active" ? "可安装" : version.status === "retired" ? "已下架" : "状态未知"}
+              meta={`SHA-256 ${version.sha256}${version.recommended ? " · 推荐" : ""}`}
+              actions={<div className="flex flex-wrap justify-end gap-2">
               <button className={appGhostClass} type="button" onClick={() => void copyText(version.sha256, setMessage, setError)}>复制 SHA-256</button>
               <button
                 className={appGhostClass}
@@ -457,7 +469,8 @@ function AppEditor({
               >
                 {version.status === "retired" ? "已下架" : "下架"}
               </button>
-            </div>
+            </div>}
+            />
           </div>
         ))}
       </section>
@@ -629,17 +642,23 @@ function PushCard({
   const rows = expanded ? [...problems, ...push.targets.filter((target) => target.state === "installed")] : problems;
   return (
     <article className="grid gap-2 rounded border border-neutral-800 p-3 text-sm">
-      <p className="break-all">{located ? `${located.app.name} ${located.version.version}` : "未知应用"} · {pushStateText(push.state)}</p>
-      <p className="text-neutral-400">{push.forced ? "强制安装" : "可卸载"}{push.wake ? " · 会唤醒机器" : ""}</p>
+      <ScanRow
+        tone="dark"
+        rule={false}
+        pad={false}
+        subject={located ? `${located.app.name} ${located.version.version}` : "未知应用"}
+        status={pushStateText(push.state)}
+        meta={`${push.forced ? "强制安装" : "可卸载"}${push.wake ? " · 会唤醒机器" : ""}`}
+      />
       <div className="h-2 overflow-hidden rounded bg-neutral-800" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-label="推送进度">
         <div className="h-full bg-neutral-200" style={{ width: `${percent}%` }} />
       </div>
       <p>{done}/{push.targets.length} 已结束 · {installed} 个已安装</p>
       <ul className="grid gap-2">
         {rows.map((target) => (
-          <li key={target.userId} className="break-words">
-            <span>{userLabel(users, target.userId)} · {pushTargetText(target.state)}</span>
-            {appErrorText(target.error) ? <span className="text-red-300"> · {appErrorText(target.error)}</span> : null}
+          <li key={target.userId} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3">
+            <span className="min-w-0 [overflow-wrap:anywhere]">{userLabel(users, target.userId)}</span>
+            <span className="text-right">{pushTargetText(target.state)}{appErrorText(target.error) ? <span className="text-red-300"> · {appErrorText(target.error)}</span> : null}</span>
           </li>
         ))}
       </ul>

@@ -3,6 +3,7 @@ import { readQuotaForm } from "./quota-input.js";
 import { Link, Outlet } from "@tanstack/react-router";
 import { useState, type FormEvent, type ReactNode } from "react";
 import { api, type Me } from "./api.js";
+import { ScanRow } from "./scan-row.js";
 
 interface AdminUser {
   id: string | null;
@@ -52,8 +53,10 @@ interface AuditRow {
   target: string;
 }
 
-const field = "rounded border border-neutral-700 bg-neutral-900 px-3 py-2";
-const button = "rounded bg-white px-3 py-2 text-sm font-medium text-neutral-950 disabled:opacity-50";
+const field = "rounded border border-neutral-700 bg-neutral-900 px-3 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
+const button = "rounded bg-white px-3 py-2 text-sm font-medium text-neutral-950 disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
+const alertClass = "rounded-md bg-red-100 px-3 py-2 text-sm text-red-900";
+const machineButton = "rounded border border-neutral-600 px-3 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
 
 export function AdminLayout() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<Me>("/api/me") });
@@ -67,7 +70,7 @@ function AdminShell() {
   const pending = reviews.data?.pendingCount ?? 0;
   return (
     <section>
-      <nav className="flex gap-1 border-b border-neutral-800 px-4 text-sm" aria-label="管理">
+      <nav className="flex flex-wrap gap-1 border-b border-neutral-800 px-4 text-sm" aria-label="管理">
         <AdminTab to="/admin" testId="admin-users-link">用户</AdminTab>
         <AdminTab to="/admin/machines" testId="admin-machines-link">机器</AdminTab>
         <AdminTab to="/admin/templates" testId="admin-templates-link">模板</AdminTab>
@@ -89,7 +92,7 @@ function AdminTab({ to, testId, children }: { to: "/admin" | "/admin/machines" |
     <Link
       to={to}
       data-testid={testId}
-      className="-mb-px border-b-2 px-3 py-3"
+      className="-mb-px border-b-2 px-3 py-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200"
       activeOptions={{ exact: true, includeSearch: false }}
       activeProps={{ className: "border-white font-medium text-white" }}
       inactiveProps={{ className: "border-transparent text-neutral-400" }}
@@ -219,18 +222,18 @@ export function AdminUsers() {
   });
 
   return (
-    <div className="mx-auto grid max-w-5xl gap-6 px-6 py-8">
+    <div className="mx-auto grid w-full min-w-0 max-w-5xl gap-6 px-6 py-8">
       <h1 className="text-2xl font-semibold">用户</h1>
       <form
-        className="grid gap-3 rounded border border-neutral-800 p-4 md:grid-cols-4"
+        className="grid min-w-0 gap-3 rounded border border-neutral-800 p-4 md:grid-cols-4"
         onSubmit={(event) => {
           event.preventDefault();
           provision.mutate();
         }}
       >
-        <label className="grid gap-1 text-sm">
+        <label className="grid min-w-0 gap-1 text-sm">
           用户
-          <select data-testid="provision-user" className={field} value={userId} onChange={(event) => { setUserId(event.target.value); setEmail(""); }} required={!email.trim()}>
+          <select data-testid="provision-user" className={`${field} w-full min-w-0`} value={userId} onChange={(event) => { setUserId(event.target.value); setEmail(""); }} required={!email.trim()}>
             <option value="">选择用户</option>
             {(users.data?.users ?? []).filter((user) => !user.provisioned).map((user) => (
               <option key={user.id ?? user.subject} value={user.id ? `local:${user.id}` : `directory:${user.subject}`}>
@@ -245,9 +248,9 @@ export function AdminUsers() {
             <input data-testid="provision-email" type="email" className={field} value={email} onChange={(event) => { setEmail(event.target.value); setUserId(""); }} />
           </label>
         ) : null}
-        <label className="grid gap-1 text-sm">
+        <label className="grid min-w-0 gap-1 text-sm">
           模板
-          <select data-testid="provision-template" className={field} value={templateId} onChange={(event) => setTemplateId(event.target.value)}>
+          <select data-testid="provision-template" className={`${field} w-full min-w-0`} value={templateId} onChange={(event) => setTemplateId(event.target.value)}>
             {(templates.data?.templates ?? []).map((template) => (
               <option key={template.id} value={template.id}>
                 {template.name}
@@ -314,37 +317,44 @@ export function AdminUsers() {
         {message ? <p data-testid="provision-result" className="self-end text-sm text-emerald-300">{message}</p> : null}
         {error ? <p className="self-end text-sm text-red-300">{error}</p> : null}
       </form>
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-sm">
+      {users.isPending ? <p className="text-sm text-neutral-400">正在加载用户…</p> : null}
+      {users.isError ? <p role="alert" className={alertClass}>{users.error.message}</p> : null}
+      {users.data && users.data.users.length === 0 ? <p className="text-sm text-neutral-400">没有用户</p> : null}
+      <div className="@container relative min-w-0">
+        <style>{".vb-user-label{display:block;font-size:.75rem;line-height:1.25rem}.vb-user-table{display:block;width:100%}.vb-user-table thead{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.vb-user-table tbody{display:block}.vb-user-table tbody tr{display:grid;grid-template-columns:minmax(0,1fr) 5.5rem;column-gap:.75rem;row-gap:.25rem;padding:.75rem 0}.vb-user-table td:nth-child(1){grid-column:1;grid-row:1;min-width:0;overflow-wrap:anywhere}.vb-user-table td:nth-child(3){grid-column:2;grid-row:1;text-align:right}.vb-user-table td:nth-child(n+2):not(:nth-child(3)){grid-column:1 / -1;min-width:0;overflow-wrap:anywhere}@container (min-width: 40rem){.vb-user-label{display:none}.vb-user-table{display:table;table-layout:fixed}.vb-user-table thead{position:static;display:table-header-group;width:auto;height:auto;margin:0;overflow:visible;clip:auto;white-space:normal}.vb-user-table tbody{display:table-row-group}.vb-user-table thead tr,.vb-user-table tbody tr{display:table-row;padding:0}.vb-user-table th,.vb-user-table td{display:table-cell;text-align:left;vertical-align:top;padding-top:.5rem;padding-bottom:.5rem;overflow-wrap:anywhere}.vb-user-table th:nth-child(1),.vb-user-table td:nth-child(1){width:22%}.vb-user-table th:nth-child(3),.vb-user-table td:nth-child(3){width:5.5rem}.vb-user-table th:nth-child(8),.vb-user-table td:nth-child(8){width:34%}}"}</style>
+        <table className="vb-user-table text-left text-sm">
           <thead className="text-neutral-400">
             <tr>
-              <th className="py-2">邮箱</th>
-              <th>名字</th>
-              <th>状态</th>
-              <th>开通</th>
-              <th>机器</th>
-              <th>bot</th>
-              <th>近 7 天任务</th>
-              <th>配额</th>
+              <th id="vb-user-email" scope="col" className="py-2">邮箱</th>
+              <th id="vb-user-name" scope="col">名字</th>
+              <th id="vb-user-status" scope="col">状态</th>
+              <th id="vb-user-provision" scope="col">开通</th>
+              <th id="vb-user-machine" scope="col">机器</th>
+              <th id="vb-user-bots" scope="col">bot</th>
+              <th id="vb-user-tasks" scope="col">近 7 天任务</th>
+              <th id="vb-user-quota" scope="col">配额</th>
             </tr>
           </thead>
           <tbody>
             {(users.data?.users ?? []).map((user) => (
               <tr key={user.id ?? user.subject ?? user.email} data-testid="user-row" className="border-t border-neutral-800">
-                <td className="py-2">{user.email}</td>
-                <td>{user.name}</td>
-                <td>{user.status}</td>
-                <td>{user.provisioned ? "已开通" : "未开通"}</td>
-                <td>{user.machineState ?? "无"}</td>
-                <td>{user.botCount}</td>
-                <td>{user.tasks7d}</td>
-                <td>
+                <UserCell id="vb-user-email">{user.email}</UserCell>
+                <UserCell id="vb-user-name" label="名字" className="text-neutral-400">{user.name}</UserCell>
+                <UserCell id="vb-user-status" label="状态">{user.status}</UserCell>
+                <UserCell id="vb-user-provision" label="开通" className="text-neutral-400">{user.provisioned ? "已开通" : "未开通"}</UserCell>
+                <UserCell id="vb-user-machine" label="机器" className="text-neutral-400">{user.machineState ?? "无"}</UserCell>
+                <UserCell id="vb-user-bots" label="bot" className="text-neutral-400">{user.botCount}</UserCell>
+                <UserCell id="vb-user-tasks" label="近 7 天任务" className="text-neutral-400">{user.tasks7d}</UserCell>
+                <td headers="vb-user-quota">
                   {user.id && user.provisioned ? (
-                    <QuotaEditor
-                      user={user}
-                      onSave={(values) => quota.mutate({ id: user.id ?? "", ...values })}
-                      onProcess={(enabled) => processDetail.mutate({ id: user.id ?? "", enabled })}
-                    />
+                    <>
+                      <span className="vb-user-label text-neutral-400">配额</span>
+                      <QuotaEditor
+                        user={user}
+                        onSave={(values) => quota.mutate({ id: user.id ?? "", ...values })}
+                        onProcess={(enabled) => processDetail.mutate({ id: user.id ?? "", enabled })}
+                      />
+                    </>
                   ) : null}
                 </td>
               </tr>
@@ -354,6 +364,10 @@ export function AdminUsers() {
       </div>
     </div>
   );
+}
+
+function UserCell({ id, label, className, children }: { id: string; label?: string; className?: string; children: ReactNode }) {
+  return <td headers={id} className={className}>{label ? <span className="vb-user-label text-neutral-400">{label} </span> : null}{children}</td>;
 }
 
 function QuotaEditor({
@@ -376,7 +390,7 @@ function QuotaEditor({
     <div className="grid gap-2">
     <form
       data-testid="quota-editor"
-      className="flex flex-wrap gap-2"
+      className="flex min-w-0 max-w-full flex-wrap gap-2"
       onSubmit={(event) => {
         event.preventDefault();
         try {
@@ -401,7 +415,7 @@ function QuotaEditor({
       <label className="text-xs text-neutral-400">预算 <input data-testid="quota-budget" className={`${field} w-24`} placeholder="沿用全局" value={taskTokenBudget} onChange={(event) => setTaskTokenBudget(event.target.value)} /></label>
       <label className="text-xs text-neutral-400">步数 <input data-testid="quota-steps" className={`${field} w-20`} placeholder="沿用全局" value={taskMaxSteps} onChange={(event) => setTaskMaxSteps(event.target.value)} /></label>
       <label className="text-xs text-neutral-400">时长秒 <input data-testid="quota-duration" className={`${field} w-24`} placeholder="沿用全局" value={taskMaxDurationSec} onChange={(event) => setTaskMaxDurationSec(event.target.value)} /></label>
-      <button className="text-sm text-neutral-300" type="submit">保存</button>
+      <button className="text-sm text-neutral-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200" type="submit">保存</button>
       {quotaError ? <p role="alert" className="text-xs text-red-400">{quotaError}</p> : null}
     </form>
     <label className="flex items-center gap-2 text-xs text-neutral-300">
@@ -446,31 +460,37 @@ export function AdminMachines() {
   return (
     <div className="mx-auto grid max-w-5xl gap-6 px-6 py-8">
       <h1 className="text-2xl font-semibold">机器</h1>
-      <ul className="grid gap-3">
+      {machines.isPending ? <p className="text-sm text-neutral-400">正在加载机器…</p> : null}
+      {machines.isError ? <p role="alert" className={alertClass}>{machines.error.message}</p> : null}
+      {machines.data && machines.data.machines.length === 0 ? <p className="text-sm text-neutral-400">没有机器</p> : null}
+      <ul>
         {(machines.data?.machines ?? []).map((machine) => (
-          <li key={machine.id} data-testid="machine-row" className="rounded border border-neutral-800 p-4 text-sm">
-            <p>{machine.email} · {machine.state} · {machine.spec.cpu} CPU / {machine.spec.memMb} MB</p>
-            <p className="text-neutral-400">{machine.image} · {machine.createdAt} · 健康检查 {machine.lastHeartbeatAt ?? "无"}</p>
-            {machine.statusDetail ? <p data-testid="machine-status-detail" className="text-red-300">{machine.statusDetail}</p> : null}
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button data-testid="machine-stop" className="rounded border border-neutral-600 px-3 py-1" type="button" onClick={() => run.mutate({ id: machine.id, action: "stop" })}>停止</button>
-              <button data-testid="machine-start" className="rounded border border-neutral-600 px-3 py-1" type="button" onClick={() => run.mutate({ id: machine.id, action: "start" })}>启动</button>
-              <button className="rounded border border-neutral-600 px-3 py-1" type="button" onClick={() => run.mutate({ id: machine.id, action: "restart" })}>重启</button>
-              <button className="rounded border border-neutral-600 px-3 py-1" type="button" onClick={() => run.mutate({ id: machine.id, action: "rebuild" })}>重建</button>
-              <button data-testid="machine-delete" className="rounded border border-neutral-600 px-3 py-1" type="button" onClick={() => setTarget(machine.id)}>删除</button>
-              <button
-                data-testid={`machine-stats-${machine.id}`}
-                className="rounded border border-neutral-600 px-3 py-1"
-                type="button"
-                onClick={() => {
-                  void api<{ cpuPct: number; memMb: number }>(`/api/admin/machines/${machine.id}/stats`).then((result) => {
-                    setStats(`${machine.email} CPU ${result.cpuPct}% 内存 ${result.memMb} MB`);
-                  });
-                }}
-              >
-                占用
-              </button>
-            </div>
+          <li key={machine.id} data-testid="machine-row" className="text-sm">
+            <ScanRow
+              tone="dark"
+              subject={machine.email}
+              status={machine.state}
+              meta={<span>{machine.spec.cpu} CPU / {machine.spec.memMb} MB · {machine.image} · {machine.createdAt} · 健康检查 {machine.lastHeartbeatAt ?? "无"}{machine.statusDetail ? <span data-testid="machine-status-detail" className="text-red-300"> · {machine.statusDetail}</span> : null}</span>}
+              actions={<>
+                <button data-testid="machine-stop" className={machineButton} type="button" onClick={() => run.mutate({ id: machine.id, action: "stop" })}>停止</button>
+                <button data-testid="machine-start" className={machineButton} type="button" onClick={() => run.mutate({ id: machine.id, action: "start" })}>启动</button>
+                <button className={machineButton} type="button" onClick={() => run.mutate({ id: machine.id, action: "restart" })}>重启</button>
+                <button className={machineButton} type="button" onClick={() => run.mutate({ id: machine.id, action: "rebuild" })}>重建</button>
+                <button data-testid="machine-delete" className={machineButton} type="button" onClick={() => setTarget(machine.id)}>删除</button>
+                <button
+                  data-testid={`machine-stats-${machine.id}`}
+                  className={machineButton}
+                  type="button"
+                  onClick={() => {
+                    void api<{ cpuPct: number; memMb: number }>(`/api/admin/machines/${machine.id}/stats`).then((result) => {
+                      setStats(`${machine.email} CPU ${result.cpuPct}% 内存 ${result.memMb} MB`);
+                    });
+                  }}
+                >
+                  占用
+                </button>
+              </>}
+            />
           </li>
         ))}
       </ul>
@@ -484,9 +504,11 @@ export function AdminMachines() {
       {error ? <p data-testid="machine-delete-error" className="text-sm text-red-300">{error}</p> : null}
       {stats ? <p data-testid="machine-stats">{stats}</p> : null}
       <h2 className="text-lg font-medium">审计</h2>
-      <ul data-testid="audit-log" className="grid gap-1 text-sm text-neutral-300">
+      {audit.isPending ? <p className="text-sm text-neutral-400">正在加载审计…</p> : null}
+      {audit.isError ? <p role="alert" className={alertClass}>{audit.error.message}</p> : null}
+      <ul data-testid="audit-log" className="text-sm">
         {(audit.data?.audit ?? []).map((row) => (
-          <li key={row.id}>{row.ts} {row.action} {row.target}</li>
+          <li key={row.id}><ScanRow tone="dark" subject={row.action} meta={`${row.ts} · ${row.target}`} /></li>
         ))}
       </ul>
     </div>
@@ -530,12 +552,18 @@ export function AdminTemplates() {
   return (
     <div className="mx-auto grid max-w-3xl gap-6 px-6 py-8">
       <h1 className="text-2xl font-semibold">模板</h1>
-      <ul className="grid gap-2">
+      {templates.isPending ? <p className="text-sm text-neutral-400">正在加载模板…</p> : null}
+      {templates.isError ? <p role="alert" className={alertClass}>{templates.error.message}</p> : null}
+      {templates.data && templates.data.templates.length === 0 ? <p className="text-sm text-neutral-400">没有模板</p> : null}
+      <ul>
         {(templates.data?.templates ?? []).map((template) => (
-          <li key={template.id} className="rounded border border-neutral-800 p-3 text-sm">
-            <p className="font-medium">{template.name}</p>
-            <p className="text-neutral-400">{template.description}</p>
-            <button className="mt-2 text-neutral-400" type="button" onClick={() => remove.mutate(template.id)}>删除</button>
+          <li key={template.id} className="text-sm">
+            <ScanRow
+              tone="dark"
+              subject={template.name}
+              meta={template.description}
+              actions={<button className="rounded border border-red-400/70 px-3 py-1 text-red-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200" type="button" onClick={() => remove.mutate(template.id)}>删除</button>}
+            />
           </li>
         ))}
       </ul>

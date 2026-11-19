@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "./api.js";
+import { ScanRow } from "./scan-row.js";
 
 interface ReviewListItem {
   id: string;
@@ -37,8 +38,8 @@ interface ReviewFile {
   truncated?: boolean;
 }
 
-const button = "rounded bg-white px-3 py-2 text-sm font-medium text-neutral-950 disabled:opacity-50";
-const field = "rounded border border-neutral-700 bg-neutral-900 px-3 py-2";
+const button = "rounded bg-white px-3 py-2 text-sm font-medium text-neutral-950 disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
+const field = "rounded border border-neutral-700 bg-neutral-900 px-3 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
 
 export function AdminReviews() {
   const client = useQueryClient();
@@ -51,22 +52,27 @@ export function AdminReviews() {
   return (
     <section className="mx-auto grid max-w-6xl gap-6 px-4 py-6 sm:px-6" data-testid="admin-review-list">
       <h1 className="text-xl font-semibold">应用审批</h1>
-      {reviews.isError ? <p role="alert">无法加载审批</p> : null}
+      {reviews.isError ? <p role="alert" className="rounded-md bg-red-100 px-3 py-2 text-sm text-red-900">无法加载审批</p> : null}
       {reviews.isPending ? <p className="text-sm text-neutral-400">正在加载…</p> : null}
-      {reviews.data && reviews.data.requests.length === 0 ? <p>没有发布申请</p> : null}
+      {reviews.data && reviews.data.requests.length === 0 ? <p className="text-sm text-neutral-400">没有发布申请</p> : null}
       <div className="grid gap-6 lg:grid-cols-[20rem_minmax(0,1fr)]">
         <ul className="grid gap-2">
           {(reviews.data?.requests ?? []).map((item) => (
             <li key={item.id}>
               <button
-                className="grid w-full gap-1 rounded border border-neutral-800 px-3 py-2 text-left text-sm"
+                className="w-full rounded border border-neutral-800 px-3 py-2 text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200"
                 type="button"
                 data-testid={`admin-review-${item.id}`}
                 onClick={() => setSelected(item.id)}
               >
-                <span className="break-all font-medium">{item.name} {item.version}</span>
-                <span className="break-all text-neutral-400">{item.kinds.join("、") || "未识别"} · {item.requester} · {item.bot ?? "页面提交"} · {stateText(item.state)}</span>
-                <span className="break-all text-neutral-500">{item.createdAt}</span>
+                <ScanRow
+                  tone="dark"
+                  rule={false}
+                  pad={false}
+                  subject={`${item.name} ${item.version}`}
+                  status={<span className={stateClass(item.state)}>{stateText(item.state)}</span>}
+                  meta={`${item.kinds.join("、") || "未识别"} · ${item.requester} · ${item.bot ?? "页面提交"} · ${item.createdAt}`}
+                />
               </button>
             </li>
           ))}
@@ -105,10 +111,10 @@ function ReviewDetail({ id, onDecided }: { id: string; onDecided: () => void }) 
   });
   const card = detail.data;
   if (detail.isPending) return <p className="text-sm text-neutral-400">正在加载详情…</p>;
-  if (!card) return <p role="alert">无法加载详情</p>;
+  if (!card) return <p role="alert" className="rounded-md bg-red-100 px-3 py-2 text-sm text-red-900">无法加载详情</p>;
   return (
     <article className="grid min-w-0 gap-4" data-testid="admin-review-detail">
-      <h2 className="break-all text-lg font-medium">{card.name} {card.version}</h2>
+      <h2 className="text-lg font-medium [overflow-wrap:anywhere]">{card.name} {card.version}</h2>
       <p className="break-all text-sm">SHA-256 {card.sha256}</p>
       <p className="whitespace-pre-wrap break-all text-sm">说明：{card.note}</p>
       <section className="grid gap-2">
@@ -194,5 +200,18 @@ function stateText(state: string): string {
       return "已撤回";
     default:
       return "状态未知";
+  }
+}
+
+function stateClass(state: string): string {
+  switch (state) {
+    case "pending":
+      return "font-medium text-amber-300";
+    case "approved":
+      return "font-medium text-emerald-300";
+    case "rejected":
+      return "font-medium text-red-300";
+    default:
+      return "text-neutral-400";
   }
 }
