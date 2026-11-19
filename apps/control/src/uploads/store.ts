@@ -121,9 +121,10 @@ export async function saveUpload(input: SaveUploadInput): Promise<SavedUpload> {
   } catch (error) {
     file.on("error", ignoreError);
     if (!file.closed) {
-      const closed = once(file, "close");
+      const closed = Promise.withResolvers<void>();
+      file.once("close", () => closed.resolve());
       file.destroy();
-      await closed;
+      await closed.promise;
     }
     await rm(partPath, { force: true });
     throw error;

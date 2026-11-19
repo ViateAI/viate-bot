@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { WriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { request, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -318,6 +319,79 @@ describe("uploads", () => {
     ).rejects.toThrow(/\u65ad\u5f00/);
     expect(filesIn(join(dir, "uploads"))).toEqual([]);
     expect(db.$client.prepare("select count(*) as n from uploads").get()).toEqual({ n: 0 });
+  });
+
+  it("deletes only this partial when the stream fails during an in-flight write", async () => {
+    const { db, dir } = open();
+    seedUser(db, "user-a");
+    const userDir = join(dir, "uploads", "user-a");
+    mkdirSync(userDir, { recursive: true });
+    const neighbor = join(userDir, "neighbor.bin");
+    const otherPart = join(userDir, "other-upload.part");
+    const neighborBytes = Buffer.from("keep-neighbor");
+    const otherPartBytes = Buffer.from("keep-other-part");
+    writeFileSync(neighbor, neighborBytes);
+    writeFileSync(otherPart, otherPartBytes);
+    const payload = Buffer.from("partial-bytes!");
+
+    const nodeFs = createRequire(import.meta.url)("node:fs") as { write: (this: unknown, ...args: unknown[]) => unknown };
+    const originalWrite = nodeFs.write;
+    const originalDestroy = WriteStream.prototype.destroy;
+    let held = false;
+    const writeReleased = Promise.withResolvers<void>();
+    const writeStarted = Promise.withResolvers<void>();
+    const destroyStarted = Promise.withResolvers<void>();
+    // The successful fs.write callback stays pending until destroy has started.
+    nodeFs.write = function (this: unknown, ...args: unknown[]) {
+      const buf = args[1];
+      const cb = args[args.length - 1];
+      if (!held && typeof cb === "function" && Buffer.isBuffer(buf) && buf.equals(payload)) {
+        held = true;
+        writeStarted.resolve();
+        void writeReleased.promise.then(() => {
+          originalWrite.apply(this, args);
+        });
+        return;
+      }
+      return originalWrite.apply(this, args);
+    };
+    WriteStream.prototype.destroy = function (this: WriteStream, error?: Error) {
+      const result = originalDestroy.call(this, error);
+      const path = String(this.path);
+      if (path.startsWith(userDir) && path.endsWith(".part") && path !== otherPart) destroyStarted.resolve();
+      return result;
+    };
+
+    const stream = new Readable({
+      read() {
+        if ((this as Readable & { pushed?: boolean }).pushed) return;
+        (this as Readable & { pushed?: boolean }).pushed = true;
+        this.push(payload);
+      },
+    });
+    const pending = saveUpload({
+      db,
+      dataDir: dir,
+      userId: "user-a",
+      filename: "part.bin",
+      stream,
+      now: new Date(),
+    });
+    try {
+      await writeStarted.promise;
+      stream.destroy(new Error("断开"));
+      await destroyStarted.promise;
+      writeReleased.resolve();
+      await expect(pending).rejects.toMatchObject({ message: "断开" });
+      expect(filesIn(userDir)).toEqual(["neighbor.bin", "other-upload.part"]);
+      expect(readFileSync(neighbor).equals(neighborBytes)).toBe(true);
+      expect(readFileSync(otherPart).equals(otherPartBytes)).toBe(true);
+      expect(db.$client.prepare("select count(*) as n from uploads").get()).toEqual({ n: 0 });
+    } finally {
+      writeReleased.resolve();
+      nodeFs.write = originalWrite;
+      WriteStream.prototype.destroy = originalDestroy;
+    }
   });
 });
 
