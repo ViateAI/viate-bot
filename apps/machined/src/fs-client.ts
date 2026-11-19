@@ -236,7 +236,7 @@ class WorkerFs implements FsClient {
 
   pack(path: string): Promise<Readable> {
     return new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [WORKER_BIN, "--pack", path], {
+      const child = spawn(process.execPath, [workerBin(), "--pack", path], {
         stdio: ["ignore", "pipe", "pipe"],
         env: {
           PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",

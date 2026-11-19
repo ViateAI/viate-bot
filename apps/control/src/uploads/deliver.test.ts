@@ -301,7 +301,7 @@ describe("attachment delivery", () => {
   });
 });
 
-function remotePath(db: { $client: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } } }, messageId: string, name: string): string {
+function remotePath(db: { $client: { prepare: (sql: string) => { get: (id: string) => unknown } } }, messageId: string, name: string): string {
   const row = db.$client.prepare("select content_json as contentJson from messages where id=?").get(messageId);
   let directory = messageId;
   if (typeof row === "object" && row !== null && "contentJson" in row && typeof row.contentJson === "string") {

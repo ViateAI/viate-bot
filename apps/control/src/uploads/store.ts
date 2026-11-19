@@ -120,7 +120,11 @@ export async function saveUpload(input: SaveUploadInput): Promise<SavedUpload> {
     };
   } catch (error) {
     file.on("error", ignoreError);
-    file.destroy();
+    if (!file.closed) {
+      const closed = once(file, "close");
+      file.destroy();
+      await closed;
+    }
     await rm(partPath, { force: true });
     throw error;
   }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { deflateSync } from "node:zlib";
 import test from "node:test";
-import { startFakeModel } from "./fake-model.ts";
+import { startFakeModel } from "./fake-model.js";
 
 test("两张同格式图片按像素判色，并复述实际 shell stdout", async () => {
   const server = await startFakeModel(0);

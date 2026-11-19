@@ -105,10 +105,12 @@ describe("live attachment evidence", () => {
       }
       harness.releaseNext();
       await waitFor(() => harness.bodies.length === 3);
-      expect(harness.bodies[2]).not.toContain(PNG.toString("base64"));
-      expect(harness.bodies[2]).toContain(remotePath(harness.db, steeredId, "dot.png"));
-      expect(harness.bodies[2]).toContain(remotePath(harness.db, queuedId, "notes.txt"));
-      expect(api === "openai-responses" ? harness.bodies[2].includes("input_image") : harness.bodies[2].includes("image_url")).toBe(false);
+      const third = harness.bodies[2];
+      if (third === undefined) throw new Error("第三轮没有请求");
+      expect(third).not.toContain(PNG.toString("base64"));
+      expect(third).toContain(remotePath(harness.db, steeredId, "dot.png"));
+      expect(third).toContain(remotePath(harness.db, queuedId, "notes.txt"));
+      expect(api === "openai-responses" ? third.includes("input_image") : third.includes("image_url")).toBe(false);
       harness.release();
       expect((await finished(harness, taskId)).state).toBe("succeeded");
       expect(machine.uploads).toHaveLength(2);
@@ -729,10 +731,10 @@ async function halt(harness: { app: FastifyInstance; db: ControlContext["db"]; c
   if (index >= 0) closers.splice(index, 1);
   await harness.app.close();
   harness.db.$client.close();
-  for (const handle of process._getActiveHandles?.() ?? []) {
-    if (handle.constructor?.name !== "Timeout") continue;
-    const timer = handle as { unref?: () => void };
-    timer.unref?.();
+  const active = (process as NodeJS.Process & { _getActiveHandles?: () => unknown[] })._getActiveHandles?.() ?? [];
+  for (const handle of active) {
+    if (typeof handle !== "object" || handle === null || handle.constructor?.name !== "Timeout") continue;
+    if ("unref" in handle && typeof handle.unref === "function") handle.unref();
   }
 }
 
@@ -944,7 +946,7 @@ async function holdFollowUp(text: string): Promise<{
   return { harness, botId, conversationId: openedBody.conversationId, followed, releaseUpload };
 }
 
-function remotePath(db: { $client: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } } }, messageId: string, name: string): string {
+function remotePath(db: { $client: { prepare: (sql: string) => { get: (id: string) => unknown } } }, messageId: string, name: string): string {
   const row = db.$client.prepare("select content_json as contentJson from messages where id=?").get(messageId);
   let directory = messageId;
   if (typeof row === "object" && row !== null && "contentJson" in row && typeof row.contentJson === "string") {

@@ -739,6 +739,16 @@ export function createChatService(deps: ChatServiceDeps) {
     if (shown?.message.role === "user") message.content = shown.message.content;
   }
 
+  function deliveryTarget(item: AttachmentRef, messageId: string): { messageId: string; id: string; name: string; place?: string } {
+    const target: { messageId: string; id: string; name: string; place?: string } = {
+      messageId: item.place ?? messageId,
+      id: item.id,
+      name: item.name,
+    };
+    if (item.place !== undefined) target.place = item.place;
+    return target;
+  }
+
   async function deliverMessageFiles(live: Live, messageId: string, attachments: AttachmentRef[]): Promise<void> {
     const client = live.files;
     if (!client) throw new ChatError("机器还没准备好接收附件", 503);
@@ -746,7 +756,7 @@ export function createChatService(deps: ChatServiceDeps) {
     await deliverAttachments(
       deps.config.dataDir,
       live.userId,
-      attachments.map((item) => ({ messageId: item.place ?? messageId, id: item.id, name: item.name, place: item.place })),
+      attachments.map((item) => deliveryTarget(item, messageId)),
       (path, body, deliveryId) => client.upload(path, body, deliveryId, live.resumeAbort?.signal),
       delivered,
       (id) => markUploadDelivered(deps.db, live.userId, id, now().toISOString()),
@@ -930,7 +940,7 @@ export function createChatService(deps: ChatServiceDeps) {
       live.files = files;
       const attached = (chat.listMessages(scope, live.conversationId) ?? []).flatMap((row) => {
         if (row.taskId !== live.id || row.role !== "user") return [];
-        return (messageView(row).attachments ?? []).map((item) => ({ messageId: item.place ?? row.id, id: item.id, name: item.name, place: item.place }));
+        return (messageView(row).attachments ?? []).map((item) => deliveryTarget(item, row.id));
       });
       const delivered = deliveredUploadIds(deps.db, live.userId, attached.map((item) => item.id));
       await deliverAttachments(
