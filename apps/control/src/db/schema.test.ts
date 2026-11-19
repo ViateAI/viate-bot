@@ -113,6 +113,7 @@ describe("schema migration", () => {
       "task_steps",
       "tasks",
       "takeover_leases",
+      "uploads",
       "usage_hourly",
       "users",
     ].sort());

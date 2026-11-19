@@ -1,8 +1,10 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { solidPng } from "./fake-model.js";
 import { hostResolverRules } from "./hosts.js";
 import { ignoreHTTPSErrors, type LoginModule } from "./login.js";
 
@@ -294,6 +296,7 @@ export async function runSuite(): Promise<void> {
       const listed = await json<{ routines: Array<{ state: string }> }>(userApi, `${baseURL}/api/bots/${botId}/routines`);
       return listed.routines.some((item) => item.state !== "draft") ? "ok" : "定时任务还是草稿";
     });
+    if (local) await sendUpload(page, userApi, baseURL, botId);
     await json(adminApi, `${baseURL}/api/admin/users/${me.id}/quota`, {
       method: "PATCH",
       headers: { "x-vb-csrf": adminCsrf },
@@ -317,6 +320,55 @@ export async function runSuite(): Promise<void> {
     if (cleanupFailures) throw new Error(`E2E cleanup failed: ${cleanupFailures} operation(s); verify test account resources`);
   }
   console.log("E2E passed; created bot/routines removed and temporary settings restored; login sessions stayed in memory");
+}
+
+async function sendUpload(page: Page, api: HttpClient, baseURL: string, botId: string): Promise<void> {
+  const dir = join(tmpdir(), `vb-e2e-upload-${randomUUID()}`);
+  mkdirSync(dir, { recursive: true });
+  const notes = join(dir, "notes.txt");
+  const red = join(dir, "red.png");
+  const blue = join(dir, "blue.png");
+  const secret = `upload-${randomUUID()}`;
+  writeFileSync(notes, secret);
+  writeFileSync(red, solidPng(320, 180, [220, 10, 10]));
+  writeFileSync(blue, solidPng(320, 180, [10, 10, 220]));
+  await page.getByTestId("attach-input").setInputFiles([notes, red, blue]);
+  await page.getByTestId("pending-attachments").waitFor();
+  mkdirSync("/tmp/vb-uploads-shots", { recursive: true });
+  await page.getByTestId("pending-attachments").screenshot({ path: "/tmp/vb-uploads-shots/thumbnail.png" });
+  await page.getByTestId("message-input").fill("e2e-upload");
+  await paceReal();
+  await page.screenshot({ path: "/tmp/vb-uploads-shots/send.png" });
+  const response = page.waitForResponse((item) => item.url().includes(`/api/bots/${botId}/messages`) && item.request().method() === "POST");
+  await page.getByTestId("send-message").click();
+  const posted = await response;
+  if (posted.status() !== 202) throw new Error(`上传消息发送失败 ${posted.status()} ${await posted.text()}`);
+  const payload: unknown = await posted.json();
+  if (typeof payload !== "object" || payload === null || !("taskId" in payload) || typeof payload.taskId !== "string") {
+    throw new Error("上传消息没有任务编号");
+  }
+  await waitState(api, baseURL, payload.taskId, "succeeded");
+  await page.getByText(secret, { exact: false }).waitFor({ timeout: TASK_TIMEOUT_MS });
+  await page.getByText("红色").waitFor({ timeout: TASK_TIMEOUT_MS });
+  await page.getByText("蓝色").waitFor({ timeout: TASK_TIMEOUT_MS });
+  await page.screenshot({ path: "/tmp/vb-uploads-shots/message.png" });
+  const images = page.getByTestId("message-image");
+  const count = await images.count();
+  if (count !== 2) throw new Error(`消息里应有两张原图，实际 ${count}`);
+  for (let index = 0; index < count; index += 1) {
+    const href = await images.nth(index).evaluate((node) => {
+      const parent = node.parentElement;
+      return parent instanceof HTMLAnchorElement ? parent.getAttribute("href") : null;
+    });
+    if (!href) throw new Error("消息图片没有原图地址");
+    const view = await page.context().newPage();
+    try {
+      await view.goto(new URL(href, page.url()).href);
+      await view.locator("img").screenshot({ path: `/tmp/vb-uploads-shots/original-${index}.png` });
+    } finally {
+      await view.close();
+    }
+  }
 }
 
 async function say(page: Page, botId: string, text: string): Promise<{ taskId: string }> {

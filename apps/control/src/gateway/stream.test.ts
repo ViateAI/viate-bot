@@ -863,6 +863,68 @@ describe("model gateway", () => {
   });
 });
 
+describe("user images", () => {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  ).toString("base64");
+
+  it("puts the user image in chat completions and responses requests", async () => {
+    const db = database();
+    const bodies: unknown[] = [];
+    const tasks = new Map([["task-1", task()]]);
+    const completions = loadConfig({ VB_MODEL_BASE_URL: "http://model.test/v1", VB_VISION_MODELS: "gpt-test" });
+    const responses = loadConfig({
+      VB_MODEL_BASE_URL: "http://model.test/v1",
+      VB_VISION_MODELS: "gpt-test",
+      VB_MODEL_API: "openai-responses",
+    });
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { input?: unknown };
+      bodies.push(body);
+      if (body.input) {
+        return sse([
+          JSON.stringify({ type: "response.output_text.delta", delta: "ok" }),
+          JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1 } } }),
+        ]);
+      }
+      return textSse("ok");
+    };
+    const message = {
+      role: "user" as const,
+      content: [
+        { type: "text" as const, text: "看一下\n附件：/home/bot/uploads/m1/dot.png（1 KB，image/png）" },
+        { type: "image" as const, data: png, mimeType: "image/png" },
+      ],
+      timestamp: 1,
+    };
+    await finish(createGateway({ db, config: completions, tasks, retryDelays: [0, 0], fetch: fetchImpl })(
+      buildModel(completions, "gpt-test"),
+      { messages: [message] },
+      { sessionId: "task-1" },
+    ));
+    await finish(createGateway({ db, config: responses, tasks, retryDelays: [0, 0], fetch: fetchImpl })(
+      buildModel(responses, "gpt-test"),
+      { messages: [message] },
+      { sessionId: "task-1" },
+    ));
+    const chat = JSON.stringify(bodies[0]);
+    const response = JSON.stringify(bodies[1]);
+    expect(chat).toContain(`data:image/png;base64,${png}`);
+    expect(chat).toContain("image_url");
+    expect(response).toContain(`data:image/png;base64,${png}`);
+    expect(response).toContain("input_image");
+    const blind = loadConfig({ VB_MODEL_BASE_URL: "http://model.test/v1" });
+    await finish(createGateway({ db, config: blind, tasks, retryDelays: [0, 0], fetch: fetchImpl })(
+      buildModel(blind, "gpt-test"),
+      { messages: [message] },
+      { sessionId: "task-1" },
+    ));
+    expect(JSON.stringify(bodies[2])).not.toContain(png);
+    db.$client.close();
+  });
+});
+
 /** AbortSignal.timeout uses Node's internal timer, which fake timers do not reach. */
 function fakeNetworkTimeout() {
   return vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {

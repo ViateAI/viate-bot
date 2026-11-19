@@ -10,12 +10,15 @@ import {
   readConfined,
   readRaw,
   searchConfined,
+  streamUpload,
   writeConfined,
   type FsReadResult,
   type FsWriteResult,
 } from "./fs-ops.js";
 
-const WORKER_BIN = process.env.VB_FS_WORKER_BIN || "/opt/viate/fs-worker.mjs";
+function workerBin(): string {
+  return process.env.VB_FS_WORKER_BIN || "/opt/viate/fs-worker.mjs";
+}
 
 interface RpcOk {
   id: number;
@@ -58,6 +61,7 @@ export interface FsClient {
   search(path: string, pattern: string, maxResults: number): Promise<{ hits: FsSearchHit[]; truncated: boolean }>;
   readFile(path: string): Promise<Buffer>;
   writeFile(path: string, data: Buffer): Promise<FsWriteResult>;
+  upload(path: string, source: Readable, maxBytes: number, deliveryId: string): Promise<{ path: string; bytes: number; sha256: string }>;
   delete(path: string): Promise<{ path: string }>;
   pack(path: string): Promise<Readable>;
 }
@@ -66,6 +70,11 @@ export interface FsClient {
 export function createFsClient(): FsClient {
   if (process.getuid?.() === 0) return new WorkerFs();
   return new LocalFs();
+}
+
+/** 生产 root 走的同一条降权子进程。非 root 测试用它覆盖上传管道，不改 uid 选择。 */
+export function createWorkerFsClient(): FsClient {
+  return new WorkerFs();
 }
 
 class LocalFs implements FsClient {
@@ -88,6 +97,9 @@ class LocalFs implements FsClient {
   writeFile(path: string, data: Buffer): Promise<FsWriteResult> {
     return settle(writeConfined(path, data, 0o644));
   }
+  upload(path: string, source: Readable, maxBytes: number, deliveryId: string): Promise<{ path: string; bytes: number; sha256: string }> {
+    return settle(streamUpload(path, source, maxBytes, deliveryId));
+  }
   delete(path: string): Promise<{ path: string }> {
     return settle(deleteConfined(path));
   }
@@ -108,7 +120,7 @@ class WorkerFs implements FsClient {
   private readonly pending = new Map<number, { resolve: (value: RpcOk) => void; reject: (error: Error) => void }>();
 
   constructor() {
-    this.child = spawn(process.execPath, [WORKER_BIN], {
+    this.child = spawn(process.execPath, [workerBin()], {
       stdio: ["pipe", "pipe", "inherit"],
       env: {
         PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
@@ -163,6 +175,55 @@ class WorkerFs implements FsClient {
     return this.call({ op: "writeFile", path, data: data.toString("base64") }).then((response) => {
       if (!response.write) throw new Error("fs worker 没有返回写入结果");
       return response.write;
+    });
+  }
+
+  upload(path: string, source: Readable, maxBytes: number, deliveryId: string): Promise<{ path: string; bytes: number; sha256: string }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [workerBin(), "--upload", path, String(maxBytes), deliveryId], {
+        stdio: ["pipe", "pipe", "inherit"],
+        env: {
+          PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+          HOME: "/home/bot",
+          USER: "bot",
+          LOGNAME: "bot",
+          LANG: "C.UTF-8",
+        },
+      });
+      const chunks: Buffer[] = [];
+      let settled = false;
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+      child.on("error", fail);
+      child.stdin.on("error", () => {
+        source.unpipe(child.stdin);
+      });
+      source.on("error", (error) => {
+        child.kill();
+        fail(error);
+      });
+      source.pipe(child.stdin);
+      child.on("exit", (code) => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        let body: { ok?: boolean; path?: string; bytes?: number; sha256?: string; error?: string; statusCode?: number } = {};
+        try {
+          body = JSON.parse(text) as typeof body;
+        } catch {
+          fail(new Error(text || `upload failed ${code ?? "null"}`));
+          return;
+        }
+        if (code !== 0 || body.ok !== true || body.path === undefined || body.bytes === undefined || body.sha256 === undefined) {
+          fail(Object.assign(new Error(body.error || `upload failed ${code ?? "null"}`), { statusCode: body.statusCode ?? 500 }));
+          return;
+        }
+        if (settled) return;
+        settled = true;
+        resolve({ path: body.path, bytes: body.bytes, sha256: body.sha256 });
+      });
     });
   }
 

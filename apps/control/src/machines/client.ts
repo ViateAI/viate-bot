@@ -1,4 +1,5 @@
 import { request as httpRequest } from "node:http";
+import { Readable } from "node:stream";
 import type {
   DisplayEnsureResponse,
   DisplayInput,
@@ -188,6 +189,21 @@ export class MachinedClient {
     const listed = body && typeof body === "object" && "mcpServers" in body ? body.mcpServers : undefined;
     const mcpServers = Array.isArray(listed) ? listed.filter((item): item is string => typeof item === "string") : [];
     return { mcpServers };
+  }
+
+  async upload(path: string, body: Readable, deliveryId: string, signal?: AbortSignal): Promise<void> {
+    const response = await this.fetchImpl(`${this.url("/fs/upload")}?${new URLSearchParams({ path, delivery: deliveryId })}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${this.endpoint.token}`,
+        "content-type": "application/octet-stream",
+      },
+      body: Readable.toWeb(body),
+      duplex: "half",
+      ...(signal ? { signal } : {}),
+    });
+    if (!response.ok) throw new Error(await readError(response));
+    await response.text();
   }
 
   async displayShot(display: number, signal?: AbortSignal): Promise<DisplayScreenshotResponse> {

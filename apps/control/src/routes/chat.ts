@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { avatarFile } from "../agent/profile-tool.js";
 import type { ChatService } from "../agent/service.js";
 import { ChatError } from "../agent/service.js";
@@ -11,7 +11,7 @@ import { authenticated } from "../auth.js";
 import { BotRejected, createBot, deleteBot } from "../bot-service.js";
 import type { ControlConfig } from "../config.js";
 import { botRepository } from "../db/bots.js";
-import { chatRepository } from "../db/chat.js";
+import { chatRepository, ConversationBusy } from "../db/chat.js";
 import { acceptRemoteRisk } from "../agent/remote-uncertain.js";
 import { remoteUncertain } from "../agent/remote-uncertain.js";
 import type { AppDatabase } from "../db/index.js";
@@ -19,6 +19,7 @@ import { memoryRepository } from "../db/memories.js";
 import { quotaRepository } from "../db/quotas.js";
 import type { CredentialProvider } from "../providers.js";
 import { userScope } from "../scope.js";
+import { ownedUploadPath } from "../uploads/store.js";
 
 export interface ChatRouteDeps {
   db: AppDatabase;
@@ -153,6 +154,23 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     return { conversation: row };
   });
 
+  app.delete<{ Params: { id: string } }>("/api/conversations/:id", async (request, reply) => {
+    const scope = scopeOf(request, reply);
+    if (!scope) return;
+    try {
+      const uploadIds = chat.deleteConversation(scope, request.params.id);
+      if (!uploadIds) return reply.code(404).send({ error: "找不到对话" });
+      for (const uploadId of uploadIds) {
+        const path = ownedUploadPath(deps.config.dataDir, scope.userId, uploadId);
+        if (path) rmSync(path, { force: true });
+      }
+      return { ok: true };
+    } catch (error) {
+      if (error instanceof ConversationBusy) return reply.code(409).send({ error: error.message });
+      throw error;
+    }
+  });
+
   app.get<{ Params: { id: string } }>("/api/conversations/:id/messages", async (request, reply) => {
     const scope = scopeOf(request, reply);
     if (!scope) return;
@@ -222,8 +240,12 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!scope) return;
     const body = record(request.body);
     const text = typeof body.text === "string" ? body.text : "";
-    const mode = body.mode === undefined ? "queue" : body.mode;
+    const mode = body.mode === undefined ? "steer" : body.mode;
     if (mode !== "queue" && mode !== "steer") return reply.code(400).send({ error: "mode 只能是 queue 或 steer" });
+    const uploadIds = body.uploadIds;
+    if (uploadIds !== undefined && (!Array.isArray(uploadIds) || uploadIds.some((item) => typeof item !== "string"))) {
+      return reply.code(400).send({ error: "uploadIds 必须是字符串数组" });
+    }
     const conversationId = typeof body.conversationId === "string" ? body.conversationId : undefined;
     try {
       const result = await deps.chat.send({
@@ -231,6 +253,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
         botId: request.params.id,
         text,
         mode,
+        ...(Array.isArray(uploadIds) ? { uploadIds } : {}),
         ...(conversationId !== undefined ? { conversationId } : {}),
       });
       return reply.code(202).send(result);

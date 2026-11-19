@@ -100,6 +100,7 @@ async function main(): Promise<void> {
       VB_MODEL_BASE_URL: `http://127.0.0.1:${ports.model}/v1`,
       VB_MODEL_API_KEY: "test-key",
       VB_MODELS: "fake",
+      VB_VISION_MODELS: "fake",
       VB_MODEL_RATE_USER: "1000",
       VB_MODEL_RATE_BOT: "1000",
       VB_MAX_TASK_STEPS: "32",

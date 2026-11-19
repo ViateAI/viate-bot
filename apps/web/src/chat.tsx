@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { lazy, Suspense, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { api, taskLabel, type Bot, type ChatMessage, type MemoryItem, type Step, type Task } from "./api.js";
+import { lazy, Suspense, useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent } from "react";
+import { api, uploadAttachment, taskLabel, type Bot, type ChatMessage, type MemoryItem, type Step, type Task } from "./api.js";
+import { AttachmentCards, ComposerSend, PendingAttachments, composerEnterSubmits, reserveIncoming, sendBlocked, withoutSent, type LocalFile, type PendingItem } from "./attachments.js";
 import { showContinueButton } from "./task-limit.js";
 import { activityLine } from "./activity.js";
 import { usesMarkdown } from "./markdown-policy.js";
@@ -20,8 +21,14 @@ export function ChatPage({ botId }: { botId: string }) {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const pendingRef = useRef<PendingItem[]>([]);
+  const reservedRef = useRef<LocalFile[]>([]);
+  const uploadingCount = useRef(0);
   const [draft, setDraft] = useState("");
-  const [mode, setMode] = useState<"queue" | "steer">("queue");
+  const [pending, setPending] = useState<PendingItem[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [mode, setMode] = useState<"queue" | "steer">("steer");
   const [stream, setStream] = useState("");
   const [machine, setMachine] = useState<"starting" | "ready" | "idle">("idle");
   const [error, setError] = useState("");
@@ -143,16 +150,25 @@ export function ChatPage({ botId }: { botId: string }) {
   }, [draft]);
 
   const send = useMutation({
-    mutationFn: (text: string) =>
-      api(`/api/bots/${botId}/messages`, {
+    mutationFn: (input: string | { text: string; uploadIds?: string[] }) => {
+      const text = typeof input === "string" ? input : input.text;
+      const uploadIds = typeof input === "string" ? undefined : input.uploadIds;
+      return api(`/api/bots/${botId}/messages`, {
         method: "POST",
         body: JSON.stringify({
           text,
-          mode: active ? mode : "queue",
+          mode,
           ...(conversationId ? { conversationId } : {}),
+          ...(uploadIds && uploadIds.length > 0 ? { uploadIds } : {}),
         }),
-      }),
-    onSuccess: async () => {
+      });
+    },
+    onSuccess: async (_data, variables) => {
+      const sentIds = typeof variables === "string" ? [] : (variables.uploadIds ?? []);
+      for (const item of pendingRef.current) {
+        if (sentIds.includes(item.id) && item.preview) URL.revokeObjectURL(item.preview);
+      }
+      replacePending(withoutSent(pendingRef.current, sentIds));
       setDraft("");
       setError("");
       await queryClient.invalidateQueries({ queryKey: ["conversations", botId] });
@@ -176,9 +192,113 @@ export function ChatPage({ botId }: { botId: string }) {
     onError: (caught: Error) => setError(caught.message),
   });
 
+  function composerGate(): boolean {
+    return sendBlocked({
+      sending: send.isPending,
+      uploading: uploadingCount.current,
+      pending: pendingRef.current,
+      text: draft,
+    });
+  }
+
   function submitDraft() {
-    if (send.isPending || draft.trim().length === 0) return;
-    send.mutate(draft);
+    if (composerGate()) return;
+    const ready = pendingRef.current.filter((item) => !item.failed);
+    send.mutate({ text: draft, uploadIds: ready.map((item) => item.id) });
+  }
+
+  function replacePending(items: PendingItem[]) {
+    pendingRef.current = items;
+    setPending(items);
+  }
+
+  async function addFiles(files: File[]) {
+    const incoming = files.map((file) => ({ name: file.name, size: file.size, type: file.type, file }));
+    const decision = reserveIncoming(
+      [
+        ...pendingRef.current.map((item) => ({ name: item.name, size: item.size, type: item.mime })),
+        ...reservedRef.current,
+      ],
+      incoming,
+    );
+    if (decision.error) setError(decision.error);
+    const reserved = decision.held.slice(decision.held.length - decision.accepted.length);
+    reservedRef.current = [...reservedRef.current, ...reserved];
+    if (decision.accepted.length === 0) return;
+    uploadingCount.current += 1;
+    setUploading(true);
+    try {
+      for (let index = 0; index < decision.accepted.length; index += 1) {
+        const item = decision.accepted[index]!;
+        const reservation = reserved[index]!;
+        try {
+          const saved = await uploadAttachment(item.file);
+          reservedRef.current = reservedRef.current.filter((row) => row !== reservation);
+          const preview = saved.kind === "image" ? URL.createObjectURL(item.file) : undefined;
+          replacePending([...pendingRef.current, { ...saved, ...(preview ? { preview } : {}) }]);
+        } catch (caught) {
+          reservedRef.current = reservedRef.current.filter((row) => row !== reservation);
+          const message = caught instanceof Error ? caught.message : "上传失败";
+          replacePending([
+            ...pendingRef.current,
+            {
+              id: `failed-${crypto.randomUUID()}`,
+              name: item.name,
+              size: item.size,
+              mime: item.type || "application/octet-stream",
+              kind: item.type.startsWith("image/") ? "image" : "file",
+              failed: true,
+              error: message,
+              file: item.file,
+            },
+          ]);
+          setError(message);
+        }
+      }
+    } finally {
+      uploadingCount.current -= 1;
+      if (uploadingCount.current === 0) setUploading(false);
+    }
+  }
+
+  async function retryPending(id: string) {
+    const current = pendingRef.current.find((item) => item.id === id);
+    if (!current?.failed || !current.file) return;
+    const file = current.file;
+    uploadingCount.current += 1;
+    setUploading(true);
+    try {
+      const saved = await uploadAttachment(file);
+      const preview = saved.kind === "image" ? URL.createObjectURL(file) : undefined;
+      replacePending(pendingRef.current.map((item) => (item.id === id ? { ...saved, ...(preview ? { preview } : {}) } : item)));
+      setError("");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "上传失败";
+      replacePending(pendingRef.current.map((item) => (item.id === id ? { ...item, error: message } : item)));
+      setError(message);
+    } finally {
+      uploadingCount.current -= 1;
+      if (uploadingCount.current === 0) setUploading(false);
+    }
+  }
+
+  function removePending(id: string) {
+    const found = pendingRef.current.find((item) => item.id === id);
+    if (found?.preview) URL.revokeObjectURL(found.preview);
+    replacePending(pendingRef.current.filter((item) => item.id !== id));
+  }
+
+  function onDrop(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const files = [...event.dataTransfer.files];
+    if (files.length > 0) void addFiles(files);
+  }
+
+  function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = [...event.clipboardData.files];
+    if (files.length === 0) return;
+    event.preventDefault();
+    void addFiles(files);
   }
 
   function onSubmit(event: FormEvent) {
@@ -187,8 +307,10 @@ export function ChatPage({ botId }: { botId: string }) {
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    const pressed = { key: event.key, shiftKey: event.shiftKey, composing: event.nativeEvent.isComposing };
+    if (pressed.key !== "Enter" || pressed.shiftKey || pressed.composing) return;
     event.preventDefault();
+    if (!composerEnterSubmits(pressed, composerGate())) return;
     submitDraft();
   }
 
@@ -282,8 +404,35 @@ export function ChatPage({ botId }: { botId: string }) {
           </div>
         ) : null}
         {error ? <p className="mx-auto mb-3 w-full max-w-3xl px-4 text-sm text-red-700">{error}</p> : null}
-        <form className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))]" onSubmit={onSubmit}>
+        <PendingAttachments items={pending} onRemove={removePending} onRetry={(id) => void retryPending(id)} />
+        <form
+          className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
+          onSubmit={onSubmit}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={onDrop}
+        >
           <div className="flex items-end gap-2 rounded-full bg-white py-1.5 pr-1.5 pl-3 shadow-sm ring-1 ring-black/10">
+            <input
+              ref={fileRef}
+              data-testid="attach-input"
+              className="hidden"
+              type="file"
+              multiple
+              onChange={(event) => {
+                const files = [...(event.target.files ?? [])];
+                event.target.value = "";
+                if (files.length > 0) void addFiles(files);
+              }}
+            />
+            <button
+              type="button"
+              data-testid="attach-file"
+              aria-label="添加附件"
+              className="mb-1 grid size-9 shrink-0 place-items-center rounded-full text-neutral-600 hover:bg-black/5"
+              onClick={() => fileRef.current?.click()}
+            >
+              附件
+            </button>
             <select
               data-testid="send-mode"
               aria-label="发送方式"
@@ -292,7 +441,7 @@ export function ChatPage({ botId }: { botId: string }) {
               onChange={(event) => setMode(event.target.value === "steer" ? "steer" : "queue")}
             >
               <option value="queue">排队</option>
-              <option value="steer">打断</option>
+              <option value="steer">引导</option>
             </select>
             <textarea
               ref={inputRef}
@@ -303,6 +452,7 @@ export function ChatPage({ botId }: { botId: string }) {
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={onKeyDown}
+              onPaste={onPaste}
               placeholder={`给 ${name} 发消息`}
             />
             {stoppable ? (
@@ -320,15 +470,16 @@ export function ChatPage({ botId }: { botId: string }) {
                 停止
               </button>
             )}
-            <button
-              data-testid="send-message"
-              aria-label="发送"
-              className="mb-0.5 grid size-10 shrink-0 place-items-center rounded-full bg-neutral-900 text-white disabled:opacity-30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900"
-              type="submit"
-              disabled={send.isPending || draft.trim().length === 0}
+            <ComposerSend
+              blocked={sendBlocked({
+                sending: send.isPending,
+                uploading: uploading ? Math.max(uploadingCount.current, 1) : uploadingCount.current,
+                pending,
+                text: draft,
+              })}
             >
               <ArrowUp />
-            </button>
+            </ComposerSend>
           </div>
         </form>
       </section>
@@ -526,7 +677,8 @@ function MessageItem({ message, previous }: { message: ChatMessage; previous?: C
       ) : message.role === "user" ? (
         <li className="flex justify-end">
           <div className="max-w-[75%] rounded-[1.25rem] bg-white px-4 py-2.5 text-[15px] leading-6 text-neutral-900 shadow-sm ring-1 ring-black/5">
-            <p className="whitespace-pre-wrap break-words">{text}</p>
+            {text ? <p className="whitespace-pre-wrap break-words">{text}</p> : null}
+            <AttachmentCards items={message.attachments ?? []} />
           </div>
         </li>
       ) : usesMarkdown(message.role, message.isError) ? (

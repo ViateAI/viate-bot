@@ -47,7 +47,16 @@ export function formatMemorySection(
 export function latestUserText(messages: Array<{ role: string; content: unknown }>): string {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message?.role === "user" && typeof message.content === "string") return message.content;
+    if (message?.role !== "user") continue;
+    if (typeof message.content === "string") return message.content;
+    if (!Array.isArray(message.content)) continue;
+    const text = message.content
+      .map((block) => {
+        if (!block || typeof block !== "object" || !("text" in block)) return "";
+        return typeof block.text === "string" ? block.text : "";
+      })
+      .join("");
+    if (text.length > 0) return text;
   }
   return "";
 }

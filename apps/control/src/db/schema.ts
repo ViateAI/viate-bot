@@ -530,3 +530,24 @@ export const appPublishRequests = sqliteTable(
   },
   (table) => [index("app_publish_requests_version_idx").on(table.appVersionId, table.state)],
 );
+
+/** 控制面上传副本。message_id 为空表示还没有被消息引用。 */
+export const uploads = sqliteTable(
+  "uploads",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id),
+    messageId: text("message_id").references(() => messages.id),
+    name: text("name").notNull(),
+    size: integer("size").notNull(),
+    mime: text("mime").notNull(),
+    sha256: text("sha256").notNull(),
+    kind: text("kind").notNull(),
+    createdAt: text("created_at").notNull(),
+    /** 成功写到机器上的时间。失败保持空，同一任务可以重试。已写入的不再覆盖。 */
+    deliveredAt: text("delivered_at"),
+  },
+  (table) => [index("uploads_user_idx").on(table.userId), index("uploads_message_idx").on(table.messageId)],
+);

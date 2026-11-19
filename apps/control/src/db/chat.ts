@@ -4,6 +4,15 @@ import type { AppDatabase } from "./index.js";
 import { bots, conversations, messages, taskSteps, tasks } from "./schema.js";
 
 const ACTIVE_STATES = ["queued", "running", "waiting_approval", "waiting_takeover", "waiting_input"];
+const TERMINAL_TASK_STATES = ["succeeded", "failed", "cancelled", "interrupted"];
+
+export class ConversationBusy extends Error {
+  readonly statusCode = 409;
+  constructor() {
+    super("对话还有未结束的任务");
+    this.name = "ConversationBusy";
+  }
+}
 
 export interface ConversationRecord {
   id: string;
@@ -85,6 +94,33 @@ export function chatRepository(db: AppDatabase) {
         .where(and(eq(bots.userId, scope.userId), isNull(bots.deletedAt), inArray(tasks.state, ACTIVE_STATES)))
         .all();
       return new Set(rows.map((row) => row.botId));
+    },
+    deleteConversation(scope: UserScope, id: string): string[] | undefined {
+      if (!this.findConversation(scope, id)) return undefined;
+      const tx = db.$client.transaction(() => {
+        const busy = db.$client
+          .prepare(
+            `select id from tasks where conversation_id = ? and state not in (${TERMINAL_TASK_STATES.map(() => "?").join(", ")}) limit 1`,
+          )
+          .get(id, ...TERMINAL_TASK_STATES) as { id: string } | undefined;
+        if (busy) throw new ConversationBusy();
+        const uploads = db.$client
+          .prepare("select u.id as id from uploads u join messages m on m.id = u.message_id where m.conversation_id = ?")
+          .all(id) as Array<{ id: string }>;
+        const taskIds = "select id from tasks where conversation_id = ?";
+        db.$client.prepare("delete from uploads where message_id in (select id from messages where conversation_id = ?)").run(id);
+        db.$client.prepare(`update memories set source_task_id = null where source_task_id in (${taskIds})`).run(id);
+        db.$client.prepare(`update routine_runs set task_id = null where task_id in (${taskIds})`).run(id);
+        db.$client.prepare(`delete from notifications where task_id in (${taskIds})`).run(id);
+        db.$client.prepare(`delete from takeover_leases where task_id in (${taskIds})`).run(id);
+        db.$client.prepare(`delete from approvals where task_id in (${taskIds})`).run(id);
+        db.$client.prepare(`delete from task_steps where task_id in (${taskIds})`).run(id);
+        db.$client.prepare("delete from tasks where conversation_id = ?").run(id);
+        db.$client.prepare("delete from messages where conversation_id = ?").run(id);
+        db.$client.prepare("delete from conversations where id = ?").run(id);
+        return uploads.map((row) => row.id);
+      });
+      return tx();
     },
     findConversation(scope: UserScope, id: string): ConversationRecord | undefined {
       const row = db

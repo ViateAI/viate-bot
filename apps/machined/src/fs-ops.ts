@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, stat, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, stat, unlink } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import type { FsEntry, FsSearchHit } from "@viate-bot/protocol";
@@ -10,6 +11,9 @@ const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
 const WRITE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW;
 const PACK_FILES = 5000;
 const PACK_BYTES = 200 * 1024 * 1024;
+const PART_CREATE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
+const RECEIPT_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
+const DELIVERY_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 export interface FsReadResult {
   path: string;
@@ -64,6 +68,99 @@ export async function writeConfined(requested: string, content: Buffer, mode: nu
   } finally {
     await file.close();
   }
+}
+
+export async function streamUpload(
+  requested: string,
+  source: Readable,
+  maxBytes: number,
+  deliveryId: string,
+): Promise<{ path: string; bytes: number; sha256: string }> {
+  if (typeof deliveryId !== "string" || !DELIVERY_ID.test(deliveryId)) {
+    throw Object.assign(new Error("投递标识无效"), { statusCode: 400 });
+  }
+  const path = resolveConfined(requested);
+  if (path !== resolve(requested)) throw new PathEscapeError("\u5199\u5165\u8def\u5f84\u4e0d\u80fd\u5305\u542b\u7b26\u53f7\u94fe\u63a5");
+  const book = join(dirname(path), ".vb-deliveries");
+  const receiptPath = join(book, deliveryId);
+  // 回执才是这次投递的身份。同名文件没有回执，内容相同也不算成功。
+  const receipt = await readReceipt(receiptPath);
+  if (receipt) {
+    if (receipt.path !== path) throw Object.assign(new Error("投递标识已经用于其他路径"), { statusCode: 409 });
+    await discard(source);
+    return { path, bytes: receipt.bytes, sha256: receipt.sha256 };
+  }
+  await mkdir(book, { recursive: true });
+  const bookInfo = await lstat(book);
+  if (bookInfo.isSymbolicLink()) throw new PathEscapeError("投递目录不能是符号链接");
+  // 已经 link 到目标的暂存和目标是同一 inode。认回这次投递，不再打开它。
+  const linked = await linkedDeliveryPart(book, deliveryId, path);
+  if (linked) {
+    await discard(source);
+    const current = await hashFile(path);
+    await writeReceipt(receiptPath, { path, bytes: current.bytes, sha256: current.sha256 });
+    await syncDir(book);
+    await unlink(linked).catch(() => undefined);
+    return { path, bytes: current.bytes, sha256: current.sha256 };
+  }
+  const opened = await openPrivatePart(book, deliveryId);
+  const temp = opened.temp;
+  const file = opened.file;
+  const hasher = createHash("sha256");
+  let bytes = 0;
+  let sha256 = "";
+  let failed = false;
+  try {
+    for await (const piece of source) {
+      const chunk = Buffer.isBuffer(piece) ? piece : Buffer.from(piece);
+      if (bytes + chunk.length > maxBytes) {
+        throw Object.assign(new Error("\u5199\u5165\u5185\u5bb9\u8d85\u8fc7 25 MB"), { statusCode: 413 });
+      }
+      bytes += chunk.length;
+      hasher.update(chunk);
+      await file.write(chunk);
+    }
+    sha256 = hasher.digest("hex");
+    await file.sync();
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    await file.close().catch(() => undefined);
+    if (failed) await unlinkPrivatePart(temp, path);
+  }
+  try {
+    await link(temp, path);
+  } catch (error) {
+    if (errorCode(error) !== "EEXIST") {
+      await unlinkPrivatePart(temp, path);
+      throw error;
+    }
+    if (!(await sameFile(temp, path))) {
+      const receiptNow = await readReceipt(receiptPath);
+      if (receiptNow) {
+        await unlinkPrivatePart(temp, path);
+        if (receiptNow.path !== path) throw Object.assign(new Error("投递标识已经用于其他路径"), { statusCode: 409 });
+        return { path, bytes: receiptNow.bytes, sha256: receiptNow.sha256 };
+      }
+      const adopted = await linkedDeliveryPart(book, deliveryId, path);
+      if (adopted) {
+        await unlinkPrivatePart(temp, path);
+        const current = await hashFile(path);
+        await writeReceipt(receiptPath, { path, bytes: current.bytes, sha256: current.sha256 });
+        await syncDir(book);
+        await unlink(adopted).catch(() => undefined);
+        return { path, bytes: current.bytes, sha256: current.sha256 };
+      }
+      await unlinkPrivatePart(temp, path);
+      throw Object.assign(new Error("目标已存在，不能把同名文件当作本次投递"), { statusCode: 409 });
+    }
+  }
+  await syncDir(book);
+  await writeReceipt(receiptPath, { path, bytes, sha256 });
+  await syncDir(book);
+  await unlink(temp).catch(() => undefined);
+  return { path, bytes, sha256 };
 }
 
 /**
@@ -234,6 +331,164 @@ function errorCode(error: unknown): string | undefined {
     return error.code;
   }
   return undefined;
+}
+
+interface DeliveryReceipt {
+  path: string;
+  bytes: number;
+  sha256: string;
+}
+
+async function readReceipt(receiptPath: string): Promise<DeliveryReceipt | undefined> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(receiptPath, READ_FLAGS);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ENOENT") return undefined;
+    if (code === "ELOOP") throw Object.assign(new Error("投递回执不能是符号链接"), { statusCode: 409 });
+    throw error;
+  }
+  try {
+    const text = await handle.readFile("utf8");
+    let parsed: Partial<DeliveryReceipt>;
+    try {
+      parsed = JSON.parse(text) as Partial<DeliveryReceipt>;
+    } catch {
+      return undefined;
+    }
+    if (typeof parsed.path !== "string" || typeof parsed.bytes !== "number" || !Number.isInteger(parsed.bytes) || parsed.bytes < 0) {
+      return undefined;
+    }
+    if (typeof parsed.sha256 !== "string" || parsed.sha256.length === 0) return undefined;
+    return { path: parsed.path, bytes: parsed.bytes, sha256: parsed.sha256 };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function writeReceipt(receiptPath: string, body: DeliveryReceipt): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const existing = await readReceipt(receiptPath);
+    if (existing) {
+      if (existing.path !== body.path) throw Object.assign(new Error("投递标识已经用于其他路径"), { statusCode: 409 });
+      return;
+    }
+    let handle: Awaited<ReturnType<typeof open>>;
+    try {
+      handle = await open(receiptPath, RECEIPT_FLAGS, 0o644);
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === "ELOOP") throw Object.assign(new Error("投递回执不能是符号链接"), { statusCode: 409 });
+      if (code !== "EEXIST") throw error;
+      const again = await readReceipt(receiptPath);
+      if (again) {
+        if (again.path !== body.path) throw Object.assign(new Error("投递标识已经用于其他路径"), { statusCode: 409 });
+        return;
+      }
+      await unlink(receiptPath);
+      continue;
+    }
+    try {
+      await handle.writeFile(JSON.stringify(body));
+      await handle.sync();
+      return;
+    } finally {
+      await handle.close();
+    }
+  }
+  throw Object.assign(new Error("无法记录投递回执"), { statusCode: 500 });
+}
+
+async function openPrivatePart(book: string, deliveryId: string): Promise<{ temp: string; file: Awaited<ReturnType<typeof open>> }> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const temp = join(book, `${deliveryId}.${randomBytes(8).toString("hex")}.part`);
+    try {
+      return { temp, file: await open(temp, PART_CREATE_FLAGS, 0o644) };
+    } catch (error) {
+      if (errorCode(error) !== "EEXIST") throw error;
+    }
+  }
+  throw Object.assign(new Error("无法创建投递暂存"), { statusCode: 500 });
+}
+
+async function linkedDeliveryPart(book: string, deliveryId: string, target: string): Promise<string | undefined> {
+  let names: string[];
+  try {
+    names = await readdir(book);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return undefined;
+    throw error;
+  }
+  const prefix = `${deliveryId}.`;
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith(".part")) continue;
+    const middle = name.slice(prefix.length, -".part".length);
+    if (middle !== "" && !/^[0-9a-f]{16}$/.test(middle)) continue;
+    const candidate = join(book, name);
+    if (await sameFile(candidate, target)) return candidate;
+  }
+  return undefined;
+}
+
+async function sameFile(temp: string, target: string): Promise<boolean> {
+  const part = await lstatOrMissing(temp);
+  const dest = await lstatOrMissing(target);
+  if (!part?.isFile() || !dest?.isFile()) return false;
+  return part.dev === dest.dev && part.ino === dest.ino;
+}
+
+async function lstatOrMissing(path: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function unlinkPrivatePart(temp: string, target: string): Promise<void> {
+  const part = await lstatOrMissing(temp);
+  if (!part) return;
+  if (part.isSymbolicLink()) {
+    await unlink(temp).catch(() => undefined);
+    return;
+  }
+  if (!part.isFile() || part.nlink > 1) return;
+  const dest = await lstatOrMissing(target);
+  if (dest && dest.dev === part.dev && dest.ino === part.ino) return;
+  await unlink(temp).catch(() => undefined);
+}
+
+async function hashFile(path: string): Promise<{ bytes: number; sha256: string }> {
+  const file = await open(path, READ_FLAGS);
+  try {
+    const info = await file.stat();
+    const hasher = createHash("sha256");
+    let offset = 0;
+    while (offset < info.size) {
+      const { bytesRead, buffer } = await file.read(Buffer.alloc(64 * 1024), 0, 64 * 1024, offset);
+      if (bytesRead === 0) break;
+      hasher.update(buffer.subarray(0, bytesRead));
+      offset += bytesRead;
+    }
+    return { bytes: info.size, sha256: hasher.digest("hex") };
+  } finally {
+    await file.close();
+  }
+}
+
+async function discard(source: Readable): Promise<void> {
+  for await (const piece of source) void piece;
+}
+
+async function syncDir(dir: string): Promise<void> {
+  const handle = await open(dir, constants.O_RDONLY);
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
 }
 
 async function ripgrep(path: string, pattern: string, maxResults: number): Promise<FsSearchHit[]> {

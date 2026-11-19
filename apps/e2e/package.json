@@ -7,7 +7,7 @@
   "scripts": {
     "e2e": "tsx src/run.ts",
     "e2e:local": "tsx src/local.ts",
-    "test": "tsx --test src/hosts.test.ts",
+    "test": "tsx --test src/hosts.test.ts src/fake-model.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

@@ -38,6 +38,8 @@ import { registerRoutineRoutes as registerRoutineHttp } from "./routines/routes.
 import type { AppRuntime } from "./providers.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerChatRoutes } from "./routes/chat.js";
+import { cleanupUnreferencedUploads } from "./uploads/store.js";
+import { registerUploadRoutes } from "./uploads/routes.js";
 import { userScope } from "./scope.js";
 import { createDriver, devSpec, reconcileDeps } from "./runtime.js";
 import { registerWeb } from "./web-static.js";
@@ -191,6 +193,7 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     tasks,
     now,
   });
+  registerUploadRoutes(app, { db, dataDir: config.dataDir, now });
   registerAdminRoutes(app, {
     db,
     key,
@@ -450,6 +453,7 @@ export function startOpsMaintenance(ctx: ControlContext, intervalMs = 60 * 60 * 
   const timer = setInterval(() => {
     flushMinutes(ctx.db, opsMinutes);
     applyRetention(ctx.db, new Date());
+    cleanupUnreferencedUploads(ctx.db, ctx.config.dataDir, new Date());
   }, intervalMs);
   timer.unref();
   return () => clearInterval(timer);

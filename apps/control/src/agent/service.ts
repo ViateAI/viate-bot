@@ -64,6 +64,9 @@ import { machineTools } from "./tools.js";
 import { assistantText, loadTranscript, loadTranscriptEntries, messageView, stepView, storedContent, taskView, withoutImages } from "./view.js";
 import { buildModel, type GatewayTask } from "../gateway/stream.js";
 import { userScope, type UserScope } from "../scope.js";
+import { deliverAttachments } from "../uploads/deliver.js";
+import { cropUserImages, presentForModel } from "../uploads/present.js";
+import { claimUploads, clearUnclaimedDeliveries, deliveredUploadIds, markUploadDelivered, readAttachments, UploadRejected, type AttachmentRef } from "../uploads/store.js";
 
 const INTERRUPTED_TOOL = "执行被中断，结果未知";
 const TEXT_LIMIT = 32_000;
@@ -84,6 +87,7 @@ export interface SendInput {
   text: string;
   mode: "queue" | "steer";
   conversationId?: string;
+  uploadIds?: string[];
 }
 
 export interface SendResult {
@@ -130,6 +134,7 @@ interface Live extends QueuedTask {
   lengthContinuations: number;
   truncateNextTools: boolean;
   browser?: BoundBrowser;
+  files?: MachinedClient;
 }
 
 function catalogDeps(deps: ChatServiceDeps): CatalogDeps {
@@ -620,27 +625,53 @@ export function createChatService(deps: ChatServiceDeps) {
 
   async function sendLocked(input: SendInput): Promise<SendResult> {
     const text = input.text.trim();
-    if (text.length === 0) throw new ChatError("消息不能为空", 400);
-    if (text.length > TEXT_LIMIT) throw new ChatError("消息太长", 400);
     const scope = userScope(input.userId);
+    const attachments = input.uploadIds && input.uploadIds.length > 0 ? attachmentsFor(scope.userId, input.uploadIds) : [];
+    if (text.length === 0 && attachments.length === 0) throw new ChatError("消息不能为空", 400);
+    if (text.length > TEXT_LIMIT) throw new ChatError("消息太长", 400);
     const bot = botRepository(deps.db).findById(scope, input.botId);
     if (!bot) throw new ChatError("找不到 bot", 404);
     if (!quotaRepository(deps.db).find(scope)) throw new ChatError("尚未开通，请联系管理员", 403);
-    const conversation = resolveConversation(scope, bot, input.conversationId, text);
+    const conversation = resolveConversation(scope, bot, input.conversationId, text || attachments[0]?.name || "附件");
     const live = liveByBot.get(bot.id);
     if (live && live.conversationId !== conversation.id) {
       throw new ChatError("这个 bot 还有未完成的任务", 409);
     }
     const message = userMessage(text, now());
     if (live?.agent?.state.isStreaming) {
-      const row = persistUser(scope, conversation.id, message, live.id);
+      // 投递目录先定下来。消息 id 要等入库时再分配，避免占住会话顺序。
+      const place = attachments.length > 0 ? ulid() : undefined;
+      const stamped = place === undefined ? attachments : attachments.map((item) => ({ ...item, place }));
+      if (place) {
+        try {
+          await deliverMessageFiles(live, place, stamped);
+        } catch (error) {
+          clearUnclaimedDeliveries(deps.db, scope.userId, attachments.map((item) => item.id));
+          if (error instanceof ChatError) throw error;
+          throw new ChatError(error instanceof Error ? error.message : "上传失败", 502);
+        }
+      }
+      // followUp 只入队。原任务已经结束时队列不会再被执行，必须另开任务。
+      if (!running.has(live.id) || live.agent?.state.isStreaming !== true) {
+        const task = chat.insertTask(scope, { id: ulid(), botId: bot.id, conversationId: conversation.id });
+        if (!task) throw new ChatError("找不到 bot", 404);
+        const row = persistUser(scope, conversation.id, message, task.id, stamped);
+        saved.add(message);
+        queue.push({ id: task.id, botId: bot.id, userId: input.userId, conversationId: conversation.id });
+        remember(input.userId);
+        publishTask(input.userId, conversation.id, task.id);
+        pump();
+        return { conversationId: conversation.id, taskId: task.id, messageId: row.id };
+      }
+      const row = persistUser(scope, conversation.id, message, live.id, stamped);
       saved.add(message);
+      if (attachments.length > 0) showAttachments(message, row.id, stamped, deps.config.visionModels.includes(bot.model), live.userId);
       if (input.mode === "steer") live.agent.steer(message);
       else live.agent.followUp(message);
       return { conversationId: conversation.id, taskId: live.id, messageId: row.id };
     }
     if (live && !live.loaded) {
-      const row = persistUser(scope, conversation.id, message, live.id);
+      const row = persistUser(scope, conversation.id, message, live.id, attachments);
       saved.add(message);
       return { conversationId: conversation.id, taskId: live.id, messageId: row.id };
     }
@@ -650,7 +681,7 @@ export function createChatService(deps: ChatServiceDeps) {
       throw new ChatError("这个 bot 还有未完成的任务", 409);
     }
     if (pending) {
-      const row = persistUser(scope, conversation.id, message, pending.id);
+      const row = persistUser(scope, conversation.id, message, pending.id, attachments);
       saved.add(message);
       return { conversationId: conversation.id, taskId: pending.id, messageId: row.id };
     }
@@ -658,7 +689,7 @@ export function createChatService(deps: ChatServiceDeps) {
     if (waiting) throw new ChatError("正在等待输入", 409);
     const task = chat.insertTask(scope, { id: ulid(), botId: bot.id, conversationId: conversation.id });
     if (!task) throw new ChatError("找不到 bot", 404);
-    const row = persistUser(scope, conversation.id, message, task.id);
+    const row = persistUser(scope, conversation.id, message, task.id, attachments);
     saved.add(message);
     queue.push({ id: task.id, botId: bot.id, userId: input.userId, conversationId: conversation.id });
     remember(input.userId);
@@ -667,19 +698,92 @@ export function createChatService(deps: ChatServiceDeps) {
     return { conversationId: conversation.id, taskId: task.id, messageId: row.id };
   }
 
-  function persistUser(scope: UserScope, conversationId: string, message: UserMessage, taskId: string | null) {
-    const row = chat.insertMessage(scope, {
-      id: ulid(),
-      conversationId,
-      role: "user",
-      contentJson: storedContent(message, typeof message.content === "string" ? message.content : ""),
-      taskId,
+  function persistUser(
+    scope: UserScope,
+    conversationId: string,
+    message: UserMessage,
+    taskId: string | null,
+    attachments: AttachmentRef[] = [],
+  ) {
+    const write = () => {
+      const id = ulid();
+      const row = chat.insertMessage(scope, {
+        id,
+        conversationId,
+        role: "user",
+        contentJson: storedContent(message, typeof message.content === "string" ? message.content : "", attachments),
+        taskId,
+      });
+      if (!row) throw new ChatError("找不到对话", 404);
+      if (attachments.length > 0) claimUploads(deps.db, scope.userId, row.id, attachments.map((item) => item.id));
+      return row;
+    };
+    try {
+      const row = attachments.length > 0 ? deps.db.$client.transaction(write)() : write();
+      messageIds.set(message, row.id);
+      chat.touchConversation(scope, conversationId);
+      publishMessage(conversationId, row.id, scope);
+      return row;
+    } catch (error) {
+      if (error instanceof UploadRejected) throw new ChatError(error.message, error.statusCode);
+      throw error;
+    }
+  }
+
+  function showAttachments(message: UserMessage, messageId: string, attachments: AttachmentRef[], vision: boolean, userId: string): void {
+    const [shown] = presentForModel([{ id: messageId, message, attachments }], {
+      vision,
+      dataDir: deps.config.dataDir,
+      userId,
     });
-    if (!row) throw new ChatError("找不到对话", 404);
-    messageIds.set(message, row.id);
-    chat.touchConversation(scope, conversationId);
-    publishMessage(conversationId, row.id, scope);
-    return row;
+    if (shown?.message.role === "user") message.content = shown.message.content;
+  }
+
+  async function deliverMessageFiles(live: Live, messageId: string, attachments: AttachmentRef[]): Promise<void> {
+    const client = live.files;
+    if (!client) throw new ChatError("机器还没准备好接收附件", 503);
+    const delivered = deliveredUploadIds(deps.db, live.userId, attachments.map((item) => item.id));
+    await deliverAttachments(
+      deps.config.dataDir,
+      live.userId,
+      attachments.map((item) => ({ messageId: item.place ?? messageId, id: item.id, name: item.name, place: item.place })),
+      (path, body, deliveryId) => client.upload(path, body, deliveryId, live.resumeAbort?.signal),
+      delivered,
+      (id) => markUploadDelivered(deps.db, live.userId, id, now().toISOString()),
+    );
+  }
+
+  async function takeParkedMessages(scope: UserScope, live: Live, transcript: AgentMessage[], vision: boolean, known: Set<string>): Promise<void> {
+    const skipped = new Set<string>();
+    for (;;) {
+      const missed = (chat.listMessages(scope, live.conversationId) ?? []).filter(
+        (row) => row.role === "user" && row.taskId === live.id && !known.has(row.id) && !skipped.has(row.id),
+      );
+      if (missed.length === 0) return;
+      for (const row of missed) {
+        const [entry] = loadTranscriptEntries([row]);
+        if (!entry || entry.message.role !== "user") {
+          skipped.add(row.id);
+          continue;
+        }
+        if (entry.attachments.length > 0) await deliverMessageFiles(live, row.id, entry.attachments);
+        const [shown] = presentForModel([entry], { vision, dataDir: deps.config.dataDir, userId: live.userId });
+        const message = shown?.message.role === "user" ? shown.message : entry.message;
+        saved.add(message);
+        messageIds.set(message, row.id);
+        known.add(row.id);
+        transcript.push(message);
+      }
+    }
+  }
+
+  function attachmentsFor(userId: string, uploadIds: string[]): AttachmentRef[] {
+    try {
+      return readAttachments(deps.db, userId, uploadIds, deps.config.dataDir);
+    } catch (error) {
+      if (error instanceof UploadRejected) throw new ChatError(error.message, error.statusCode);
+      throw error;
+    }
   }
 
   function resolveConversation(scope: UserScope, bot: BotRecord, conversationId: string | undefined, text: string): ConversationRecord {
@@ -798,8 +902,13 @@ export function createChatService(deps: ChatServiceDeps) {
       deps.tasks.set(live.id, gatewayTask);
       const platform = settingsRepository(deps.db).platformPrompt().text;
       const loaded = loadTranscriptEntries(chat.listContextMessages(scope, live.conversationId) ?? []);
-      for (const entry of loaded) messageIds.set(entry.message, entry.id);
-      const transcript = loaded.map((entry) => entry.message);
+      const presented = presentForModel(loaded, {
+        vision: deps.config.visionModels.includes(bot.model),
+        dataDir: deps.config.dataDir,
+        userId: live.userId,
+      });
+      for (const entry of presented) messageIds.set(entry.message, entry.id);
+      const transcript = presented.map((entry) => entry.message);
       const memoryStore = memoryRepository(deps.db);
       const query = latestUserText(transcript);
       const recent = memoryStore.recent(scope, bot.id, 10) ?? [];
@@ -818,6 +927,20 @@ export function createChatService(deps: ChatServiceDeps) {
         }
       });
       const files = new MachinedClient(endpoint, deps.fetch ?? fetch);
+      live.files = files;
+      const attached = (chat.listMessages(scope, live.conversationId) ?? []).flatMap((row) => {
+        if (row.taskId !== live.id || row.role !== "user") return [];
+        return (messageView(row).attachments ?? []).map((item) => ({ messageId: item.place ?? row.id, id: item.id, name: item.name, place: item.place }));
+      });
+      const delivered = deliveredUploadIds(deps.db, live.userId, attached.map((item) => item.id));
+      await deliverAttachments(
+        deps.config.dataDir,
+        live.userId,
+        attached,
+        (path, body, deliveryId) => files.upload(path, body, deliveryId, live.resumeAbort?.signal),
+        delivered,
+        (id) => markUploadDelivered(deps.db, live.userId, id, now().toISOString()),
+      );
       const catalog = catalogDeps(deps);
       const skillMachine = skillHttpMachine(endpoint);
       let skillText = "";
@@ -1063,7 +1186,7 @@ export function createChatService(deps: ChatServiceDeps) {
       model.maxTokens = limits.maxTokens;
       const compactLive = (next: AgentMessage[], force: boolean, signal?: AbortSignal) =>
         applyCompaction(
-          next,
+          cropUserImages(next, { vision: deps.config.visionModels.includes(bot.model) }),
           {
             contextTokens: limits.contextTokens,
             summaryMaxTokens: deps.config.summaryMaxTokens,
@@ -1191,6 +1314,7 @@ export function createChatService(deps: ChatServiceDeps) {
           return;
         }
       }
+      await takeParkedMessages(scope, live, transcript, deps.config.visionModels.includes(bot.model), new Set(presented.map((entry) => entry.id)));
       const unavailableNotice = installedMcp.unavailable
         .map((name) => `应用 ${name} 的工具当前不可用`)
         .join("\n");

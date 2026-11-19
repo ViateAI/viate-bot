@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import type { MessageRecord, StepRecord, TaskRecord } from "../db/chat.js";
+import type { AttachmentRef } from "../uploads/store.js";
 
 export interface MessageView {
   id: string;
@@ -8,6 +9,7 @@ export interface MessageView {
   text: string;
   taskId: string | null;
   createdAt: string;
+  attachments?: AttachmentRef[];
   toolCalls?: Array<{ id: string; name: string; arguments: unknown }>;
   toolCallId?: string;
   toolName?: string;
@@ -46,6 +48,7 @@ export function messageView(row: MessageRecord): MessageView {
     taskId: row.taskId,
     createdAt: row.createdAt,
   };
+  if (parsed.attachments) view.attachments = parsed.attachments;
   const pi = parsed.pi;
   if (pi?.role === "assistant") {
     const toolCalls = pi.content
@@ -91,14 +94,15 @@ export function loadTranscript(rows: MessageRecord[]): AgentMessage[] {
   return loadTranscriptEntries(rows).map((entry) => entry.message);
 }
 
-export function loadTranscriptEntries(rows: MessageRecord[]): Array<{ id: string; message: AgentMessage }> {
-  const entries: Array<{ id: string; message: AgentMessage }> = [];
+export function loadTranscriptEntries(rows: MessageRecord[]): Array<{ id: string; message: AgentMessage; attachments: AttachmentRef[] }> {
+  const entries: Array<{ id: string; message: AgentMessage; attachments: AttachmentRef[] }> = [];
   let toolResultsAt = 0;
   const pendingCalls = new Set<string>();
   for (const row of rows) {
-    const pi = parseContent(row.contentJson).pi;
+    const parsed = parseContent(row.contentJson);
+    const pi = parsed.pi;
     if (!pi) continue;
-    const entry = { id: row.id, message: pi };
+    const entry = { id: row.id, message: pi, attachments: parsed.attachments ?? [] };
     if (pi.role === "toolResult" && pendingCalls.delete(pi.toolCallId)) {
       // 用户可能在工具运行时先入库；模型要求结果紧跟调用，用户指令留在整组之后。
       entries.splice(toolResultsAt, 0, entry);
@@ -121,8 +125,17 @@ export function withoutImages(message: ToolResultMessage): ToolResultMessage {
   return { ...message, content: message.content.filter((block) => block.type !== "image") };
 }
 
-export function storedContent(message: UserMessage | AssistantMessage | ToolResultMessage, text: string): string {
-  return JSON.stringify({ pi: message, text });
+export function storedContent(
+  message: UserMessage | AssistantMessage | ToolResultMessage,
+  text: string,
+  attachments: AttachmentRef[] = [],
+): string {
+  const payload: { pi: UserMessage | AssistantMessage | ToolResultMessage; text: string; attachments?: AttachmentRef[] } = {
+    pi: message,
+    text,
+  };
+  if (attachments.length > 0) payload.attachments = attachments;
+  return JSON.stringify(payload);
 }
 
 export function assistantText(message: AssistantMessage): string {
@@ -132,16 +145,41 @@ export function assistantText(message: AssistantMessage): string {
     .join("");
 }
 
-function parseContent(json: string): { pi?: UserMessage | AssistantMessage | ToolResultMessage; text: string } {
+function parseContent(json: string): { pi?: UserMessage | AssistantMessage | ToolResultMessage; text: string; attachments?: AttachmentRef[] } {
   try {
-    const value = JSON.parse(json) as { pi?: UserMessage | AssistantMessage | ToolResultMessage; text?: string };
+    const value = JSON.parse(json) as {
+      pi?: UserMessage | AssistantMessage | ToolResultMessage;
+      text?: string;
+      attachments?: unknown;
+    };
+    const attachments = attachmentRefs(value.attachments);
     if (value.pi && (value.pi.role === "user" || value.pi.role === "assistant" || value.pi.role === "toolResult")) {
-      return { pi: value.pi, text: value.text ?? textOf(value.pi) };
+      return { pi: value.pi, text: value.text ?? textOf(value.pi), ...(attachments ? { attachments } : {}) };
     }
   } catch {
     return { text: json };
   }
   return { text: json };
+}
+
+function attachmentRefs(value: unknown): AttachmentRef[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const refs: AttachmentRef[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== "string" || typeof record.name !== "string" || typeof record.size !== "number") continue;
+    if (typeof record.mime !== "string") continue;
+    refs.push({
+      id: record.id,
+      name: record.name,
+      size: record.size,
+      mime: record.mime,
+      kind: record.kind === "image" ? "image" : "file",
+      ...(typeof record.place === "string" && record.place.length > 0 ? { place: record.place } : {}),
+    });
+  }
+  return refs.length > 0 ? refs : undefined;
 }
 
 function textOf(message: UserMessage | AssistantMessage | ToolResultMessage): string {

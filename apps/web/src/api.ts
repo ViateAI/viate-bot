@@ -30,6 +30,18 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
+export async function uploadAttachment(file: File): Promise<AttachmentView> {
+  const body = new FormData();
+  body.append("file", file, file.name);
+  const headers = new Headers();
+  if (csrf) headers.set("x-vb-csrf", csrf);
+  const response = await fetch("/api/uploads", { method: "POST", body, headers, credentials: "same-origin" });
+  const text = await response.text();
+  const parsed = text ? (JSON.parse(text) as { error?: string; upload?: AttachmentView }) : {};
+  if (!response.ok || !parsed.upload) throw new ApiError(typeof parsed.error === "string" ? parsed.error : "上传失败", response.status);
+  return parsed.upload;
+}
+
 export interface Me {
   id: string;
   email: string;
@@ -63,12 +75,21 @@ export interface Conversation {
   title: string;
 }
 
+export interface AttachmentView {
+  id: string;
+  name: string;
+  size: number;
+  mime: string;
+  kind: "image" | "file";
+}
+
 export interface ChatMessage {
   id: string;
   role: string;
   text: string;
   taskId: string | null;
   createdAt: string;
+  attachments?: AttachmentView[];
   toolCalls?: Array<{ id: string; name: string; arguments: unknown }>;
   toolName?: string;
   isError?: boolean;

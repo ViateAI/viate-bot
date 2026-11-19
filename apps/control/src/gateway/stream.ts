@@ -373,7 +373,10 @@ function toChatMessages(system: string, messages: ConversationMessage[], model: 
   const vision = model.input.includes("image");
   for (const message of messages) {
     if (message.role === "user") {
-      out.push({ role: "user", content: textContent(message.content) });
+      const text = textContent(message.content);
+      const images = vision ? imageParts(message.content) : [];
+      if (images.length === 0) out.push({ role: "user", content: text });
+      else out.push({ role: "user", content: [{ type: "text", text: text || "附件" }, ...images] });
     } else if (message.role === "assistant") {
       const text = message.content
         .filter((block) => block.type === "text")
@@ -406,7 +409,18 @@ function toChatMessages(system: string, messages: ConversationMessage[], model: 
 }
 
 function toResponsesItem(message: ConversationMessage, model: Model<Api>): unknown {
-  if (message.role === "user") return { role: "user", content: textContent(message.content) };
+  if (message.role === "user") {
+    const text = textContent(message.content);
+    const images = model.input.includes("image") ? imageParts(message.content) : [];
+    if (images.length === 0) return { role: "user", content: text };
+    return {
+      role: "user",
+      content: [
+        { type: "input_text", text: text || "附件" },
+        ...images.map((image) => ({ type: "input_image", detail: "auto", image_url: image.image_url.url })),
+      ],
+    };
+  }
   if (message.role === "assistant") {
     return {
       role: "assistant",
@@ -427,8 +441,9 @@ function toResponsesItem(message: ConversationMessage, model: Model<Api>): unkno
   };
 }
 
-function imageParts(content: ToolResultMessage["content"]): Array<{ type: "image_url"; image_url: { url: string } }> {
+function imageParts(content: string | Array<{ type: string; data?: string; mimeType?: string }>): Array<{ type: "image_url"; image_url: { url: string } }> {
   const parts: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+  if (typeof content === "string") return parts;
   for (const block of content) {
     if (block.type !== "image") continue;
     parts.push({ type: "image_url", image_url: { url: `data:${block.mimeType};base64,${block.data}` } });

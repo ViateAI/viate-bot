@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import { pipeline } from "node:stream/promises";
 import type { FsEntry, FsSearchHit } from "@viate-bot/protocol";
-import { deleteConfined, fsFailure, listConfined, packConfined, readConfined, readRaw, searchConfined, writeConfined } from "./fs-ops.js";
+import { deleteConfined, fsFailure, listConfined, packConfined, readConfined, readRaw, searchConfined, streamUpload, writeConfined } from "./fs-ops.js";
 
 dropToBot();
 
@@ -13,6 +13,17 @@ if (process.argv[2] === "--pack") {
       process.stderr.write(fsFailure(error).error);
       process.exit(1);
     });
+} else if (process.argv[2] === "--upload") {
+  const path = process.argv[3] ?? "";
+  const maxBytes = Number(process.argv[4] ?? 25 * 1024 * 1024);
+  const deliveryId = process.argv[5] ?? "";
+  streamUpload(path, process.stdin, maxBytes, deliveryId).then((result) => {
+    process.stdout.write(JSON.stringify({ ok: true, ...result }));
+  }).catch((error: unknown) => {
+    const failure = fsFailure(error);
+    process.stdout.write(JSON.stringify({ ok: false, ...failure }));
+    process.exitCode = 1;
+  });
 } else {
   const lines = createInterface({ input: process.stdin });
   let chain = Promise.resolve();

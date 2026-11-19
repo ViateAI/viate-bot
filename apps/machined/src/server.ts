@@ -31,6 +31,7 @@ const MAX_TIMEOUT_SEC = 600;
 const CAPTURE_BYTES = 8 * 1024;
 const MAX_READ_BYTES = 1024 * 1024;
 const MAX_WRITE_BYTES = 8 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 export interface MachinedOptions {
   token: string;
@@ -43,10 +44,12 @@ export interface MachinedOptions {
   restartBrowser?: () => Promise<void>;
   /** 测试替换执行器。生产缺省是 run-as-bot。 */
   execSpawn?: { command: string; baseArgs: string[] };
+  /** 测试替换文件系统。生产缺省按 uid 选择。 */
+  files?: FsClient;
 }
 
 export function buildServer(options: MachinedOptions): FastifyInstance {
-  let files: FsClient | undefined;
+  let files: FsClient | undefined = options.files;
   const filesystem = (): FsClient => {
     files ??= createFsClient();
     return files;
@@ -190,6 +193,31 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     return reply.send({ path });
   });
 
+  app.post("/fs/upload", async (request, reply) => {
+    const path = queryPath(request);
+    const delivery = queryDelivery(request);
+    const body = request.body;
+    if (!(body instanceof Readable)) {
+      return reply.code(415).send({ error: "上传需要 application/octet-stream" });
+    }
+    body.on("error", () => {});
+    const closeLater = () => {
+      reply.raw.once("finish", () => {
+        if (!body.destroyed) body.destroy();
+      });
+    };
+    try {
+      const result = await filesystem().upload(path, body, MAX_UPLOAD_BYTES, delivery);
+      closeLater();
+      return reply.send(result);
+    } catch (error) {
+      const known = error instanceof Error ? error : new Error(String(error));
+      const reported = "statusCode" in known && typeof known.statusCode === "number" ? known.statusCode : 500;
+      const status = known.name === "PathEscapeError" ? 400 : reported;
+      return reply.code(status).send({ error: known.message });
+    }
+  });
+
   attachBrowser(app, options);
   registerDisplayRoutes(app, { token: options.token });
   const mcp = createMcpHost();
@@ -234,6 +262,14 @@ function queryPath(request: FastifyRequest): string {
     throw Object.assign(new Error("缺少 path"), { name: "PathEscapeError" });
   }
   return query.path;
+}
+
+function queryDelivery(request: FastifyRequest): string {
+  const query = request.query;
+  if (!query || typeof query !== "object" || !("delivery" in query) || typeof query.delivery !== "string" || query.delivery.length === 0) {
+    throw Object.assign(new Error("缺少 delivery"), { name: "PathEscapeError" });
+  }
+  return query.delivery;
 }
 
 function clampTimeout(value: number | undefined): number {
