@@ -24,6 +24,22 @@ export class PathEscapeError extends Error {
  * 根目录本身是符号链接时（macOS 的 /tmp → /private/tmp）保留为允许范围。
  */
 export function resolveConfined(requested: string): string {
+  return resolveAccessible(requested, true);
+}
+
+/**
+ * confine 为 false 时跳过根目录，仍拒绝空路径和相对路径。
+ * 已经存在的符号链接会解析掉：打开文件用了 O_NOFOLLOW，不解析最后一层就读不到链接目标。
+ * 只有布尔 false 放开。缺省和其它值继续限制。
+ */
+export function resolveAccessible(requested: string, confine: boolean): string {
+  if (requested.length === 0) throw new PathEscapeError("路径不能为空");
+  if (!isAbsolute(requested)) throw new PathEscapeError("路径必须是绝对路径");
+  if (confine) return resolveInsideRoots(requested);
+  return resolveOpen(requested);
+}
+
+function resolveInsideRoots(requested: string): string {
   if (!isAbsolute(requested)) throw new PathEscapeError("路径必须是绝对路径");
   const lexical = resolve(requested);
   const root = roots.find(
@@ -63,6 +79,22 @@ export function resolveConfined(requested: string): string {
     throw new PathEscapeError(`解析后的路径超出 /home/bot 和 /tmp：${resolved}`);
   }
   return resolved;
+}
+
+function resolveOpen(requested: string): string {
+  const lexical = resolve(requested);
+  if (lexical.includes("\0")) throw new PathEscapeError("路径无效");
+  let stat: Stats;
+  try {
+    stat = lstatSync(lexical);
+  } catch (error) {
+    const missing = typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+    if (!missing) throw error;
+    return lexical;
+  }
+  // 中间目录的符号链接交给 open 自己跟。只解开最后一层，否则 O_NOFOLLOW 读不到链接目标。
+  if (!stat.isSymbolicLink()) return lexical;
+  return realpathSync(lexical);
 }
 
 function existingReal(path: string): string {

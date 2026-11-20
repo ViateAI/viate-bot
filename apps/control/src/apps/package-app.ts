@@ -49,29 +49,36 @@ export async function packageAppFromArchive(
 }
 
 export interface PackageAppClient {
-  pack(path: string, signal?: AbortSignal): Promise<Buffer>;
+  pack(path: string, signal?: AbortSignal, confine?: boolean): Promise<Buffer>;
 }
-
-const packageSchema = obj({
-  path: str({ description: "机器上的目录，只能在 /home/bot 或 /tmp 下" }),
-  version: str({ description: "semver 版本" }),
-  note: opt(str({ description: "给自己的说明，最多 500 字" })),
-});
 
 export function packageAppTool(binding: {
   userId: string;
   catalog: CatalogDeps;
   client: PackageAppClient;
   secrets(): readonly string[];
-}): AgentTool<typeof packageSchema> {
-  return {
+  /** 任务开始时的说明。不传则保持原来的限制文案。 */
+  confined?: boolean;
+  /** 每次打包再读。不传则继续限制在 /home/bot 和 /tmp。 */
+  confineNow?: () => boolean;
+}) {
+  const confined = binding.confined !== false;
+  const confineNow = binding.confineNow ?? (() => true);
+  const packageSchema = obj({
+    path: str({ description: confined ? "机器上的目录，只能在 /home/bot 或 /tmp 下" : "机器上的目录" }),
+    version: str({ description: "semver 版本" }),
+    note: opt(str({ description: "给自己的说明，最多 500 字" })),
+  });
+  const tool: AgentTool<typeof packageSchema> = {
     name: "package_app",
     label: "打包应用",
     description: "把当前用户机器上的一个目录打成私有应用。不需要批准，也不会对其他用户可见。",
     parameters: packageSchema,
     execute: async (_toolCallId, params, signal) => {
-      assertPackPath(params.path);
-      const archive = await binding.client.pack(params.path, signal);
+      const confine = confineNow();
+      if (confine) assertPackPath(params.path);
+      else if (!params.path.startsWith("/")) throw new Error("路径必须是绝对路径");
+      const archive = await binding.client.pack(params.path, signal, confine);
       const saved = await packageAppFromArchive(binding.catalog, binding.userId, {
         version: params.version,
         archive,
@@ -89,6 +96,7 @@ export function packageAppTool(binding: {
       return { content: [{ type: "text" as const, text }], details: saved };
     },
   };
+  return tool;
 }
 
 function assertPackPath(path: string): void {

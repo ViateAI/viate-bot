@@ -1077,7 +1077,7 @@ export function createChatService(deps: ChatServiceDeps) {
         lookup: (name) => broker.lookup(live.userId, live.id, name),
         readFile: async (path) => {
           try {
-            const file = await files.read(path, 128);
+            const file = await files.read(path, 128, undefined, undefined, true);
             return file.content;
           } catch {
             return undefined;
@@ -1103,8 +1103,11 @@ export function createChatService(deps: ChatServiceDeps) {
         },
       };
       const rawTools = [
-        ...machineTools(files),
-        ...approvalTools({ delete: (path, signal) => files.removeFile(path, signal) }),
+        ...machineTools(files, {
+          confined: settingsRepository(deps.db).fsConfine(),
+          confineNow: () => settingsRepository(deps.db).fsConfine(),
+        }),
+        ...approvalTools({ delete: (path, signal) => files.removeFile(path, signal, settingsRepository(deps.db).fsConfine()) }),
         ...routineTools({
           propose: (input) => routineService(deps.db).propose(live.userId, live.botId, input, now()),
         }),
@@ -1147,6 +1150,8 @@ export function createChatService(deps: ChatServiceDeps) {
           catalog,
           client: files,
           secrets: () => broker.known(live.userId, live.id).map((item) => item.value),
+          confined: settingsRepository(deps.db).fsConfine(),
+          confineNow: () => settingsRepository(deps.db).fsConfine(),
         }),
         installMcpTool(installBinding),
         requestAppPublishTool({
@@ -1175,8 +1180,9 @@ export function createChatService(deps: ChatServiceDeps) {
           botId: bot.id,
           taskId: live.id,
           allowModel: (candidate) => deps.config.models.length === 0 || deps.config.models.includes(candidate),
+          confineNow: () => settingsRepository(deps.db).fsConfine(),
           readFile: async (path) => {
-            const file = await files.read(path, AVATAR_MAX_BYTES, undefined, "base64");
+            const file = await files.read(path, AVATAR_MAX_BYTES, undefined, "base64", settingsRepository(deps.db).fsConfine());
             return { bytes: Buffer.from(file.content, "base64"), truncated: file.truncated };
           },
         }),

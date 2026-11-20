@@ -218,6 +218,47 @@ describe("package_app", () => {
     const client = new MachinedClient({ host: "127.0.0.1", port: address.port, token: "machine-token" });
     await expect(client.pack("/tmp/notes")).resolves.toEqual(payload);
   });
+
+  it("packs a path outside the roots only when the switch is off", async () => {
+    const deps = boot();
+    const packed = skill("notes");
+    const calls: string[] = [];
+    const open = packageAppTool({
+      userId: "alice",
+      catalog: deps,
+      secrets: () => [],
+      confined: false,
+      confineNow: () => false,
+      client: {
+        async pack(path) {
+          calls.push(path);
+          return packed;
+        },
+      },
+    });
+    expect(JSON.stringify(open.parameters)).not.toContain("只能在 /home/bot 或 /tmp");
+    const saved = await open.execute("call", { path: "/etc/notes", version: "1.2.0" });
+    expect(calls).toEqual(["/etc/notes"]);
+    expect(saved.details).toMatchObject({ name: "notes", version: "1.2.0" });
+
+    const callsWhenOn: string[] = [];
+    const locked = packageAppTool({
+      userId: "alice",
+      catalog: deps,
+      secrets: () => [],
+      confined: true,
+      confineNow: () => true,
+      client: {
+        async pack(path) {
+          callsWhenOn.push(path);
+          return packed;
+        },
+      },
+    });
+    expect(JSON.stringify(locked.parameters)).toContain("只能在 /home/bot 或 /tmp");
+    await expect(locked.execute("call", { path: "/etc/passwd", version: "1.2.0" })).rejects.toThrow(/\/home\/bot|\/tmp/);
+    expect(callsWhenOn).toEqual([]);
+  });
 });
 
 function listen(handler: (response: ServerResponse) => void): Promise<AddressInfo> {

@@ -598,11 +598,23 @@ export function AdminSettings() {
       taskTokenBudget: number;
       models: string[];
       modelRate: { userPerMin: number; botPerMin: number };
+      fsConfine: boolean;
     }>("/api/admin/settings"),
   });
   const [prompt, setPrompt] = useState("");
   const [channel, setChannel] = useState("");
   const [saved, setSaved] = useState("");
+  const [confineDraft, setConfineDraft] = useState<boolean | null>(null);
+  const confineClient = useQueryClient();
+  const confineOn = confineDraft ?? settings.data?.fsConfine ?? false;
+  const saveConfine = useMutation({
+    mutationFn: (enabled: boolean) => api("/api/admin/fs-confine", { method: "PUT", body: JSON.stringify({ enabled }) }),
+    onSuccess: async () => {
+      setConfineDraft(null);
+      setSaved("");
+      await confineClient.invalidateQueries({ queryKey: ["admin-settings"] });
+    },
+  });
   const update = useMutation({
     mutationFn: () =>
       api("/api/admin/settings", {
@@ -633,6 +645,20 @@ export function AdminSettings() {
       ) : (
         <p className="text-sm text-neutral-400">当前未接 viate，没有默认渠道。</p>
       )}
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          data-testid="fs-confine"
+          className="mt-1"
+          type="checkbox"
+          checked={confineOn}
+          onChange={(event) => {
+            const enabled = event.target.checked;
+            setConfineDraft(enabled);
+            saveConfine.mutate(enabled);
+          }}
+        />
+        <span>关闭时文件工具可以访问容器内 bot 用户读得到的路径；打开时只能用 /home/bot 和 /tmp；shell 命令正文两种情况下都不按目录拦截。</span>
+      </label>
       <label className="grid gap-1 text-sm">
         平台提示词（版本 {settings.data?.platformPrompt.version ?? ""}）
         <textarea data-testid="platform-prompt" className={`${field} min-h-40`} value={prompt} placeholder={settings.data?.platformPrompt.text ?? ""} onChange={(event) => setPrompt(event.target.value)} />

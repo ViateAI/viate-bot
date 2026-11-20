@@ -82,4 +82,52 @@ describe("machine tools", () => {
     expect(fileText.length).toBeLessThan(70_000);
     expect(fileText).toContain("截断");
   });
+
+  it("sends the live confine flag, ignores a model confine field, and drops the root sentence when off", async () => {
+    let enabled = false;
+    const bodies: string[] = [];
+    const machine = await machined((_req, res, body) => {
+      bodies.push(body);
+      const parsed = JSON.parse(body) as { path?: string };
+      if (parsed.path) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ path: parsed.path, content: "ok", truncated: false, entries: [], hits: [], bytes: 1 }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(`data: ${JSON.stringify({ type: "exit", code: 0, signal: null, timedOut: false })}\n\n`);
+    });
+    const client = new MachinedClient({ host: "127.0.0.1", port: machine.port, token: "token-a" });
+    const open = machineTools(client, { confined: false, confineNow: () => enabled });
+    const read = open.find((tool) => tool.name === "fs_read");
+    const shell = open.find((tool) => tool.name === "shell_exec");
+    const write = open.find((tool) => tool.name === "fs_write");
+    const list = open.find((tool) => tool.name === "fs_list");
+    const search = open.find((tool) => tool.name === "fs_search");
+    if (!read || !shell || !write || !list || !search) throw new Error("missing tools");
+    expect(schemaText(read.parameters)).not.toContain("只能在 /home/bot 或 /tmp");
+    expect(schemaText(write.parameters)).not.toContain("只能在 /home/bot 或 /tmp");
+    expect(schemaText(list.parameters)).not.toContain("只能在 /home/bot 或 /tmp");
+    expect(schemaText(search.parameters)).not.toContain("只能在 /home/bot 或 /tmp");
+    await read.execute("call-read", { path: "/etc/hosts", confine: true });
+    expect(JSON.parse(bodies[0] ?? "{}").confine).toBe(false);
+    enabled = true;
+    await shell.execute("call-shell", { cmd: "true", cwd: "/etc", confine: false });
+    expect(JSON.parse(bodies[1] ?? "{}").confine).toBe(true);
+    await write.execute("call-write", { path: "/etc/hosts", content: "x" });
+    await list.execute("call-list", { path: "/etc" });
+    await search.execute("call-search", { path: "/etc", pattern: "a" });
+    expect(bodies.slice(2).map((body) => JSON.parse(body).confine)).toEqual([true, true, true]);
+
+    const locked = machineTools(client, { confined: true, confineNow: () => true });
+    const lockedRead = locked.find((tool) => tool.name === "fs_read");
+    if (!lockedRead) throw new Error("missing locked read");
+    expect(schemaText(lockedRead.parameters)).toContain("只能在 /home/bot 或 /tmp");
+  });
 });
+
+function schemaText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  return Object.values(value).map((item) => schemaText(item)).join("\n");
+}

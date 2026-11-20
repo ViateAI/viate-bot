@@ -28,3 +28,22 @@ describe("platform prompt", () => {
     db.$client.close();
   });
 });
+
+describe("fs confine setting", () => {
+  it("is off when the row is missing and stores only a boolean enabled flag", () => {
+    const db = openDatabase(":memory:");
+    migrate(db, { migrationsFolder: fileURLToPath(new URL("../../drizzle", import.meta.url)) });
+    const settings = settingsRepository(db);
+    expect(settings.fsConfine()).toBe(false);
+    settings.setFsConfine(true);
+    expect(settings.getJson("fs.confine")).toEqual({ enabled: true });
+    expect(settings.fsConfine()).toBe(true);
+    settings.setFsConfine(false);
+    expect(settings.fsConfine()).toBe(false);
+    settings.setJson("fs.confine", { enabled: "yes" });
+    expect(settings.fsConfine()).toBe(false);
+    settings.setJson("fs.confine", null);
+    expect(settings.fsConfine()).toBe(false);
+    db.$client.close();
+  });
+});

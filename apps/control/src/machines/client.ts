@@ -26,6 +26,8 @@ export interface ExecInput {
   timeoutSec?: number;
   env?: Record<string, string>;
   signal?: AbortSignal;
+  /** 缺省 true。模型工具传入当时的开关；内部调用不要传 false。 */
+  confine?: boolean;
 }
 
 /**
@@ -67,6 +69,7 @@ export class MachinedClient {
     try {
       const response = await this.post("/exec", {
         cmd: input.cmd,
+        confine: input.confine !== false,
         ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
         ...(input.timeoutSec !== undefined ? { timeoutSec: input.timeoutSec } : {}),
         ...(input.env !== undefined ? { env: input.env } : {}),
@@ -106,38 +109,38 @@ export class MachinedClient {
     }
   }
 
-  async read(path: string, maxBytes: number, signal?: AbortSignal, encoding?: "utf8" | "base64"): Promise<FsReadResponse> {
-    const response = await this.post("/fs/read", { path, maxBytes, ...(encoding ? { encoding } : {}) }, signal);
+  async read(path: string, maxBytes: number, signal?: AbortSignal, encoding?: "utf8" | "base64", confine = true): Promise<FsReadResponse> {
+    const response = await this.post("/fs/read", { path, maxBytes, confine, ...(encoding ? { encoding } : {}) }, signal);
     if (!response.ok) throw new Error(await readError(response));
     return (await response.json()) as FsReadResponse;
   }
 
-  async write(path: string, content: string, signal?: AbortSignal): Promise<FsWriteResponse> {
-    const response = await this.post("/fs/write", { path, content }, signal);
+  async write(path: string, content: string, signal?: AbortSignal, confine = true): Promise<FsWriteResponse> {
+    const response = await this.post("/fs/write", { path, content, confine }, signal);
     if (!response.ok) throw new Error(await readError(response));
     return (await response.json()) as FsWriteResponse;
   }
 
-  async list(path: string, signal?: AbortSignal): Promise<FsListResponse> {
-    const response = await this.post("/fs/list", { path }, signal);
+  async list(path: string, signal?: AbortSignal, confine = true): Promise<FsListResponse> {
+    const response = await this.post("/fs/list", { path, confine }, signal);
     if (!response.ok) throw new Error(await readError(response));
     return (await response.json()) as FsListResponse;
   }
 
-  async search(path: string, pattern: string, maxResults: number, signal?: AbortSignal): Promise<FsSearchResponse> {
-    const response = await this.post("/fs/search", { path, pattern, maxResults }, signal);
+  async search(path: string, pattern: string, maxResults: number, signal?: AbortSignal, confine = true): Promise<FsSearchResponse> {
+    const response = await this.post("/fs/search", { path, pattern, maxResults, confine }, signal);
     if (!response.ok) throw new Error(await readError(response));
     return (await response.json()) as FsSearchResponse;
   }
 
-  async removeFile(path: string, signal?: AbortSignal): Promise<{ path: string }> {
-    const response = await this.post("/fs/delete", { path }, signal);
+  async removeFile(path: string, signal?: AbortSignal, confine = true): Promise<{ path: string }> {
+    const response = await this.post("/fs/delete", { path, confine }, signal);
     if (!response.ok) throw new Error(await readError(response));
     return (await response.json()) as { path: string };
   }
 
-  async pack(path: string, signal?: AbortSignal): Promise<Buffer> {
-    const response = await this.post("/fs/pack", { path }, signal);
+  async pack(path: string, signal?: AbortSignal, confine = true): Promise<Buffer> {
+    const response = await this.post("/fs/pack", { path, confine }, signal);
     if (!response.ok) throw new Error(await readError(response));
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length > 200 * 1024 * 1024) throw new Error("应用包过大");
@@ -192,7 +195,7 @@ export class MachinedClient {
   }
 
   async upload(path: string, body: Readable, deliveryId: string, signal?: AbortSignal): Promise<void> {
-    const response = await this.fetchImpl(`${this.url("/fs/upload")}?${new URLSearchParams({ path, delivery: deliveryId })}`, {
+    const response = await this.fetchImpl(`${this.url("/fs/upload")}?${new URLSearchParams({ path, delivery: deliveryId, confine: "true" })}`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.endpoint.token}`,

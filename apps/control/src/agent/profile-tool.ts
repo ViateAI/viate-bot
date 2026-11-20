@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { arr, obj, opt, str } from "@earendil-works/pi-schema";
 import { auditRepository } from "../db/audit.js";
@@ -28,6 +28,8 @@ export interface ProfileToolDeps {
   taskId: string;
   allowModel: (model: string) => boolean;
   readFile: (path: string) => Promise<{ bytes: Buffer; truncated: boolean }>;
+  /** 每次读头像再看。不传则仍只允许 /home/bot 和 /tmp。 */
+  confineNow?: () => boolean;
 }
 
 export function profileNeedsApproval(args: unknown): boolean {
@@ -113,8 +115,9 @@ export async function applyBotProfile(deps: ProfileToolDeps, params: {
     fields.push("model");
   }
   if (params.avatarPath !== undefined) {
-    const path = imagePath(params.avatarPath);
-    if (!path) throw new Error("头像路径只能在 /home/bot 或 /tmp");
+    const confine = deps.confineNow?.() ?? true;
+    const path = confine ? imagePath(params.avatarPath) : openImagePath(params.avatarPath);
+    if (!path) throw new Error(confine ? "头像路径只能在 /home/bot 或 /tmp" : "路径必须是绝对路径");
     const file = await deps.readFile(path);
     if (file.truncated || file.bytes.length > AVATAR_MAX_BYTES) throw new Error("头像不能超过 1 MiB");
     const mime = sniffImage(file.bytes);
@@ -206,6 +209,11 @@ function imagePath(input: string): string | undefined {
   const path = `/${collapsed.join("/")}`;
   if (path !== "/tmp" && !path.startsWith("/tmp/")) return undefined;
   return path;
+}
+
+function openImagePath(input: string): string | undefined {
+  if (input.length === 0 || !isAbsolute(input) || input.includes("\0")) return undefined;
+  return input;
 }
 
 function setEnabledApps(db: AppDatabase, scope: UserScope, botId: string, installIds: string[]): void {

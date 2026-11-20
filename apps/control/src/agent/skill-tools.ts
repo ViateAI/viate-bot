@@ -60,9 +60,9 @@ interface SkillHttpInit {
 }
 
 export interface SkillFsClient {
-  read(path: string, maxBytes: number, signal?: AbortSignal): Promise<FsReadResponse>;
-  write(path: string, content: string, signal?: AbortSignal): Promise<FsWriteResponse>;
-  list(path: string, signal?: AbortSignal): Promise<FsListResponse>;
+  read(path: string, maxBytes: number, signal?: AbortSignal, encoding?: "utf8" | "base64", confine?: boolean): Promise<FsReadResponse>;
+  write(path: string, content: string, signal?: AbortSignal, confine?: boolean): Promise<FsWriteResponse>;
+  list(path: string, signal?: AbortSignal, confine?: boolean): Promise<FsListResponse>;
 }
 
 /**
@@ -304,7 +304,7 @@ export function skillMachine(client: SkillFsClient): SkillMachine {
     async writeSkill(name, content, signal) {
       const path = skillFilePath(name);
       if (Buffer.byteLength(content) > SKILL_FILE_LIMIT) throw new Error("技能超过 64KB");
-      const written = await client.write(path, content, signal);
+      const written = await client.write(path, content, signal, true);
       return { path: written.path, bytes: written.bytes };
     },
   };
@@ -490,7 +490,7 @@ function clipUtf8(text: string, maxBytes: number): string {
 
 async function listOptional(client: SkillFsClient, path: string, signal?: AbortSignal): Promise<FsListResponse["entries"]> {
   try {
-    return (await client.list(path, signal)).entries;
+    return (await client.list(path, signal, true)).entries;
   } catch (error) {
     if (signal?.aborted) throw error;
     if (isMissing(error)) return [];
@@ -500,7 +500,7 @@ async function listOptional(client: SkillFsClient, path: string, signal?: AbortS
 
 async function readOptional(client: SkillFsClient, path: string, signal?: AbortSignal): Promise<FsReadResponse | undefined> {
   try {
-    return await client.read(path, SKILL_FILE_LIMIT, signal);
+    return await client.read(path, SKILL_FILE_LIMIT, signal, undefined, true);
   } catch (error) {
     if (signal?.aborted) throw error;
     if (isMissing(error)) return undefined;

@@ -7,7 +7,8 @@ dropToBot();
 
 if (process.argv[2] === "--pack") {
   const requested = process.argv[3] ?? "";
-  packConfined(requested)
+  const confine = process.argv[4] !== "false";
+  packConfined(requested, confine)
     .then((archive) => pipeline(archive, process.stdout))
     .catch((error: unknown) => {
       process.stderr.write(fsFailure(error).error);
@@ -17,7 +18,8 @@ if (process.argv[2] === "--pack") {
   const path = process.argv[3] ?? "";
   const maxBytes = Number(process.argv[4] ?? 25 * 1024 * 1024);
   const deliveryId = process.argv[5] ?? "";
-  streamUpload(path, process.stdin, maxBytes, deliveryId).then((result) => {
+  const confine = process.argv[6] !== "false";
+  streamUpload(path, process.stdin, maxBytes, deliveryId, confine).then((result) => {
     process.stdout.write(JSON.stringify({ ok: true, ...result }));
   }).catch((error: unknown) => {
     const failure = fsFailure(error);
@@ -58,6 +60,7 @@ interface Request {
   maxResults?: number;
   data?: string;
   encoding?: "utf8" | "base64";
+  confine?: boolean;
 }
 
 async function handle(line: string): Promise<void> {
@@ -82,16 +85,17 @@ async function handle(line: string): Promise<void> {
 }
 
 async function run(request: Request, path: string): Promise<Record<string, unknown>> {
+  const confine = request.confine !== false;
   if (request.op === "read") {
-    return { read: await readConfined(path, request.maxBytes ?? 1024 * 1024, request.encoding === "base64" ? "base64" : "utf8") };
+    return { read: await readConfined(path, request.maxBytes ?? 1024 * 1024, request.encoding === "base64" ? "base64" : "utf8", confine) };
   }
   if (request.op === "write" || request.op === "writeFile") {
     const bytes = request.op === "write" ? Buffer.from(request.content ?? "", "base64") : Buffer.from(request.data ?? "", "base64");
     const mode = request.mode ?? 0o644;
-    return { write: await writeConfined(path, bytes, mode) };
+    return { write: await writeConfined(path, bytes, mode, confine) };
   }
   if (request.op === "list") {
-    const listed: { path: string; entries: FsEntry[] } = await listConfined(path);
+    const listed: { path: string; entries: FsEntry[] } = await listConfined(path, confine);
     return { list: listed };
   }
   if (request.op === "search") {
@@ -99,15 +103,16 @@ async function run(request: Request, path: string): Promise<Record<string, unkno
       path,
       request.pattern ?? "",
       request.maxResults ?? 100,
+      confine,
     );
     return { search: found };
   }
   if (request.op === "readFile") {
-    const result = await readRaw(path);
+    const result = await readRaw(path, confine);
     return { file: result.data.toString("base64") };
   }
   if (request.op === "delete") {
-    return { delete: await deleteConfined(path) };
+    return { delete: await deleteConfined(path, confine) };
   }
   throw Object.assign(new Error("未知文件操作"), { statusCode: 400 });
 }

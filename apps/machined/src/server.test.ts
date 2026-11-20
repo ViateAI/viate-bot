@@ -1,4 +1,5 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
@@ -309,6 +310,174 @@ describe("exec cancellation", () => {
       if (pid) {
         try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
       }
+      await app.close();
+    }
+  });
+});
+
+describe("fs confine switch", () => {
+  it("reads and writes an absolute path outside the roots only when confine is false", async () => {
+    const app = buildServer({ token: "test-token" });
+    const outside = mkdtempSync(join(tmpdir(), "vb-fs-open-"));
+    dirs.push(outside);
+    const path = join(outside, "note.txt");
+    writeFileSync(path, "outside-ok");
+    const headers = { authorization: "Bearer test-token" };
+    try {
+      const opened = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path, confine: false },
+      });
+      expect(opened.statusCode).toBe(200);
+      expect(opened.json()).toMatchObject({ content: "outside-ok" });
+
+      const written = await app.inject({
+        method: "POST",
+        url: "/fs/write",
+        headers,
+        payload: { path: join(outside, "new.txt"), content: "made", confine: false },
+      });
+      expect(written.statusCode).toBe(200);
+      expect(readFileSync(join(outside, "new.txt"), "utf8")).toBe("made");
+
+      const listed = await app.inject({
+        method: "POST",
+        url: "/fs/list",
+        headers,
+        payload: { path: outside, confine: false },
+      });
+      expect(listed.statusCode).toBe(200);
+
+      const removed = await app.inject({
+        method: "POST",
+        url: "/fs/delete",
+        headers,
+        payload: { path: join(outside, "new.txt"), confine: false },
+      });
+      expect(removed.statusCode).toBe(200);
+      expect(existsSync(join(outside, "new.txt"))).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("still rejects an empty path, a relative path, and a non-false confine value", async () => {
+    const app = buildServer({ token: "test-token" });
+    const outside = mkdtempSync(join(tmpdir(), "vb-fs-reject-"));
+    dirs.push(outside);
+    const path = join(outside, "note.txt");
+    writeFileSync(path, "secret");
+    const headers = { authorization: "Bearer test-token" };
+    try {
+      for (const payload of [
+        { path: "", confine: false },
+        { path: "note.txt", confine: false },
+        { path, confine: true },
+        { path },
+        { path, confine: "false" },
+      ]) {
+        const response = await app.inject({ method: "POST", url: "/fs/read", headers, payload });
+        expect(response.statusCode, JSON.stringify(payload)).toBe(400);
+        expect(readFileSync(path, "utf8")).toBe("secret");
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects the named escapes when confine is on and allows them when it is false", async () => {
+    const app = buildServer({ token: "test-token" });
+    const headers = { authorization: "Bearer test-token" };
+    const linkDir = mkdtempSync(join("/tmp", "vb-fs-link-"));
+    dirs.push(linkDir);
+    const link = join(linkDir, "escape");
+    symlinkSync("/etc/passwd", link);
+    const inside = mkdtempSync(join("/tmp", "vb-fs-inside-"));
+    dirs.push(inside);
+    writeFileSync(join(inside, "note.txt"), "inside");
+    try {
+      for (const path of ["/etc/hosts", "/tmp/../etc/passwd", "/home/bot-evil/file", link]) {
+        const forced = await app.inject({ method: "POST", url: "/fs/read", headers, payload: { path, confine: true } });
+        expect(forced.statusCode, path).toBe(400);
+        const omitted = await app.inject({ method: "POST", url: "/fs/read", headers, payload: { path } });
+        expect(omitted.statusCode, `omitted ${path}`).toBe(400);
+      }
+      const hosts = await app.inject({ method: "POST", url: "/fs/read", headers, payload: { path: "/etc/hosts", confine: false } });
+      expect(hosts.statusCode).toBe(200);
+      expect(hosts.json().content).toBe(readFileSync("/etc/hosts", "utf8"));
+      const passwd = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: "/tmp/../etc/passwd", confine: false },
+      });
+      expect(passwd.statusCode).toBe(200);
+      expect(passwd.json().content).toBe(readFileSync("/etc/passwd", "utf8"));
+      const linked = await app.inject({ method: "POST", url: "/fs/read", headers, payload: { path: link, confine: false } });
+      expect(linked.statusCode).toBe(200);
+      expect(linked.json().content).toBe(readFileSync("/etc/passwd", "utf8"));
+      const missing = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: "/home/bot-evil/file", confine: false },
+      });
+      expect(missing.statusCode).toBe(404);
+      expect(missing.body).not.toContain("超出");
+      const allowed = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: join(inside, "note.txt"), confine: true },
+      });
+      expect(allowed.statusCode).toBe(200);
+      expect(allowed.json()).toMatchObject({ content: "inside" });
+      const home = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: "/home/bot/note.txt", confine: true },
+      });
+      expect(home.statusCode).toBe(404);
+      expect(home.body).not.toContain("超出");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps upload and raw file routes confined unless confine is false", async () => {
+    const app = buildServer({ token: "test-token" });
+    const outside = mkdtempSync(join(tmpdir(), "vb-fs-upload-"));
+    dirs.push(outside);
+    const headers = { authorization: "Bearer test-token", "content-type": "application/octet-stream" };
+    const path = join(outside, "blob.bin");
+    try {
+      const blocked = await app.inject({
+        method: "PUT",
+        url: `/fs/file?path=${encodeURIComponent(path)}`,
+        headers,
+        payload: Buffer.from("nope"),
+      });
+      expect(blocked.statusCode).toBe(400);
+      const uploaded = await app.inject({
+        method: "POST",
+        url: `/fs/upload?path=${encodeURIComponent(path)}&delivery=open-1&confine=false`,
+        headers,
+        payload: Buffer.from("bytes"),
+      });
+      expect(uploaded.statusCode).toBe(200);
+      expect(readFileSync(path).equals(Buffer.from("bytes"))).toBe(true);
+      const still = await app.inject({
+        method: "POST",
+        url: `/fs/upload?path=${encodeURIComponent(join(outside, "other.bin"))}&delivery=closed-1`,
+        headers,
+        payload: Buffer.from("nope"),
+      });
+      expect(still.statusCode).toBe(400);
+      expect(existsSync(join(outside, "other.bin"))).toBe(false);
+    } finally {
       await app.close();
     }
   });

@@ -232,7 +232,18 @@ export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & 
         userPerMin: deps.config.modelRateUserPerMin,
         botPerMin: deps.config.modelRateBotPerMin,
       }),
+      fsConfine: settings.fsConfine(),
     };
+  });
+
+  app.put("/api/admin/fs-confine", async (request, reply) => {
+    const scope = actor(request);
+    if (!scope) return reply.code(404).send({ error: "找不到" });
+    const enabled = record(request.body).enabled;
+    if (typeof enabled !== "boolean") return reply.code(400).send({ error: "enabled 必须是布尔值" });
+    settingsRepository(deps.db).setFsConfine(enabled);
+    auditRepository(deps.db).write(scope, "fs.confine", "settings", { enabled });
+    return { fsConfine: enabled };
   });
 
   app.put("/api/admin/model-rate", async (request, reply) => {

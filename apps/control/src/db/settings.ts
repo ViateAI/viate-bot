@@ -5,6 +5,7 @@ import { settings } from "./schema.js";
 export const PLATFORM_PROMPT_KEY = "platform_prompt";
 export const BOT_TEMPLATES_KEY = "bot_templates";
 export const DEFAULT_CHANNEL_KEY = "default_channel";
+export const FS_CONFINE_KEY = "fs.confine";
 
 export interface BotTemplate {
   id: string;
@@ -109,6 +110,15 @@ export function settingsRepository(db: AppDatabase) {
     },
     setDefaultChannel(value: string | null): void {
       this.setJson(DEFAULT_CHANNEL_KEY, value);
+    },
+    /** 没有记录、或 enabled 不是 true，都是关闭。 */
+    fsConfine(): boolean {
+      const current = this.getJson(FS_CONFINE_KEY);
+      if (!current || typeof current !== "object" || Array.isArray(current) || !("enabled" in current)) return false;
+      return current.enabled === true;
+    },
+    setFsConfine(enabled: boolean): void {
+      this.setJson(FS_CONFINE_KEY, { enabled });
     },
   };
 }

@@ -23,7 +23,7 @@ import { attachBrowser } from "./browser-route.js";
 import { registerDisplayRoutes } from "./display.js";
 import { createMcpHost, registerMcpRoutes } from "./mcp-host.js";
 import { createFsClient, type FsClient } from "./fs-client.js";
-import { resolveConfined } from "./paths.js";
+import { resolveAccessible } from "./paths.js";
 
 export const MACHINED_VERSION = "0.0.0";
 const DEFAULT_TIMEOUT_SEC = 30;
@@ -99,7 +99,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     if (body.timeoutSec !== undefined && typeof body.timeoutSec !== "number") {
       return reply.code(400).send({ error: "timeoutSec 必须是数字" });
     }
-    const cwd = typeof body.cwd === "string" ? resolveConfined(body.cwd) : "/home/bot";
+    const cwd = typeof body.cwd === "string" ? resolveAccessible(body.cwd, body.confine !== false) : "/home/bot";
     const timeoutSec = clampTimeout(typeof body.timeoutSec === "number" ? body.timeoutSec : undefined);
     const id = randomUUID();
     await streamExec(reply, request, id, execJobs, launcher, body.cmd, cwd, timeoutSec, stringRecord(body.env));
@@ -110,11 +110,10 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     if (typeof body.path !== "string" || body.path.length === 0) {
       return reply.code(400).send({ error: "path 不能为空" });
     }
-    resolveConfined(body.path);
     const requestedMax = typeof body.maxBytes === "number" ? body.maxBytes : MAX_READ_BYTES;
     const maxBytes = Math.min(requestedMax, MAX_READ_BYTES);
     const encoding = body.encoding === "base64" ? "base64" : "utf8";
-    const result = await filesystem().read(body.path, maxBytes, encoding);
+    const result = await filesystem().read(body.path, maxBytes, encoding, body.confine !== false);
     const response: FsReadResponse = result;
     return response;
   });
@@ -127,11 +126,10 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     if (typeof body.content !== "string") {
       throw Object.assign(new Error("content 必须是字符串"), { name: "PathEscapeError" });
     }
-    resolveConfined(body.path);
     const content = Buffer.from(body.content, "utf8");
     if (content.length > MAX_WRITE_BYTES) throw new Error("写入内容超过 8MB");
     const mode = typeof body.mode === "number" ? body.mode : 0o644;
-    const result = await filesystem().write(body.path, content, mode);
+    const result = await filesystem().write(body.path, content, mode, body.confine !== false);
     const response: FsWriteResponse = result;
     return response;
   });
@@ -141,8 +139,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     if (typeof body.path !== "string" || body.path.length === 0) {
       throw Object.assign(new Error("path 不能为空"), { name: "PathEscapeError" });
     }
-    resolveConfined(body.path);
-    const result = await filesystem().list(body.path);
+    const result = await filesystem().list(body.path, body.confine !== false);
     const response: FsListResponse = result;
     return response;
   });
@@ -152,9 +149,8 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     if (typeof body.path !== "string" || typeof body.pattern !== "string" || body.pattern.length === 0) {
       throw Object.assign(new Error("path 和 pattern 不能为空"), { name: "PathEscapeError" });
     }
-    resolveConfined(body.path);
     const maxResults = typeof body.maxResults === "number" ? body.maxResults : 100;
-    const result = await filesystem().search(body.path, body.pattern, maxResults);
+    const result = await filesystem().search(body.path, body.pattern, maxResults, body.confine !== false);
     const response: FsSearchResponse = result;
     return response;
   });
@@ -164,7 +160,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     if (typeof body.path !== "string" || body.path.length === 0) {
       throw Object.assign(new Error("path 不能为空"), { name: "PathEscapeError" });
     }
-    return filesystem().delete(body.path);
+    return filesystem().delete(body.path, body.confine !== false);
   });
 
   app.post("/fs/pack", async (request, reply) => {
@@ -172,24 +168,24 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     if (typeof body.path !== "string" || body.path.length === 0) {
       throw Object.assign(new Error("path 不能为空"), { name: "PathEscapeError" });
     }
-    const archive = await filesystem().pack(body.path);
+    const archive = await filesystem().pack(body.path, body.confine !== false);
     return reply.type("application/x-tar").send(archive);
   });
 
   app.get("/fs/file", async (request, reply) => {
-    const path = resolveConfined(queryPath(request));
-    const data = await filesystem().readFile(path);
+    const path = queryPath(request);
+    const data = await filesystem().readFile(path, queryConfined(request));
     reply.header("content-length", data.length);
     return reply.send(data);
   });
 
   app.put("/fs/file", async (request, reply) => {
-    const path = resolveConfined(queryPath(request));
+    const path = queryPath(request);
     if (!(request.body instanceof Readable)) {
       return reply.code(415).send({ error: "上传需要 application/octet-stream" });
     }
     const data = await readBody(request.body, MAX_WRITE_BYTES);
-    await filesystem().writeFile(path, data);
+    await filesystem().writeFile(path, data, queryConfined(request));
     return reply.send({ path });
   });
 
@@ -207,7 +203,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
       });
     };
     try {
-      const result = await filesystem().upload(path, body, MAX_UPLOAD_BYTES, delivery);
+      const result = await filesystem().upload(path, body, MAX_UPLOAD_BYTES, delivery, queryConfined(request));
       closeLater();
       return reply.send(result);
     } catch (error) {
@@ -270,6 +266,12 @@ function queryDelivery(request: FastifyRequest): string {
     throw Object.assign(new Error("缺少 delivery"), { name: "PathEscapeError" });
   }
   return query.delivery;
+}
+
+function queryConfined(request: FastifyRequest): boolean {
+  const query = request.query;
+  if (!query || typeof query !== "object" || !("confine" in query)) return true;
+  return query.confine !== "false";
 }
 
 function clampTimeout(value: number | undefined): number {

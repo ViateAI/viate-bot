@@ -104,4 +104,28 @@ describe("update_bot_profile", () => {
     expect(lineDiff(longBefore, longAfter)).toContain("-old instruction");
     expect(lineDiff(longBefore, longAfter)).toContain("+new instruction");
   });
+
+  it("reads an absolute avatar outside the roots only when confine is off", async () => {
+    const { dir, db } = dbFor();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01]);
+    const seen: string[] = [];
+    const deps = {
+      db,
+      dataDir: dir,
+      userId: "u",
+      botId: "bot",
+      taskId: "task",
+      allowModel: () => true,
+      readFile: async (path: string) => {
+        seen.push(path);
+        return { bytes: png, truncated: false };
+      },
+    };
+    await expect(applyBotProfile({ ...deps, confineNow: () => true }, { avatarPath: "/etc/passwd.png" })).rejects.toThrow(/\/home\/bot|\/tmp/);
+    expect(seen).toEqual([]);
+    await applyBotProfile({ ...deps, confineNow: () => false }, { avatarPath: "/etc/passwd.png" });
+    expect(seen).toEqual(["/etc/passwd.png"]);
+    await expect(applyBotProfile({ ...deps, confineNow: () => false }, { avatarPath: "etc/passwd.png" })).rejects.toThrow(/绝对路径/);
+    db.$client.close();
+  });
 });

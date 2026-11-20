@@ -3,39 +3,48 @@ import { map, num, obj, opt, str } from "@earendil-works/pi-schema";
 import { MachinedClient } from "../machines/client.js";
 import { capHeadTail, FS_READ_LIMIT } from "./text.js";
 
-const shellSchema = obj({
-  cmd: str({ description: "要执行的命令" }),
-  cwd: opt(str({ description: "工作目录，缺省是 /home/bot" })),
-  timeoutSec: opt(num({ description: "超时秒数，1 到 600，缺省 30" })),
-  env: opt(map(str({ description: "环境变量的值，可以写 {{secret:NAME}}" }))),
-});
+export interface MachineToolOptions {
+  /** 任务开始时的开关，只决定这次工具说明。缺省关闭。 */
+  confined?: boolean;
+  /** 每次执行时再读。缺省关闭。 */
+  confineNow?: () => boolean;
+}
 
-const readSchema = obj({
-  path: str({ description: "文件路径，只能在 /home/bot 或 /tmp 下" }),
-  maxBytes: opt(num({ description: "最多读取的字节数，上限 64KB" })),
-});
-
-const writeSchema = obj({
-  path: str({ description: "文件路径，只能在 /home/bot 或 /tmp 下" }),
-  content: str({ description: "文件内容" }),
-});
-
-const listSchema = obj({
-  path: str({ description: "目录路径，只能在 /home/bot 或 /tmp 下" }),
-});
-
-const searchSchema = obj({
-  path: str({ description: "搜索起点，只能在 /home/bot 或 /tmp 下" }),
-  pattern: str({ description: "ripgrep 正则" }),
-  maxResults: opt(num({ description: "最多返回多少条，上限 100" })),
-});
+function pathLabel(label: string, confined: boolean): string {
+  return confined ? `${label}，只能在 /home/bot 或 /tmp 下` : label;
+}
 
 /**
  * 工具在创建时绑定到这一个 MachinedClient。
  * 参数里没有主机、用户或机器 id，模型写什么都换不了目标。
+ * 参数里也没有 confine。模型带了也忽略，以 confineNow 为准。
  * 名字用下划线：OpenAI function name 不接受 shell.exec 这种点号。
  */
-export function machineTools(client: MachinedClient): AgentTool[] {
+export function machineTools(client: MachinedClient, options: MachineToolOptions = {}): AgentTool[] {
+  const confined = options.confined === true;
+  const confineNow = options.confineNow ?? (() => false);
+  const shellSchema = obj({
+    cmd: str({ description: "要执行的命令" }),
+    cwd: opt(str({ description: "工作目录，缺省是 /home/bot" })),
+    timeoutSec: opt(num({ description: "超时秒数，1 到 600，缺省 30" })),
+    env: opt(map(str({ description: "环境变量的值，可以写 {{secret:NAME}}" }))),
+  });
+  const readSchema = obj({
+    path: str({ description: pathLabel("文件路径", confined) }),
+    maxBytes: opt(num({ description: "最多读取的字节数，上限 64KB" })),
+  });
+  const writeSchema = obj({
+    path: str({ description: pathLabel("文件路径", confined) }),
+    content: str({ description: "文件内容" }),
+  });
+  const listSchema = obj({
+    path: str({ description: pathLabel("目录路径", confined) }),
+  });
+  const searchSchema = obj({
+    path: str({ description: pathLabel("搜索起点", confined) }),
+    pattern: str({ description: "ripgrep 正则" }),
+    maxResults: opt(num({ description: "最多返回多少条，上限 100" })),
+  });
   const shell: AgentTool<typeof shellSchema> = {
     name: "shell_exec",
     label: "执行命令",
@@ -49,6 +58,7 @@ export function machineTools(client: MachinedClient): AgentTool[] {
       const result = await client.exec({
         cmd: params.cmd,
         timeoutSec,
+        confine: confineNow(),
         ...(params.cwd !== undefined ? { cwd: params.cwd } : {}),
         ...(params.env !== undefined ? { env: params.env } : {}),
         ...(signal ? { signal } : {}),
@@ -73,7 +83,7 @@ export function machineTools(client: MachinedClient): AgentTool[] {
     execute: async (_toolCallId, params, signal) => {
       const requested = params.maxBytes ?? FS_READ_LIMIT;
       const maxBytes = Math.min(Math.max(1, Math.floor(requested)), FS_READ_LIMIT);
-      const result = await client.read(params.path, maxBytes, signal);
+      const result = await client.read(params.path, maxBytes, signal, undefined, confineNow());
       const raw = Buffer.from(result.content);
       const text = raw.length > maxBytes ? raw.subarray(0, maxBytes).toString("utf8") : result.content;
       const note = result.truncated || text !== result.content ? "\n…[内容已截断]…" : "";
@@ -88,7 +98,7 @@ export function machineTools(client: MachinedClient): AgentTool[] {
     parameters: writeSchema,
     execute: async (_toolCallId, params, signal) => {
       if (Buffer.byteLength(params.content) > 1024 * 1024) throw new Error("写入内容超过 1MB");
-      const result = await client.write(params.path, params.content, signal);
+      const result = await client.write(params.path, params.content, signal, confineNow());
       return { content: [{ type: "text", text: `已写入 ${result.path}（${result.bytes} 字节）` }], details: result };
     },
   };
@@ -99,7 +109,7 @@ export function machineTools(client: MachinedClient): AgentTool[] {
     description: "列出当前用户机器上的目录。",
     parameters: listSchema,
     execute: async (_toolCallId, params, signal) => {
-      const result = await client.list(params.path, signal);
+      const result = await client.list(params.path, signal, confineNow());
       const text = capHeadTail(result.entries.map((entry) => `${entry.type}\t${entry.size}\t${entry.name}`).join("\n"));
       return { content: [{ type: "text", text: text || "（空目录）" }], details: { path: result.path, count: result.entries.length } };
     },
@@ -112,7 +122,7 @@ export function machineTools(client: MachinedClient): AgentTool[] {
     parameters: searchSchema,
     execute: async (_toolCallId, params, signal) => {
       const maxResults = Math.min(params.maxResults ?? 50, 100);
-      const result = await client.search(params.path, params.pattern, maxResults, signal);
+      const result = await client.search(params.path, params.pattern, maxResults, signal, confineNow());
       const text = capHeadTail(result.hits.map((hit) => `${hit.path}:${hit.line}:${hit.text}`).join("\n"));
       const note = result.truncated ? "\n…[结果已截断]…" : "";
       return {
