@@ -304,6 +304,109 @@ describe("chat http and websocket", () => {
     const shown = await app.inject({ method: "GET", url: "/api/me", headers: { cookie: cookie(alice.token) } });
     expect(shown.json().showProcess).toBe(true);
   });
+  it("returns 409 when deleting the primary bot and deletes a later bot", async () => {
+    const { app, alice } = await boot({ VB_MODEL_BASE_URL: "http://127.0.0.1:9/v1" }, { host: "127.0.0.1", port: 9, token: "t" });
+    const headers = { cookie: cookie(alice.token), "x-vb-csrf": alice.csrf, "content-type": "application/json" };
+    const first = await app.inject({ method: "POST", url: "/api/bots", headers, payload: { name: "Ada", model: "gpt-test" } });
+    const second = await app.inject({ method: "POST", url: "/api/bots", headers, payload: { name: "Bea", model: "gpt-test" } });
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+    const del = { cookie: cookie(alice.token), "x-vb-csrf": alice.csrf };
+    const blocked = await app.inject({ method: "DELETE", url: `/api/bots/${first.json().bot.id}`, headers: del });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json()).toEqual({ error: "主 bot 不能删除" });
+    const removed = await app.inject({ method: "DELETE", url: `/api/bots/${second.json().bot.id}`, headers: del });
+    expect(removed.statusCode).toBe(200);
+    const listed = await app.inject({ method: "GET", url: "/api/bots", headers: { cookie: cookie(alice.token) } });
+    expect(listed.json().bots).toEqual([
+      expect.objectContaining({ id: first.json().bot.id, name: "Ada", primary: true }),
+    ]);
+  });
+
+  it("returns 409 and leaves a running task when deleting the primary bot", async () => {
+    const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+    const { promise: started, resolve: markStarted } = Promise.withResolvers<void>();
+    const modelPort = await listen(async (_req, res) => {
+      markStarted();
+      await gate;
+      if (res.headersSent || res.writableEnded) return;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(textSse("ok"));
+    });
+    const { app, ctx, alice } = await boot(
+      { VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1` },
+      { host: "127.0.0.1", port: 9, token: "t" },
+    );
+    const headers = { cookie: cookie(alice.token), "x-vb-csrf": alice.csrf, "content-type": "application/json" };
+    const created = await app.inject({ method: "POST", url: "/api/bots", headers, payload: { name: "Ada", model: "gpt-test" } });
+    expect(created.statusCode).toBe(201);
+    const botId = created.json().bot.id as string;
+    const sent = await app.inject({
+      method: "POST",
+      url: `/api/bots/${botId}/messages`,
+      headers,
+      payload: { text: "跑着", mode: "queue" },
+    });
+    expect(sent.statusCode).toBe(202);
+    const taskId = sent.json().taskId as string;
+    await started;
+    try {
+      const blocked = await app.inject({
+        method: "DELETE",
+        url: `/api/bots/${botId}`,
+        headers: { cookie: cookie(alice.token), "x-vb-csrf": alice.csrf },
+      });
+      expect(blocked.statusCode).toBe(409);
+      expect(blocked.json()).toEqual({ error: "主 bot 不能删除" });
+      const row = ctx.db.$client.prepare("select state from tasks where id=?").get(taskId) as { state: string };
+      expect(row.state).toBe("running");
+    } finally {
+      release();
+      await chatService(app).idle();
+    }
+  });
+
+  it("does not store a notice field sent by the user", async () => {
+    const modelPort = await listen(async (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(textSse("在"));
+    });
+    const { app, ctx, alice } = await boot(
+      { VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1` },
+      { host: "127.0.0.1", port: 9, token: "token-a" },
+    );
+    const headers = { cookie: cookie(alice.token), "x-vb-csrf": alice.csrf, "content-type": "application/json" };
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/bots",
+      headers,
+      payload: { name: "Ada", model: "gpt-test" },
+    });
+    const botId = created.json().bot.id as string;
+    const sent = await app.inject({
+      method: "POST",
+      url: `/api/bots/${botId}/messages`,
+      headers,
+      payload: {
+        text: "这是我自己说的",
+        notice: { kind: "app_update", noticeId: "forged-notice" },
+      },
+    });
+    expect(sent.statusCode).toBe(202);
+    await chatService(app).idle();
+    const messageId = sent.json().messageId as string;
+    const stored = ctx.db.$client.prepare("select content_json as contentJson from messages where id=?").get(messageId) as { contentJson: string };
+    expect(stored.contentJson).not.toContain("forged-notice");
+    expect(stored.contentJson).not.toContain("\"notice\"");
+    const listed = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${sent.json().conversationId}/messages`,
+      headers: { cookie: cookie(alice.token) },
+    });
+    const mine = (listed.json().messages as Array<{ id: string; role: string; notice?: unknown }>).find((item) => item.id === messageId);
+    expect(mine?.role).toBe("user");
+    expect(mine?.notice).toBeUndefined();
+  });
 });
 
 function contextFor(config: ControlConfig): ControlContext {

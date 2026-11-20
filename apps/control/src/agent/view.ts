@@ -14,6 +14,7 @@ export interface MessageView {
   toolCallId?: string;
   toolName?: string;
   isError?: boolean;
+  notice?: { kind: string; noticeId: string };
 }
 
 export interface TaskView {
@@ -49,6 +50,7 @@ export function messageView(row: MessageRecord): MessageView {
     createdAt: row.createdAt,
   };
   if (parsed.attachments) view.attachments = parsed.attachments;
+  if (parsed.notice) view.notice = parsed.notice;
   const pi = parsed.pi;
   if (pi?.role === "assistant") {
     const toolCalls = pi.content
@@ -94,15 +96,20 @@ export function loadTranscript(rows: MessageRecord[]): AgentMessage[] {
   return loadTranscriptEntries(rows).map((entry) => entry.message);
 }
 
-export function loadTranscriptEntries(rows: MessageRecord[]): Array<{ id: string; message: AgentMessage; attachments: AttachmentRef[] }> {
-  const entries: Array<{ id: string; message: AgentMessage; attachments: AttachmentRef[] }> = [];
+export function loadTranscriptEntries(rows: MessageRecord[]): Array<{ id: string; message: AgentMessage; attachments: AttachmentRef[]; notice?: { kind: string; noticeId: string } }> {
+  const entries: Array<{ id: string; message: AgentMessage; attachments: AttachmentRef[]; notice?: { kind: string; noticeId: string } }> = [];
   let toolResultsAt = 0;
   const pendingCalls = new Set<string>();
   for (const row of rows) {
     const parsed = parseContent(row.contentJson);
     const pi = parsed.pi;
     if (!pi) continue;
-    const entry = { id: row.id, message: pi, attachments: parsed.attachments ?? [] };
+    const entry = {
+      id: row.id,
+      message: pi,
+      attachments: parsed.attachments ?? [],
+      ...(parsed.notice ? { notice: parsed.notice } : {}),
+    };
     if (pi.role === "toolResult" && pendingCalls.delete(pi.toolCallId)) {
       // 用户可能在工具运行时先入库；模型要求结果紧跟调用，用户指令留在整组之后。
       entries.splice(toolResultsAt, 0, entry);
@@ -129,12 +136,19 @@ export function storedContent(
   message: UserMessage | AssistantMessage | ToolResultMessage,
   text: string,
   attachments: AttachmentRef[] = [],
+  notice?: { kind: string; noticeId: string },
 ): string {
-  const payload: { pi: UserMessage | AssistantMessage | ToolResultMessage; text: string; attachments?: AttachmentRef[] } = {
+  const payload: {
+    pi: UserMessage | AssistantMessage | ToolResultMessage;
+    text: string;
+    attachments?: AttachmentRef[];
+    notice?: { kind: string; noticeId: string };
+  } = {
     pi: message,
     text,
   };
   if (attachments.length > 0) payload.attachments = attachments;
+  if (notice) payload.notice = notice;
   return JSON.stringify(payload);
 }
 
@@ -145,21 +159,41 @@ export function assistantText(message: AssistantMessage): string {
     .join("");
 }
 
-function parseContent(json: string): { pi?: UserMessage | AssistantMessage | ToolResultMessage; text: string; attachments?: AttachmentRef[] } {
+function parseContent(json: string): {
+  pi?: UserMessage | AssistantMessage | ToolResultMessage;
+  text: string;
+  attachments?: AttachmentRef[];
+  notice?: { kind: string; noticeId: string };
+} {
   try {
     const value = JSON.parse(json) as {
       pi?: UserMessage | AssistantMessage | ToolResultMessage;
       text?: string;
       attachments?: unknown;
+      notice?: unknown;
     };
     const attachments = attachmentRefs(value.attachments);
+    const notice = noticeMark(value.notice);
     if (value.pi && (value.pi.role === "user" || value.pi.role === "assistant" || value.pi.role === "toolResult")) {
-      return { pi: value.pi, text: value.text ?? textOf(value.pi), ...(attachments ? { attachments } : {}) };
+      return {
+        pi: value.pi,
+        text: value.text ?? textOf(value.pi),
+        ...(attachments ? { attachments } : {}),
+        ...(notice ? { notice } : {}),
+      };
     }
   } catch {
     return { text: json };
   }
   return { text: json };
+}
+
+function noticeMark(value: unknown): { kind: string; noticeId: string } | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.kind !== "string" || typeof record.noticeId !== "string") return undefined;
+  if (record.kind.length === 0 || record.noticeId.length === 0) return undefined;
+  return { kind: record.kind, noticeId: record.noticeId };
 }
 
 function attachmentRefs(value: unknown): AttachmentRef[] | undefined {

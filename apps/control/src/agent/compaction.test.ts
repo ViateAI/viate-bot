@@ -20,6 +20,7 @@ import { createRuntime } from "../compose.js";
 import { ulid } from "../id.js";
 import { userScope } from "../scope.js";
 import { estimateTextTokens } from "./compact.js";
+import { NOTICE_PREFIX } from "./notices.js";
 import { storedContent } from "./view.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -463,5 +464,55 @@ describe("context summary", () => {
     const task = chat.listTasks(scope, conversation.id)?.[0];
     expect(task?.state).toBe("succeeded");
     expect(chat.listMessages(scope, conversation.id)?.some((row) => row.contentJson.includes("重试成功"))).toBe(true);
+  });
+
+  it("keeps the stored summary when a later adjacent notice arrives", async () => {
+    const bodies: string[] = [];
+    const modelPort = await listen((_req, res, body) => {
+      bodies.push(body);
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(textSse("收到"));
+    });
+    const { config, ctx } = await opened({ VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1` });
+    const { service, runtime } = await appFor(ctx, config, { host: "127.0.0.1", port: 9, token: "t" });
+    const scope = userScope("user-a");
+    const bot = await createBot(
+      { db: ctx.db, key: ctx.key, credentials: runtime.credentials, providerId: runtime.identity.id },
+      scope,
+      { name: "Ada", model: "gpt-test" },
+    );
+    const chat = chatRepository(ctx.db);
+    const conversation = chat.insertConversation(scope, { id: ulid(), botId: bot.id, title: "通知" });
+    if (!conversation) throw new Error("no conversation");
+    const anchor = ulid(1_700_000_000_000);
+    const later = ulid(1_700_000_000_001);
+    const noticeA = `${NOTICE_PREFIX}\n应用：pager\n版本：1.0.0 → 1.2.0\n说明：锚点说明-A`;
+    const noticeB = `${NOTICE_PREFIX}\n应用：pager\n版本：1.2.0 → 1.3.0\n说明：后一则-B`;
+    chat.insertMessage(scope, {
+      id: anchor,
+      conversationId: conversation.id,
+      role: "user",
+      contentJson: storedContent({ role: "user", content: noticeA, timestamp: 1 }, noticeA, [], { kind: "app_update", noticeId: "notice-a" }),
+      taskId: null,
+    });
+    chat.saveSummary(scope, conversation.id, "STORED-SUMMARY-KEEP", anchor);
+    chat.insertMessage(scope, {
+      id: later,
+      conversationId: conversation.id,
+      role: "user",
+      contentJson: storedContent({ role: "user", content: noticeB, timestamp: 2 }, noticeB, [], { kind: "app_update", noticeId: "notice-b" }),
+      taskId: null,
+    });
+    await service.send({ userId: "user-a", botId: bot.id, text: "继续看通知", mode: "queue", conversationId: conversation.id });
+    await service.idle();
+    expect(bodies).toHaveLength(1);
+    const body = bodies[0] ?? "";
+    expect(body).toContain("STORED-SUMMARY-KEEP");
+    expect(body.split("后一则-B")).toHaveLength(2);
+    expect(body.split("1.2.0 → 1.3.0")).toHaveLength(2);
+    expect(body.split(NOTICE_PREFIX)).toHaveLength(2);
+    expect(body).not.toContain("锚点说明-A");
+    expect(body).not.toContain("1.0.0 → 1.3.0");
+    expect(body).not.toContain("期间跨过的版本");
   });
 });

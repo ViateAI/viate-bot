@@ -110,6 +110,7 @@ describe("schema migration", () => {
       "sessions",
       "settings",
       "stats_minute",
+      "system_notices",
       "task_steps",
       "tasks",
       "takeover_leases",
@@ -130,6 +131,8 @@ describe("schema migration", () => {
     expect(columnNames(db, "routines")).toContain("state");
     expect(columnNames(db, "approvals")).toEqual(expect.arrayContaining(["args_hash", "consumed_at"]));
     expect(columnNames(db, "app_versions")).toContain("recommended");
+    expect(columnNames(db, "app_versions")).toEqual(expect.arrayContaining(["important_note", "important_at"]));
+    expect(columnNames(db, "system_notices")).toEqual(expect.arrayContaining(["user_id", "dedupe_key", "payload_json", "delivered_message_id"]));
     expect(columnNames(db, "app_installs")).toEqual(expect.arrayContaining(["installed_by_bot_id", "installed_by_bot_name"]));
     const viateColumns = db.$client
       .prepare(

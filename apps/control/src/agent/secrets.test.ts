@@ -405,6 +405,7 @@ describe("secure form", () => {
       { VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`, VB_SECRET_WAIT_MS: "60000" },
       { host: "127.0.0.1", port: machine.port, token: "token-a" },
     );
+    await createBot(app, alice);
     const botId = await createBot(app, alice);
     const sent = await app.inject({
       method: "POST",
@@ -435,6 +436,7 @@ describe("secure form", () => {
     const env = { VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`, VB_SECRET_WAIT_MS: "60000" };
     const endpoint = { host: "127.0.0.1", port: machine.port, token: "token-a" };
     const first = await startApp(env, endpoint);
+    await createBot(first.app, first.alice);
     const botId = await createBot(first.app, first.alice);
     const sent = await first.app.inject({
       method: "POST",

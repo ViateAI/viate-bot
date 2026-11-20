@@ -116,6 +116,7 @@ export function chatRepository(db: AppDatabase) {
         db.$client.prepare(`delete from approvals where task_id in (${taskIds})`).run(id);
         db.$client.prepare(`delete from task_steps where task_id in (${taskIds})`).run(id);
         db.$client.prepare("delete from tasks where conversation_id = ?").run(id);
+        db.$client.prepare("update system_notices set delivered_message_id = null where delivered_message_id in (select id from messages where conversation_id = ?)").run(id);
         db.$client.prepare("delete from messages where conversation_id = ?").run(id);
         db.$client.prepare("delete from conversations where id = ?").run(id);
         return uploads.map((row) => row.id);

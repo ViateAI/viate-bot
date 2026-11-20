@@ -377,6 +377,15 @@ describe("provision", () => {
     expect(quotaRepository(db).find(userScope("user-1"))).toBeUndefined();
     db.$client.close();
   });
+  it("deletes the newly created bot on rollback without reporting a credential failure", async () => {
+    const { db, deps, scope, setHealthyError } = setup();
+    userRepository(db).insert({ id: "user-1", email: "a@example.com", name: "A", status: "active", isAdmin: false });
+    setHealthyError(new Error("健康检查失败"));
+    await expect(provisionUser(deps, scope, { userId: "user-1", templateId: "general" })).rejects.toThrow(/^\u5065\u5eb7\u68c0\u67e5\u5931\u8d25$/);
+    expect(botRepository(db).list(userScope("user-1"))).toEqual([]);
+    expect(quotaRepository(db).find(userScope("user-1"))).toBeUndefined();
+    db.$client.close();
+  });
 
   it("revokes the upstream key if local credential persistence fails", async () => {
     const { db, deps, scope, issued, revoked, calls } = setup();

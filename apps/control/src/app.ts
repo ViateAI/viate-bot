@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import { desc, eq } from "drizzle-orm";
 import Fastify, { type FastifyInstance } from "fastify";
 import { deleteCreatedMachine, dockerMachineControl } from "./admin/docker-control.js";
 import { ChatError, createChatService, type ChatService } from "./agent/service.js";
@@ -31,6 +32,7 @@ import { createUserFlights, type UserFlights } from "./screen/flight.js";
 import { createScreenInputDrain } from "./screen/input-drain.js";
 import { createTakeoverLeases, type TakeoverLeases } from "./screen/leases.js";
 import { remoteUncertain } from "./agent/remote-uncertain.js";
+import { messageView } from "./agent/view.js";
 import { registerScreenGateway, registerScreenRoutes } from "./screen/gateway.js";
 import { notifyTaskSettled, registerNotificationRoutes } from "./notify/index.js";
 import { dispatchDue, RoutineError, usersToWake } from "./routines/service.js";
@@ -41,6 +43,7 @@ import { registerChatRoutes } from "./routes/chat.js";
 import { cleanupUnreferencedUploads } from "./uploads/store.js";
 import { registerUploadRoutes } from "./uploads/routes.js";
 import { userScope } from "./scope.js";
+import { messages } from "./db/schema.js";
 import { createDriver, devSpec, reconcileDeps } from "./runtime.js";
 import { registerWeb } from "./web-static.js";
 import { createHub, registerWebsocket } from "./ws.js";
@@ -310,6 +313,22 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     installer: catalogInstaller,
     wake: async (userId) => {
       await prepare(userId, () => {});
+    },
+    onNotice: (conversationId) => {
+      const row = db.select().from(messages).where(eq(messages.conversationId, conversationId)).orderBy(desc(messages.id)).get();
+      if (!row) return;
+      hub.publish(conversationId, {
+        type: "message",
+        conversationId,
+        message: messageView({
+          id: row.id,
+          conversationId: row.conversationId,
+          role: row.role,
+          contentJson: row.contentJson,
+          taskId: row.taskId,
+          createdAt: row.createdAt,
+        }),
+      });
     },
   });
   registerWeb(app);

@@ -9,6 +9,7 @@ import { createBot, deleteBot } from "./bot-service.js";
 import { pullViateUsage, USAGE_LOOKBACK_MS } from "./compose.js";
 import { loadConfig } from "./config.js";
 import { decrypt, loadOrCreateKey } from "./crypto.js";
+import { botRepository } from "./db/bots.js";
 import { credentialRepository } from "./db/credentials.js";
 import { identityRepository } from "./db/identities.js";
 import { openDatabase } from "./db/index.js";
@@ -67,10 +68,10 @@ describe("bot credentials", () => {
     expect(stored?.userId).toBeNull();
     expect(stored?.botId).toBeNull();
     expect(decrypt(key, stored!.secretEnc)).toBe("shared-secret");
-    expect(await deleteBot(deps, scope, first.id)).toBe(true);
-    expect(credentialRepository(db).findShared()?.revokedAt).toBeNull();
     expect(await deleteBot(deps, userScope("user-b"), second.id)).toBe(false);
     expect(await deleteBot(deps, scope, second.id)).toBe(true);
+    expect(credentialRepository(db).findShared()?.revokedAt).toBeNull();
+    await expect(deleteBot(deps, scope, first.id)).rejects.toMatchObject({ statusCode: 409, message: "主 bot 不能删除" });
     expect(credentialRepository(db).findShared()?.revokedAt).toBeNull();
     db.$client.close();
   });
@@ -103,8 +104,9 @@ describe("bot credentials", () => {
     };
     const deps = { db, key, credentials, providerId: "viate" };
     const scope = userScope("user-a");
+    await createBot(deps, scope, { name: "Keeper", model: "m" });
     const bot = await createBot(deps, scope, { name: "Helper", model: "m", policyRef: "channel-9" });
-    expect(seen).toEqual([{ subject: "sub-a", policyRef: "channel-9" }]);
+    expect(seen).toEqual([{ subject: "sub-a" }, { subject: "sub-a", policyRef: "channel-9" }]);
     const stored = credentialRepository(db).findById(scope, bot.modelCredentialId!);
     expect(decrypt(key, stored!.secretEnc)).toBe(`secret-${bot.id}`);
     expect(stored?.externalId).toBe(`ext-${bot.id}`);
@@ -139,6 +141,7 @@ describe("bot credentials", () => {
       async revoke() {},
     };
     const scope = userScope("user-a");
+    const keeper = await createBot({ db, key, credentials, providerId: "viate" }, scope, { name: "Keeper", model: "m" });
     const bot = await createBot({ db, key, credentials, providerId: "viate" }, scope, { name: "Helper", model: "m" });
     const queried: string[][] = [];
     const viate: Pick<ViateIntegration, "pullUsage"> = {
@@ -159,22 +162,22 @@ describe("bot credentials", () => {
         }));
       },
     };
-    expect(await pullViateUsage(db, viate, new Date())).toBe(1);
-    expect(queried.at(-1)).toEqual([`ext-${bot.id}`]);
+    expect(await pullViateUsage(db, viate, new Date())).toBe(2);
+    expect(queried.at(-1)?.slice().sort()).toEqual([`ext-${keeper.id}`, `ext-${bot.id}`].sort());
     expect(await deleteBot({ db, key, credentials, providerId: "viate" }, scope, bot.id)).toBe(true);
-    expect(credentialRepository(db).listActiveExternal()).toEqual([]);
+    expect(credentialRepository(db).listActiveExternal().map((item) => item.externalId)).toEqual([`ext-${keeper.id}`]);
     const revokedAt = credentialRepository(db).findById(scope, bot.modelCredentialId!)?.revokedAt;
     expect(revokedAt).toBeTruthy();
     const inside = new Date(Date.parse(revokedAt!) + USAGE_LOOKBACK_MS - 1000);
-    expect(await pullViateUsage(db, viate, inside)).toBe(1);
-    expect(queried.at(-1)).toEqual([`ext-${bot.id}`]);
-    expect(db.$client.prepare("select requests, cost_source from usage_hourly").all()).toEqual([
-      { requests: 7, cost_source: "viate" },
-    ]);
+    expect(await pullViateUsage(db, viate, inside)).toBe(2);
+    expect(queried.at(-1)?.slice().sort()).toEqual([`ext-${keeper.id}`, `ext-${bot.id}`].sort());
+    expect(db.$client.prepare("select requests, cost_source from usage_hourly order by bot_id").all()).toEqual(
+      [keeper.id, bot.id].sort().map(() => ({ requests: 7, cost_source: "viate" })),
+    );
     const outside = new Date(Date.parse(revokedAt!) + USAGE_LOOKBACK_MS + 1000);
-    expect(await pullViateUsage(db, viate, outside)).toBe(0);
-    expect(queried.at(-1)).toEqual([]);
-    expect(db.$client.prepare("select count(*) as count from usage_hourly").get()).toEqual({ count: 1 });
+    expect(await pullViateUsage(db, viate, outside)).toBe(1);
+    expect(queried.at(-1)).toEqual([`ext-${keeper.id}`]);
+    expect(db.$client.prepare("select count(*) as count from usage_hourly").get()).toEqual({ count: 2 });
     db.$client.close();
   });
 
@@ -194,10 +197,13 @@ describe("bot credentials", () => {
     };
     machineRepository(db).insert(scope, record);
     const deps = { db, key, credentials: sharedCredentialProvider(loadConfig({ VB_MODEL_API_KEY: "shared-secret" })), providerId: "oidc" };
-    const bot = await createBot(deps, scope, { name: "Only", model: "m" });
-    expect(await deleteBot(deps, scope, bot.id)).toBe(true);
+    const primary = await createBot(deps, scope, { name: "Primary", model: "m" });
+    const other = await createBot(deps, scope, { name: "Other", model: "m" });
+    expect(await deleteBot(deps, scope, other.id)).toBe(true);
     expect(machineRepository(db).find(scope)?.id).toBe("machine-a");
     expect(machineRepository(db).find(scope)?.volumeName).toBe("vb-home-user-a");
+    await expect(deleteBot(deps, scope, primary.id)).rejects.toMatchObject({ statusCode: 409, message: "主 bot 不能删除" });
+    expect(machineRepository(db).find(scope)?.id).toBe("machine-a");
     db.$client.close();
   });
 
@@ -229,6 +235,69 @@ describe("bot credentials", () => {
     ).rejects.toThrow(/机器创建失败/);
     expect(revoked).toHaveLength(1);
     expect(revoked[0]).toMatch(/^ext-/);
+    db.$client.close();
+  });
+});
+describe("primary bot", () => {
+  it("refuses to delete the earliest live bot and still deletes a later one", async () => {
+    const { db, key } = database();
+    const deps = {
+      db,
+      key,
+      credentials: sharedCredentialProvider(loadConfig({ VB_MODEL_API_KEY: "shared-secret" })),
+      providerId: "oidc",
+    };
+    const scope = userScope("user-a");
+    const first = await createBot(deps, scope, { name: "First", model: "m" });
+    const second = await createBot(deps, scope, { name: "Second", model: "m" });
+    await expect(deleteBot(deps, scope, first.id)).rejects.toMatchObject({
+      statusCode: 409,
+      message: "主 bot 不能删除",
+    });
+    expect(botRepository(db).findById(scope, first.id)?.id).toBe(first.id);
+    expect(await deleteBot(deps, scope, second.id)).toBe(true);
+    expect(botRepository(db).findById(scope, second.id)).toBeUndefined();
+    db.$client.close();
+  });
+  it("breaks equal created_at by id", async () => {
+    const { db, key } = database();
+    const deps = {
+      db,
+      key,
+      credentials: sharedCredentialProvider(loadConfig({ VB_MODEL_API_KEY: "shared-secret" })),
+      providerId: "oidc",
+    };
+    const scope = userScope("user-a");
+    const left = await createBot(deps, scope, { name: "Left", model: "m" });
+    const right = await createBot(deps, scope, { name: "Right", model: "m" });
+    db.$client.prepare("update bots set created_at = ? where user_id = ?").run("2020-01-01T00:00:00.000Z", "user-a");
+    const [earlier, later] = [left.id, right.id].sort();
+    await expect(deleteBot(deps, scope, earlier!)).rejects.toMatchObject({
+      statusCode: 409,
+      message: "主 bot 不能删除",
+    });
+    expect(await deleteBot(deps, scope, later!)).toBe(true);
+    db.$client.close();
+  });
+  it("treats the earliest remaining bot as primary after the original first bot was deleted", async () => {
+    const { db, key } = database();
+    const deps = {
+      db,
+      key,
+      credentials: sharedCredentialProvider(loadConfig({ VB_MODEL_API_KEY: "shared-secret" })),
+      providerId: "oidc",
+    };
+    const scope = userScope("user-a");
+    const gone = await createBot(deps, scope, { name: "Gone", model: "m" });
+    const kept = await createBot(deps, scope, { name: "Kept", model: "m" });
+    const extra = await createBot(deps, scope, { name: "Extra", model: "m" });
+    expect(botRepository(db).softDelete(scope, gone.id)).toBe(true);
+    await expect(deleteBot(deps, scope, kept.id)).rejects.toMatchObject({
+      statusCode: 409,
+      message: "主 bot 不能删除",
+    });
+    expect(botRepository(db).findById(scope, kept.id)?.id).toBe(kept.id);
+    expect(await deleteBot(deps, scope, extra.id)).toBe(true);
     db.$client.close();
   });
 });

@@ -48,6 +48,7 @@ export const AUDIT_ACTIONS = {
   appPublish: "app.publish",
   appPush: "app.push",
   appRetire: "app.retire",
+  appImportant: "app.important",
   appPublishReview: "app.publish_review",
   machineLifecycle: "machine.lifecycle",
   routineChange: "routine.change",

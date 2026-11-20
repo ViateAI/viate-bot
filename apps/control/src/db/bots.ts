@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import type { UserScope } from "../scope.js";
 import type { AppDatabase } from "./index.js";
 import { bots } from "./schema.js";
@@ -34,6 +34,8 @@ export interface BotPatch {
 export interface BotStore {
   list(scope: UserScope): BotRecord[];
   findById(scope: UserScope, id: string): BotRecord | undefined;
+  /** 未删除 bot 中 created_at 最早的一个；同刻按 id。 */
+  primaryId(scope: UserScope): string | undefined;
   insert(scope: UserScope, draft: BotDraft): BotRecord;
   update(scope: UserScope, id: string, patch: BotPatch): boolean;
   setCredential(scope: UserScope, id: string, credentialId: string): boolean;
@@ -61,6 +63,15 @@ export function botRepository(db: AppDatabase): BotStore {
         .where(and(eq(bots.id, id), eq(bots.userId, scope.userId), isNull(bots.deletedAt)))
         .get();
       return row ? toRecord(row) : undefined;
+    },
+    primaryId(scope) {
+      return db
+        .select({ id: bots.id })
+        .from(bots)
+        .where(and(eq(bots.userId, scope.userId), isNull(bots.deletedAt)))
+        .orderBy(asc(bots.createdAt), asc(bots.id))
+        .limit(1)
+        .get()?.id;
     },
     insert(scope, draft) {
       const now = new Date().toISOString();

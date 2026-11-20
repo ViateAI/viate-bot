@@ -34,6 +34,8 @@ export const appApi = {
   visibility: (appId: string) => `/api/admin/apps/${encodeURIComponent(appId)}/visibility`,
   recommend: (appId: string, versionId: string) =>
     `/api/admin/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(versionId)}/recommend`,
+  important: (appId: string, versionId: string) =>
+    `/api/admin/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(versionId)}/important`,
   retire: (appId: string, versionId: string) =>
     `/api/admin/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(versionId)}/retire`,
   push: (appId: string) => `/api/admin/apps/${encodeURIComponent(appId)}/push`,
@@ -75,6 +77,8 @@ export interface AdminVersion {
   version: string;
   status: string;
   recommended: boolean;
+  importantNote?: string | null;
+  importantAt?: string | null;
   sha256: string;
 }
 

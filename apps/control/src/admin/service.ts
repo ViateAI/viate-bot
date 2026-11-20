@@ -1,6 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { storedContent } from "../agent/view.js";
-import { BotRejected, createBot, deleteBot, type BotServiceDeps } from "../bot-service.js";
+import { BotRejected, createBot, purgeBot, type BotServiceDeps } from "../bot-service.js";
 import type { ControlConfig } from "../config.js";
 import { auditRepository } from "../db/audit.js";
 import { adminRepository } from "../db/admin.js";
@@ -185,7 +185,7 @@ async function provisionLocked(deps: ProvisionDeps, scope: AdminScope, input: Pr
     const rollbackErrors: string[] = [];
     if (botId) {
       try {
-        await deleteBot(
+        await purgeBot(
           { db: deps.db, key: deps.key, credentials: deps.credentials, providerId: deps.providerId },
           userScope(userId),
           botId,
@@ -282,7 +282,7 @@ function writeWelcome(db: AppDatabase, userId: string, botId: string, template: 
   const chat = chatRepository(db);
   const scope = userScope(userId);
   const welcome = template.welcome.trim() || `你好，我是${template.name}。`;
-  const conversation = chat.insertConversation(scope, { id: ulid(), botId, title: "欢迎" });
+  const conversation = chat.listConversations(scope, botId)?.[0] ?? chat.insertConversation(scope, { id: ulid(), botId, title: "欢迎" });
   if (!conversation) throw new AdminRejected("找不到 bot", 404);
   const message: AssistantMessage = {
     role: "assistant",
@@ -302,6 +302,7 @@ function writeWelcome(db: AppDatabase, userId: string, botId: string, template: 
     taskId: null,
   });
   if (!row) throw new AdminRejected("欢迎消息没有写上", 500);
+  chat.touchConversation(scope, conversation.id);
 }
 
 function emptyUsage(): AssistantMessage["usage"] {

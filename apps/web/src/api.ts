@@ -67,6 +67,7 @@ export interface Bot {
   instructions: string;
   updatedAt?: string;
   busy?: boolean;
+  primary?: boolean;
 }
 
 export interface Conversation {
@@ -93,6 +94,7 @@ export interface ChatMessage {
   toolCalls?: Array<{ id: string; name: string; arguments: unknown }>;
   toolName?: string;
   isError?: boolean;
+  notice?: { kind: string; noticeId: string };
 }
 
 export interface Task {

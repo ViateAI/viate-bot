@@ -62,6 +62,7 @@ import { markRemoteUncertain, remoteUncertain } from "./remote-uncertain.js";
 import { skillHttpMachine, skillPrompt, skillTools } from "./skill-tools.js";
 import { machineTools } from "./tools.js";
 import { assistantText, loadTranscript, loadTranscriptEntries, messageView, stepView, storedContent, taskView, withoutImages } from "./view.js";
+import { foldNoticeEntries } from "./notices.js";
 import { buildModel, type GatewayTask } from "../gateway/stream.js";
 import { userScope, type UserScope } from "../scope.js";
 import { deliverAttachments } from "../uploads/deliver.js";
@@ -911,8 +912,16 @@ export function createChatService(deps: ChatServiceDeps) {
       chat.updateTask(scope, live.id, { usageJson: taskUsageJson(gatewayTask) });
       deps.tasks.set(live.id, gatewayTask);
       const platform = settingsRepository(deps.db).platformPrompt().text;
-      const loaded = loadTranscriptEntries(chat.listContextMessages(scope, live.conversationId) ?? []);
-      const presented = presentForModel(loaded, {
+      const contextEntries = loadTranscriptEntries(chat.listContextMessages(scope, live.conversationId) ?? []);
+      const untilMessageId = chat.readSummary(scope, live.conversationId)?.untilMessageId;
+      const anchorIndex = untilMessageId ? contextEntries.findIndex((entry) => entry.id === untilMessageId) : -1;
+      // 锚点行必须留在列表里，openTail 才按原始 id 切开。只折叠锚点之后的条目，新通知不会把代表 id 改成组内最大 id，也不会把锚点并进新组。
+      const tail = foldNoticeEntries(anchorIndex >= 0 ? contextEntries.slice(anchorIndex + 1) : contextEntries);
+      const loaded = {
+        entries: anchorIndex >= 0 ? [...contextEntries.slice(0, anchorIndex + 1), ...tail.entries] : tail.entries,
+        groups: tail.groups,
+      };
+      const presented = presentForModel(loaded.entries, {
         vision: deps.config.visionModels.includes(bot.model),
         dataDir: deps.config.dataDir,
         userId: live.userId,
@@ -1209,7 +1218,10 @@ export function createChatService(deps: ChatServiceDeps) {
               chat.saveSummary(scope, live.conversationId, text, untilMessageId);
             },
             idOf: (message) => messageIds.get(message),
-            canSummarize: (ids, untilId) => chat.canSummarize(scope, live.conversationId, ids, untilId),
+            canSummarize: (ids, untilId) => {
+              const expanded = ids.flatMap((id) => loaded.groups.get(id) ?? [id]);
+              return chat.canSummarize(scope, live.conversationId, expanded, untilId);
+            },
             onCompacted: () => {
               seq += 1;
               const step = chat.insertStep(scope, {

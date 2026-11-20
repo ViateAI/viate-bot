@@ -317,8 +317,28 @@ export const appVersions = sqliteTable("app_versions", {
   sha256: text("sha256").notNull(),
   status: text("status").notNull(),
   recommended: integer("recommended", { mode: "boolean" }).notNull().default(false),
+  importantNote: text("important_note"),
+  importantAt: text("important_at"),
   createdAt: text("created_at").notNull(),
 });
+
+/** 用户级系统通知。同一用户对同一 dedupe_key 只生成一次。 */
+export const systemNotices = sqliteTable(
+  "system_notices",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id),
+    kind: text("kind").notNull(),
+    dedupeKey: text("dedupe_key").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    createdAt: text("created_at").notNull(),
+    deliveredMessageId: text("delivered_message_id").references(() => messages.id),
+    deliveredAt: text("delivered_at"),
+  },
+  (table) => [uniqueIndex("system_notices_user_dedupe_unique").on(table.userId, table.dedupeKey)],
+);
 
 export const appVisibility = sqliteTable(
   "app_visibility",

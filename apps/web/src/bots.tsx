@@ -180,6 +180,7 @@ export function BotSidebar({ activeId, onLogout }: { activeId?: string | undefin
                         <span className="min-w-0">
                           <span className="flex min-w-0 items-center gap-2">
                             <span className="truncate text-[15px] font-medium text-neutral-900">{bot.name}</span>
+                            {bot.primary ? <span data-testid="primary-bot" className="shrink-0 rounded bg-neutral-200 px-1.5 py-0.5 text-[10px] font-medium text-neutral-700">主 bot</span> : null}
                             {bot.busy ? <span data-testid="bot-busy" aria-label="进行中" className="size-1.5 shrink-0 rounded-full bg-neutral-800 motion-safe:animate-pulse" /> : null}
                           </span>
                           <span className="block truncate text-sm text-neutral-500">{preview(bot)}</span>

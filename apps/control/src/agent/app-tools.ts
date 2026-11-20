@@ -154,7 +154,9 @@ function scrubMap(value: unknown, secret: (key: string, value: string) => boolea
 export function installMcpBlock(catalog: CatalogDeps, userId: string, args: unknown): string | undefined {
   const parsed = parseInstall(args);
   if (!parsed.ok) return parsed.error;
-  if (listUserInstalls(catalog, userId).some((item) => item.name === parsed.value.name && item.desired === "present" && (item.state === "installed" || item.state === "installing"))) {
+  const existing = listUserInstalls(catalog, userId).find((item) => item.name === parsed.value.name && item.desired === "present" && (item.state === "installed" || item.state === "installing"));
+  const upgrading = existing?.state === "installed" && parsed.value.kind === "catalog" && parsed.value.version !== undefined && parsed.value.version !== existing.version;
+  if (existing && !upgrading) {
     return "应用已安装或正在安装；修改配置请使用应用页";
   }
   if (parsed.value.kind === "catalog") {
@@ -381,8 +383,10 @@ async function runInstall(binding: InstallMcpBinding, args: unknown, signal?: Ab
   let version = "";
   const source: InstallRequest["kind"] = request.kind;
   if (request.kind === "catalog") {
+    const installed = listUserInstalls(binding.catalog, binding.userId).find((item) => item.name === request.name && item.desired === "present" && item.state === "installed");
+    const upgrade = Boolean(request.version && installed && installed.version !== request.version);
     const view = await installForUser(binding.catalog, binding.userId, request.name, {
-      onlyIfAbsent: true,
+      onlyIfAbsent: !upgrade,
       ...(signal ? { signal } : {}),
       ...(request.version ? { version: request.version } : {}),
       config,

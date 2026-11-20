@@ -333,6 +333,7 @@ function AppEditor({
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [retire, setRetire] = useState<AdminVersion | null>(null);
+  const [notes, setNotes] = useState<Record<string, string>>({});
   const visibleIds = scope === "user" ? userIds : [];
   const visibilityDirty = scope !== savedScope || !sameSet(visibleIds, savedUsers);
   const dirty = visibilityDirty || targets.length > 0 || forced || wake;
@@ -376,6 +377,25 @@ function AppEditor({
     try {
       await api(appApi.recommend(app.id, version.id), { method: "POST", body: "{}" });
       setMessage(`已推荐 ${version.version}`);
+      await onChanged();
+    } catch (caught) {
+      setError(appErrorMessage(caught));
+    } finally {
+      setPending(null);
+    }
+  }
+
+  async function markImportant(version: AdminVersion) {
+    const note = (notes[version.id] ?? version.importantNote ?? "").trim();
+    if (!note) {
+      setError("说明不能为空");
+      return;
+    }
+    setPending(version.id);
+    setError("");
+    try {
+      await api(appApi.important(app.id, version.id), { method: "POST", body: JSON.stringify({ note }) });
+      setMessage(`已把 ${version.version} 标为重要更新`);
       await onChanged();
     } catch (caught) {
       setError(appErrorMessage(caught));
@@ -448,7 +468,7 @@ function AppEditor({
               pad={false}
               subject={version.version}
               status={version.status === "active" ? "可安装" : version.status === "retired" ? "已下架" : "状态未知"}
-              meta={`SHA-256 ${version.sha256}${version.recommended ? " · 推荐" : ""}`}
+              meta={`SHA-256 ${version.sha256}${version.recommended ? " · 推荐" : ""}${version.importantAt ? " · 重要更新" : ""}`}
               actions={<div className="flex flex-wrap justify-end gap-2">
               <button className={appGhostClass} type="button" onClick={() => void copyText(version.sha256, setMessage, setError)}>复制 SHA-256</button>
               <button
@@ -471,6 +491,27 @@ function AppEditor({
               </button>
             </div>}
             />
+            {version.status === "active" ? (
+              <label className="mt-3 grid gap-1">
+                重要更新说明
+                <input
+                  data-testid={`admin-important-note-${version.id}`}
+                  className={appFieldClass}
+                  maxLength={500}
+                  value={notes[version.id] ?? version.importantNote ?? ""}
+                  onChange={(event) => setNotes((current) => ({ ...current, [version.id]: event.target.value }))}
+                />
+                <button
+                  className={`${appGhostClass} justify-self-start`}
+                  data-testid={`admin-important-${version.id}`}
+                  type="button"
+                  disabled={pending !== null}
+                  onClick={() => void markImportant(version)}
+                >
+                  标为重要更新
+                </button>
+              </label>
+            ) : null}
           </div>
         ))}
       </section>

@@ -92,6 +92,18 @@ export async function runSuite(): Promise<void> {
       botId = createdBot.id;
       const baseline = (await json<{ users: UserQuota[] }>(adminApi, `${baseURL}/api/admin/users`)).users.find((row) => row.id === me.id)!;
       cleanups.push(async () => { await json(adminApi, `${baseURL}/api/admin/users/${me.id}/quota`, { method: "PATCH", headers: { "x-vb-csrf": adminCsrf }, data: { maxBots: baseline.maxBots, maxConcurrentTasks: baseline.maxConcurrentTasks, maxRoutines: baseline.maxRoutines, taskTokenBudget: baseline.taskTokenBudget } }); });
+      // Pushed before the shared routine/rule deletions. cleanups run in reverse, so this
+      // observes the primary bot after those deletions and does not try to delete it (409).
+      cleanups.push(async () => {
+        const remaining = await json<{ bots: Array<{ id: string }> }>(userApi, `${baseURL}/api/bots`);
+        if (remaining.bots.length !== 1 || remaining.bots[0]?.id !== botId) {
+          throw new Error(`E2E resource leak: provisioned user should keep only the primary bot ${botId}, saw ${remaining.bots.map((item) => item.id).join(",") || "none"}`);
+        }
+        const routines = await json<{ routines: Array<{ id: string }> }>(userApi, `${baseURL}/api/bots/${botId}/routines`);
+        if (routines.routines.length !== 0) throw new Error(`E2E resource leak: primary bot still has ${routines.routines.length} routine(s)`);
+        const rules = await json<{ rules: Array<{ id: string }> }>(userApi, `${baseURL}/api/bots/${botId}/approval-rules`);
+        if (rules.rules.length !== 0) throw new Error(`E2E resource leak: primary bot still has ${rules.rules.length} approval rule(s)`);
+      });
     } else {
       cleanups.push(async () => {
         await json(adminApi, `${baseURL}/api/admin/users/${me.id}/quota`, { method: "PATCH", headers: { "x-vb-csrf": adminCsrf }, data: { maxBots: prior.maxBots, maxConcurrentTasks: prior.maxConcurrentTasks, maxRoutines: prior.maxRoutines, taskTokenBudget: prior.taskTokenBudget } });
@@ -99,12 +111,12 @@ export async function runSuite(): Promise<void> {
       await json(adminApi, `${baseURL}/api/admin/users/${me.id}/quota`, { method: "PATCH", headers: { "x-vb-csrf": adminCsrf }, data: { maxBots: prior.maxBots + 1, maxRoutines: prior.maxRoutines + 1, taskTokenBudget: 0 } });
       const created = await json<{ bot: { id: string } }>(userApi, `${baseURL}/api/bots`, { method: "POST", headers: { "x-vb-csrf": userCsrf }, data: { name: `E2E ${randomUUID()}`, model } });
       botId = created.bot.id;
+      cleanups.push(async () => {
+        await json(userApi, `${baseURL}/api/bots/${botId}`, { method: "DELETE", headers: { "x-vb-csrf": userCsrf } });
+        const remaining = await json<{ bots: Array<{ id: string }> }>(userApi, `${baseURL}/api/bots`);
+        if (remaining.bots.some((item) => item.id === botId)) throw new Error("E2E resource leak: created bot still visible after suite");
+      });
     }
-    cleanups.push(async () => {
-      await json(userApi, `${baseURL}/api/bots/${botId}`, { method: "DELETE", headers: { "x-vb-csrf": userCsrf } });
-      const remaining = await json<{ bots: Array<{ id: string }> }>(userApi, `${baseURL}/api/bots`);
-      if (remaining.bots.some((item) => item.id === botId)) throw new Error("E2E resource leak: created bot still visible after suite");
-    });
     cleanups.push(async () => {
       const routines = await json<{ routines: Array<{ id: string }> }>(userApi, `${baseURL}/api/bots/${botId}/routines`);
       for (const routine of routines.routines) await json(userApi, `${baseURL}/api/routines/${routine.id}`, { method: "DELETE", headers: { "x-vb-csrf": userCsrf } });
@@ -319,7 +331,7 @@ export async function runSuite(): Promise<void> {
     await browser.close();
     if (cleanupFailures) throw new Error(`E2E cleanup failed: ${cleanupFailures} operation(s); verify test account resources`);
   }
-  console.log("E2E passed; created bot/routines removed and temporary settings restored; login sessions stayed in memory");
+  console.log("E2E passed; extra bots and routines removed, primary bot kept, temporary settings restored; login sessions stayed in memory");
 }
 
 async function sendUpload(page: Page, api: HttpClient, baseURL: string, botId: string): Promise<void> {

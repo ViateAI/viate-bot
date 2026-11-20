@@ -1,4 +1,5 @@
 import { encrypt } from "./crypto.js";
+import { deliverPendingNotices } from "./agent/notices.js";
 import { botRepository, type BotRecord } from "./db/bots.js";
 import { credentialRepository } from "./db/credentials.js";
 import { identityRepository } from "./db/identities.js";
@@ -110,13 +111,24 @@ export async function createBot(deps: BotServiceDeps, scope: UserScope, input: C
   }
   const created = bots.findById(scope, id);
   if (!created) throw new Error("创建 bot 后读不回来");
+  deliverPendingNotices(deps.db, scope.userId);
   return created;
 }
 
 export async function deleteBot(deps: BotServiceDeps, scope: UserScope, id: string): Promise<boolean> {
+  return removeBot(deps, scope, id, true);
+}
+
+/** 开通失败回滚用。刚建的 bot 就是主 bot，不能被主 bot 保护挡住。 */
+export async function purgeBot(deps: BotServiceDeps, scope: UserScope, id: string): Promise<boolean> {
+  return removeBot(deps, scope, id, false);
+}
+
+async function removeBot(deps: BotServiceDeps, scope: UserScope, id: string, guardPrimary: boolean): Promise<boolean> {
   const bots = botRepository(deps.db);
   const bot = bots.findById(scope, id);
   if (!bot) return false;
+  if (guardPrimary && bots.primaryId(scope) === id) throw new BotRejected("主 bot 不能删除", 409);
   await revokeOwned(deps, scope, id);
   return bots.softDelete(scope, id);
 }

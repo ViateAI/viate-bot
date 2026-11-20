@@ -53,7 +53,8 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     const scope = scopeOf(request, reply);
     if (!scope) return;
     const busy = chat.busyBotIds(scope);
-    return { bots: bots.list(scope).map((bot) => ({ ...botView(bot), busy: busy.has(bot.id) })) };
+    const primaryId = bots.primaryId(scope);
+    return { bots: bots.list(scope).map((bot) => ({ ...botView(bot, bot.id === primaryId), busy: busy.has(bot.id) })) };
   });
 
   app.post("/api/bots", async (request, reply) => {
@@ -82,7 +83,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
         scope,
         { name, model, ...(instructions !== undefined ? { instructions } : {}) },
       );
-      return reply.code(201).send({ bot: botView(created) });
+      return reply.code(201).send({ bot: botView(created, bots.primaryId(scope) === created.id) });
     } catch (error) {
       return sendError(reply, error);
     }
@@ -93,7 +94,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!scope) return;
     const bot = bots.findById(scope, request.params.id);
     if (!bot) return reply.code(404).send({ error: "找不到 bot" });
-    return { bot: botView(bot) };
+    return { bot: botView(bot, bots.primaryId(scope) === bot.id) };
   });
 
   app.get<{ Params: { id: string } }>("/api/bots/:id/avatar", async (request, reply) => {
@@ -108,6 +109,9 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
   app.delete<{ Params: { id: string } }>("/api/bots/:id", async (request, reply) => {
     const scope = scopeOf(request, reply);
     if (!scope) return;
+    if (bots.primaryId(scope) === request.params.id) {
+      return reply.code(409).send({ error: "主 bot 不能删除" });
+    }
     try {
       await deps.chat.cancelBot(scope, request.params.id);
       const ok = await deleteBot(
@@ -317,8 +321,20 @@ function scopeOf(request: { id?: string }, reply: { code: (status: number) => { 
   return userScope(resolved.user.id);
 }
 
-function botView(bot: { id: string; name: string; bio: string; avatar: string | null; model: string; instructions: string; updatedAt: string }) {
-  return { id: bot.id, name: bot.name, bio: bot.bio, avatar: bot.avatar, model: bot.model, instructions: bot.instructions, updatedAt: bot.updatedAt };
+function botView(
+  bot: { id: string; name: string; bio: string; avatar: string | null; model: string; instructions: string; updatedAt: string },
+  primary = false,
+) {
+  return {
+    id: bot.id,
+    name: bot.name,
+    bio: bot.bio,
+    avatar: bot.avatar,
+    model: bot.model,
+    instructions: bot.instructions,
+    updatedAt: bot.updatedAt,
+    primary,
+  };
 }
 
 function record(body: unknown): Record<string, unknown> {

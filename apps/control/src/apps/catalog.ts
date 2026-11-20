@@ -27,6 +27,7 @@ import {
 import { userRepository } from "../db/users.js";
 import { ulid } from "../id.js";
 import { AUDIT_ACTIONS, M2_EVENTS } from "../m2/events.js";
+import { deliverPendingNotices, insertAppUpdateNotice, type AppUpdatePayload } from "../agent/notices.js";
 import { adminScope, type AdminScope, type UserScope } from "../scope.js";
 import {
   readTar,
@@ -114,6 +115,8 @@ export interface CatalogDeps {
   schedule?: (work: () => Promise<void>) => void;
   /** `$VB_DATA_DIR`。上传和外部获取把包写到 `apps/<appId>/<version>.tar.zst`。 */
   dataDir?: string;
+  /** 通知写入对话后告诉已打开的页面刷新。不启动任务。 */
+  onNotice?: (conversationId: string) => void;
 }
 
 export function privateSkillStorage(deps: CatalogDeps, userId: string): PrivateAppStorage {
@@ -264,6 +267,8 @@ interface VersionRow {
   sha256: string;
   status: string;
   recommended: boolean;
+  importantNote: string | null;
+  importantAt: string | null;
   createdAt: string;
 }
 
@@ -443,6 +448,99 @@ export function recommendVersion(deps: CatalogDeps, scope: AdminScope, appId: st
   });
 }
 
+export function markImportantVersion(
+  deps: CatalogDeps,
+  scope: AdminScope,
+  appId: string,
+  versionId: string,
+  note: string,
+): void {
+  assertAdmin(scope);
+  const text = note.trim();
+  if ([...text].length === 0) throw new CatalogRejected("说明不能为空", 400);
+  if ([...text].length > 500) throw new CatalogRejected("说明不能超过 500 字", 400);
+  const app = requireExistingApp(deps.db, appId);
+  const markedAt = nowIso(deps);
+  const conversations = new Set<string>();
+  deps.db.transaction(() => {
+    const version = deps.db.select().from(appVersions).where(eq(appVersions.id, versionId)).get();
+    if (!version || version.appId !== appId) throw new CatalogRejected("找不到", 404);
+    if (app.source === APP_SOURCE_USER && !approvedVersionIds(deps.db).has(versionId)) throw new CatalogRejected("找不到", 404);
+    if (version.status !== VERSION_ACTIVE) throw new CatalogRejected("不能推荐已下架的版本", 409);
+    deps.db.update(appVersions).set({ importantNote: text, importantAt: markedAt }).where(eq(appVersions.id, versionId)).run();
+    for (const target of importantAudience(deps, app.id, app.name, version.id, version.version, text, markedAt)) {
+      if (!insertAppUpdateNotice(deps.db, target.userId, target.payload)) continue;
+      const conversationId = deliverPendingNotices(deps.db, target.userId);
+      if (conversationId) conversations.add(conversationId);
+    }
+  });
+  for (const conversationId of conversations) deps.onNotice?.(conversationId);
+  audit(deps, scope.actorUserId, AUDIT_ACTIONS.appImportant, appId, { versionId });
+}
+
+function importantAudience(
+  deps: CatalogDeps,
+  appId: string,
+  appName: string,
+  versionId: string,
+  targetVersion: string,
+  note: string,
+  markedAt: string,
+): Array<{ userId: string; payload: AppUpdatePayload }> {
+  const rows = deps.db.$client
+    .prepare(
+      `select u.id as userId, u.status as status, m.state as machineState,
+              cur.version as currentVersion, i.app_version_id as installedVersionId,
+              i.desired as desired, i.state as installState
+       from app_installs i
+       join machines m on m.id = i.machine_id
+       join users u on u.id = m.user_id
+       join app_versions cur on cur.id = i.app_version_id
+       where cur.app_id = ?
+       order by i.updated_at desc`,
+    )
+    .all(appId) as Array<{
+      userId: string;
+      status: string;
+      machineState: string;
+      currentVersion: string;
+      installedVersionId: string;
+      desired: string;
+      installState: string;
+    }>;
+  const seen = new Set<string>();
+  const targets: Array<{ userId: string; payload: AppUpdatePayload }> = [];
+  for (const row of rows) {
+    if (seen.has(row.userId)) continue;
+    seen.add(row.userId);
+    if (row.status !== "active" || row.machineState === "deleted") continue;
+    if (row.desired !== DESIRED_PRESENT || row.installState === "removed") continue;
+    if (row.installedVersionId === versionId) continue;
+    if (!versionVisibleTo(deps, row.userId, appId, versionId)) continue;
+    targets.push({
+      userId: row.userId,
+      payload: {
+        appId,
+        appName,
+        currentVersion: row.currentVersion,
+        targetVersion,
+        targetVersionId: versionId,
+        note,
+        markedAt,
+      },
+    });
+  }
+  return targets;
+}
+
+function versionVisibleTo(deps: CatalogDeps, userId: string, appId: string, versionId: string): boolean {
+  const item = groupApps(deps.db).get(appId);
+  if (!item) return false;
+  const versions = selectableVersions(item, userId, approvedVersionIds(deps.db));
+  if (!versions) return false;
+  return versions.some((version) => version.id === versionId && version.status === VERSION_ACTIVE);
+}
+
 export function retireVersion(deps: CatalogDeps, scope: AdminScope, appId: string, versionId: string): void {
   assertAdmin(scope);
   const app = requireExistingApp(deps.db, appId);
@@ -482,6 +580,8 @@ export function listAdminCatalog(deps: CatalogDeps, scope: AdminScope): AdminCat
           version: version.version,
           status: version.status,
           recommended: version.recommended,
+          importantNote: version.importantNote,
+          importantAt: version.importantAt,
           sha256: version.sha256,
         })),
     });
@@ -1181,6 +1281,22 @@ export function registerCatalogRoutes(app: FastifyInstance, deps: CatalogDeps): 
         if (!Buffer.isBuffer(bytes)) throw new CatalogRejected("应用包不合法", 400);
         const published = await publishUploadedPackage(deps, user.id, bytes, { ...uploadQuery(request.query), privateUserId: user.id });
         return reply.code(201).send(published);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string; versionId: string } }>(
+    "/api/admin/apps/:id/versions/:versionId/important",
+    async (request, reply) => {
+      const scope = adminActor(request);
+      if (!scope) return reply.code(404).send({ error: "找不到" });
+      const body = asRecord(request.body);
+      if (typeof body.note !== "string") return reply.code(400).send({ error: "说明不能为空" });
+      try {
+        markImportantVersion(deps, scope, request.params.id, request.params.versionId, body.note);
+        return { ok: true };
       } catch (error) {
         return sendError(reply, error);
       }

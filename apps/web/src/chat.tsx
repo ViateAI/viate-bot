@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent } from "react";
 import { api, uploadAttachment, taskLabel, type Bot, type ChatMessage, type MemoryItem, type Step, type Task } from "./api.js";
 import { AttachmentCards, ComposerSend, PendingAttachments, composerEnterSubmits, reserveIncoming, sendBlocked, withoutSent, type LocalFile, type PendingItem } from "./attachments.js";
@@ -18,6 +18,7 @@ const MarkdownView = lazy(() => import("./markdown.js"));
 
 export function ChatPage({ botId }: { botId: string }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -188,6 +189,14 @@ export function ChatPage({ botId }: { botId: string }) {
     mutationFn: () => api(`/api/tasks/${task?.id}/accept-remote-risk`, { method: "POST" }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["tasks", conversationId] });
+    },
+    onError: (caught: Error) => setError(caught.message),
+  });
+  const removeBot = useMutation({
+    mutationFn: () => api(`/api/bots/${botId}`, { method: "DELETE" }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["bots"] });
+      await navigate({ to: "/" });
     },
     onError: (caught: Error) => setError(caught.message),
   });
@@ -493,6 +502,9 @@ export function ChatPage({ botId }: { botId: string }) {
         avatarUrl={botAvatarUrl(botId, bot.data?.bot.avatar, bot.data?.bot.updatedAt)}
         model={bot.data?.bot.model ?? ""}
         instructions={bot.data?.bot.instructions ?? ""}
+        primary={bot.data?.bot.primary === true}
+        deleting={removeBot.isPending}
+        onDelete={() => removeBot.mutate()}
         machine={machine}
         sheet={sheet}
         onClose={() => setSheet(false)}
@@ -513,6 +525,9 @@ function ProfilePanel({
   avatarUrl,
   model,
   instructions,
+  primary,
+  deleting,
+  onDelete,
   machine,
   sheet,
   onClose,
@@ -528,6 +543,9 @@ function ProfilePanel({
   avatarUrl: string | undefined;
   model: string;
   instructions: string;
+  primary: boolean;
+  deleting: boolean;
+  onDelete: () => void;
   machine: "starting" | "ready" | "idle";
   sheet: boolean;
   onClose: () => void;
@@ -570,6 +588,17 @@ function ProfilePanel({
         {bio ? <p className="mt-2 text-center text-sm text-neutral-500">{bio}</p> : null}
         {model ? <p className="mt-1 text-sm text-neutral-500">{model}</p> : null}
         <p className="mt-1 text-sm text-neutral-500">{status}</p>
+        {primary ? <p data-testid="primary-bot" className="mt-2 text-xs font-medium text-neutral-700">主 bot</p> : null}
+        <button
+          data-testid="delete-bot"
+          className="mt-3 rounded-full border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 disabled:cursor-not-allowed disabled:opacity-40"
+          type="button"
+          disabled={primary || deleting}
+          onClick={onDelete}
+        >
+          删除 bot
+        </button>
+        {primary ? <p data-testid="delete-bot-reason" className="mt-1 text-center text-xs text-neutral-500">主 bot 不能删除</p> : null}
       </div>
       <div className="flex justify-center gap-6 px-6 pt-2 text-sm">
         <button
@@ -673,6 +702,11 @@ function MessageItem({ message, previous }: { message: ChatMessage; previous?: C
         <li className="max-w-[85%] justify-self-start rounded-2xl bg-white px-3 py-2 text-xs text-neutral-500 ring-1 ring-black/5">
           <p>工具结果{message.toolName ? ` · ${message.toolName}` : ""}{message.isError ? " · 失败" : ""}</p>
           <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all">{text}</pre>
+        </li>
+      ) : message.notice ? (
+        <li data-testid="system-notice" className="max-w-[85%] justify-self-start rounded-2xl bg-amber-50 px-4 py-2.5 text-[15px] leading-6 text-neutral-800 ring-1 ring-amber-200">
+          <p className="mb-1 text-xs font-medium text-amber-950">系统通知</p>
+          <p className="whitespace-pre-wrap break-words">{text}</p>
         </li>
       ) : message.role === "user" ? (
         <li className="flex justify-end">
