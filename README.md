@@ -121,6 +121,15 @@ Read from the process environment only. Defaults are the values in `apps/control
 | `VB_VIATE_CLIENT_SECRET` | empty | viate service client secret |
 | `VB_ADMIN_EMAILS` | empty | Comma-separated. A trusted email match makes the user an admin after login |
 | `VB_DATA_DIR` | `/data` | SQLite, key, and app archives. The database file is `$VB_DATA_DIR/viate-bot.sqlite` |
+| `VB_UPLOAD_STORAGE` | `local` | `local` or `s3`. Chat attachments stay on the control plane either way. Downloads are still proxied; there are no presigned URLs |
+| `VB_S3_BUCKET` | empty | Required when storage is `s3` |
+| `VB_S3_REGION` | empty | Required when storage is `s3` |
+| `VB_S3_ENDPOINT` | empty | Optional S3-compatible endpoint, such as `https://s3.example` |
+| `VB_S3_FORCE_PATH_STYLE` | off | Only `1` turns on path-style addressing |
+| `VB_S3_PREFIX` | empty | Optional key prefix. `team` stores objects at `team/uploads/<userId>/<uploadId>`. The original filename is not part of the key |
+| `VB_S3_ACCESS_KEY_ID` | empty | Optional. Set it together with `VB_S3_SECRET_ACCESS_KEY`, or leave both empty to use the SDK default credential chain. Setting only one refuses to start |
+| `VB_S3_SECRET_ACCESS_KEY` | empty | Optional secret for the access key. It is not written to logs or error responses |
+| `VB_UPLOAD_STORAGE_ACCEPT_SWITCH` | off | Only `1` allows a change of `VB_UPLOAD_STORAGE` after attachments already exist. Existing objects are not migrated or deleted. Chat can no longer preview, download, or send them. Copies already on a bot machine stay there |
 | `VB_MACHINE_IMAGE` | `viate-bot/machine:dev` | Image tag for a new machine. If unset, `VB_MACHINE_IMAGE_DEFAULT` is used, then this default. Published images set `VB_MACHINE_IMAGE_DEFAULT` to `ghcr.io/viateai/viate-bot-machine:vX.Y.Z` for the same release. Leave that variable unset when running from source |
 | `VB_IDLE_STOP_MINUTES` | `120` | Minutes before an idle machine stops. Non-negative integer. `0` stops as soon as the idle conditions hold |
 | `VB_MAX_RUNNING_TASKS` | `20` | Global cap on tasks in the running state. Non-negative integer. `0` starts no new task |
@@ -131,6 +140,8 @@ Read from the process environment only. Defaults are the values in `apps/control
 | `VB_DEV` | off | Only `1` enables `/dev/*` and the `machine` command |
 
 `VB_RATE_MBIT`, `VB_HASHLIMIT`, `VB_HASHLIMIT_BURST`, and `VB_CONNLIMIT` belong to the firewall script in WSL, not to the control plane. See `deploy/rancher-desktop/README.md`.
+
+Changing `VB_UPLOAD_STORAGE` does not copy attachments. The first start on `local` records that backend, and uploads that already exist stay readable. Starting on `s3` when uploads already exist and no backend has been recorded is a switch from local: the process refuses to start until `VB_UPLOAD_STORAGE_ACCEPT_SWITCH=1`. A later change with an empty `uploads` table is recorded immediately. If uploads exist, a backend change also refuses to start until that variable is `1`. After an accepted switch, only attachments stored on the new backend can be previewed, downloaded, or sent. Cleanup does not remove the previous backend's files. Changing the bucket, endpoint, or prefix while `VB_UPLOAD_STORAGE` stays the same is a known limitation: startup does not ask for confirmation, and existing attachments are not marked unavailable (HTTP 410).
 
 ## Windows + Rancher Desktop
 

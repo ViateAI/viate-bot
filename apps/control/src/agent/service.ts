@@ -67,7 +67,9 @@ import { buildModel, type GatewayTask } from "../gateway/stream.js";
 import { userScope, type UserScope } from "../scope.js";
 import { deliverAttachments } from "../uploads/deliver.js";
 import { cropUserImages, presentForModel } from "../uploads/present.js";
-import { claimUploads, clearUnclaimedDeliveries, deliveredUploadIds, markUploadDelivered, readAttachments, UploadRejected, type AttachmentRef } from "../uploads/store.js";
+import type { UploadStorage } from "../uploads/storage.js";
+import { claimUploads, clearUnclaimedDeliveries, deliveredUploadIds, findOwnedUpload, markUploadDelivered, readAttachments, UploadRejected, type AttachmentRef } from "../uploads/store.js";
+import { uploadPredatesStorage } from "../uploads/switch.js";
 
 const INTERRUPTED_TOOL = "执行被中断，结果未知";
 const TEXT_LIMIT = 32_000;
@@ -111,6 +113,8 @@ export interface ChatServiceDeps {
   flights?: UserFlights;
   /** 真正把包装进机器。缺省时 install_mcp 无法安装。 */
   installer?: CatalogInstaller;
+  uploads: UploadStorage;
+  uploadStorageSince: string;
 }
 
 interface QueuedTask {
@@ -389,6 +393,10 @@ export function recoverInterruptedTasks(db: AppDatabase, now = new Date()): numb
 export function createChatService(deps: ChatServiceDeps) {
   const chat = chatRepository(deps.db);
   const now = deps.now ?? (() => new Date());
+  function uploadUnavailable(userId: string, id: string): boolean {
+    const row = findOwnedUpload(deps.db, userId, id);
+    return row !== undefined && uploadPredatesStorage(row.createdAt, deps.uploadStorageSince);
+  }
   const queue: QueuedTask[] = [];
   const ring: string[] = [];
   const running = new Map<string, Live>();
@@ -627,7 +635,7 @@ export function createChatService(deps: ChatServiceDeps) {
   async function sendLocked(input: SendInput): Promise<SendResult> {
     const text = input.text.trim();
     const scope = userScope(input.userId);
-    const attachments = input.uploadIds && input.uploadIds.length > 0 ? attachmentsFor(scope.userId, input.uploadIds) : [];
+    const attachments = input.uploadIds && input.uploadIds.length > 0 ? await attachmentsFor(scope.userId, input.uploadIds) : [];
     if (text.length === 0 && attachments.length === 0) throw new ChatError("消息不能为空", 400);
     if (text.length > TEXT_LIMIT) throw new ChatError("消息太长", 400);
     const bot = botRepository(deps.db).findById(scope, input.botId);
@@ -666,7 +674,7 @@ export function createChatService(deps: ChatServiceDeps) {
       }
       const row = persistUser(scope, conversation.id, message, live.id, stamped);
       saved.add(message);
-      if (attachments.length > 0) showAttachments(message, row.id, stamped, deps.config.visionModels.includes(bot.model), live.userId);
+      if (attachments.length > 0) await showAttachments(message, row.id, stamped, deps.config.visionModels.includes(bot.model), live.userId);
       if (input.mode === "steer") live.agent.steer(message);
       else live.agent.followUp(message);
       return { conversationId: conversation.id, taskId: live.id, messageId: row.id };
@@ -731,11 +739,12 @@ export function createChatService(deps: ChatServiceDeps) {
     }
   }
 
-  function showAttachments(message: UserMessage, messageId: string, attachments: AttachmentRef[], vision: boolean, userId: string): void {
-    const [shown] = presentForModel([{ id: messageId, message, attachments }], {
+  async function showAttachments(message: UserMessage, messageId: string, attachments: AttachmentRef[], vision: boolean, userId: string): Promise<void> {
+    const [shown] = await presentForModel([{ id: messageId, message, attachments }], {
       vision,
-      dataDir: deps.config.dataDir,
+      storage: deps.uploads,
       userId,
+      unavailable: (id) => uploadUnavailable(userId, id),
     });
     if (shown?.message.role === "user") message.content = shown.message.content;
   }
@@ -755,12 +764,13 @@ export function createChatService(deps: ChatServiceDeps) {
     if (!client) throw new ChatError("机器还没准备好接收附件", 503);
     const delivered = deliveredUploadIds(deps.db, live.userId, attachments.map((item) => item.id));
     await deliverAttachments(
-      deps.config.dataDir,
+      deps.uploads,
       live.userId,
       attachments.map((item) => deliveryTarget(item, messageId)),
       (path, body, deliveryId) => client.upload(path, body, deliveryId, live.resumeAbort?.signal),
       delivered,
       (id) => markUploadDelivered(deps.db, live.userId, id, now().toISOString()),
+      (id) => uploadUnavailable(live.userId, id),
     );
   }
 
@@ -778,7 +788,12 @@ export function createChatService(deps: ChatServiceDeps) {
           continue;
         }
         if (entry.attachments.length > 0) await deliverMessageFiles(live, row.id, entry.attachments);
-        const [shown] = presentForModel([entry], { vision, dataDir: deps.config.dataDir, userId: live.userId });
+        const [shown] = await presentForModel([entry], {
+          vision,
+          storage: deps.uploads,
+          userId: live.userId,
+          unavailable: (id) => uploadUnavailable(live.userId, id),
+        });
         const message = shown?.message.role === "user" ? shown.message : entry.message;
         saved.add(message);
         messageIds.set(message, row.id);
@@ -788,9 +803,9 @@ export function createChatService(deps: ChatServiceDeps) {
     }
   }
 
-  function attachmentsFor(userId: string, uploadIds: string[]): AttachmentRef[] {
+  async function attachmentsFor(userId: string, uploadIds: string[]): Promise<AttachmentRef[]> {
     try {
-      return readAttachments(deps.db, userId, uploadIds, deps.config.dataDir);
+      return await readAttachments(deps.db, userId, uploadIds, deps.uploads, deps.uploadStorageSince);
     } catch (error) {
       if (error instanceof UploadRejected) throw new ChatError(error.message, error.statusCode);
       throw error;
@@ -921,10 +936,11 @@ export function createChatService(deps: ChatServiceDeps) {
         entries: anchorIndex >= 0 ? [...contextEntries.slice(0, anchorIndex + 1), ...tail.entries] : tail.entries,
         groups: tail.groups,
       };
-      const presented = presentForModel(loaded.entries, {
+      const presented = await presentForModel(loaded.entries, {
         vision: deps.config.visionModels.includes(bot.model),
-        dataDir: deps.config.dataDir,
+        storage: deps.uploads,
         userId: live.userId,
+        unavailable: (id) => uploadUnavailable(live.userId, id),
       });
       for (const entry of presented) messageIds.set(entry.message, entry.id);
       const transcript = presented.map((entry) => entry.message);
@@ -953,12 +969,13 @@ export function createChatService(deps: ChatServiceDeps) {
       });
       const delivered = deliveredUploadIds(deps.db, live.userId, attached.map((item) => item.id));
       await deliverAttachments(
-        deps.config.dataDir,
+        deps.uploads,
         live.userId,
         attached,
         (path, body, deliveryId) => files.upload(path, body, deliveryId, live.resumeAbort?.signal),
         delivered,
         (id) => markUploadDelivered(deps.db, live.userId, id, now().toISOString()),
+        (id) => uploadUnavailable(live.userId, id),
       );
       const catalog = catalogDeps(deps);
       const skillMachine = skillHttpMachine(endpoint);

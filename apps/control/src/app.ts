@@ -42,6 +42,8 @@ import { registerAdminRoutes } from "./routes/admin.js";
 import { registerChatRoutes } from "./routes/chat.js";
 import { cleanupUnreferencedUploads } from "./uploads/store.js";
 import { registerUploadRoutes } from "./uploads/routes.js";
+import { createUploadStorage, type UploadStorage } from "./uploads/storage.js";
+import { ensureUploadStorage } from "./uploads/switch.js";
 import { userScope } from "./scope.js";
 import { messages } from "./db/schema.js";
 import { createDriver, devSpec, reconcileDeps } from "./runtime.js";
@@ -57,6 +59,8 @@ export interface ControlContext {
   key: Buffer;
   /** buildApp 写入。显式回调，不挂在数据库对象上。 */
   reconcileApps?: NonNullable<MachineHost["reconcileApps"]>;
+  uploads?: UploadStorage;
+  uploadStorageSince?: string;
 }
 
 export interface AppOptions {
@@ -81,17 +85,20 @@ export function openContext(config: ControlConfig = loadConfig()): ControlContex
   mkdirSync(config.dataDir, { recursive: true });
   const db = openDatabase(config.databasePath);
   migrate(db, { migrationsFolder });
-  return { db, driver: createDriver(), config, key: loadOrCreateKey(config.secretKeyPath) };
+  const ctx: ControlContext = { db, driver: createDriver(), config, key: loadOrCreateKey(config.secretKeyPath) };
+  bindUploadStorage(ctx, new Date());
+  return ctx;
 }
 
 export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
+  const now = options.now ?? (() => new Date());
+  const { storage, since } = bindUploadStorage(ctx, now());
   const app = Fastify({
     logger: process.env.VITEST === "true" ? false : true,
     ...(options.https ? { https: options.https } : {}),
   });
   const { db, driver, config, key } = ctx;
   const hub = createHub();
-  const now = options.now ?? (() => new Date());
   let disconnectScreens = (_userId: string) => {};
   const runtime = createRuntime(config, db, {
     ...(options.fetch ? { fetch: options.fetch } : {}),
@@ -179,6 +186,8 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     now,
     leases,
     flights,
+    uploads: storage,
+    uploadStorageSince: since,
   });
   chats.set(app, chat);
   const bypass = devMachineBypass();
@@ -195,8 +204,9 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     ensureMachine,
     tasks,
     now,
+    uploads: storage,
   });
-  registerUploadRoutes(app, { db, dataDir: config.dataDir, now });
+  registerUploadRoutes(app, { db, dataDir: config.dataDir, storage, since, now });
   registerAdminRoutes(app, {
     db,
     key,
@@ -472,7 +482,12 @@ export function startOpsMaintenance(ctx: ControlContext, intervalMs = 60 * 60 * 
   const timer = setInterval(() => {
     flushMinutes(ctx.db, opsMinutes);
     applyRetention(ctx.db, new Date());
-    cleanupUnreferencedUploads(ctx.db, ctx.config.dataDir, new Date());
+    const storage = ctx.uploads;
+    const since = ctx.uploadStorageSince;
+    if (!storage || since === undefined) return;
+    void cleanupUnreferencedUploads(ctx.db, storage, new Date(), since).catch(() => {
+      console.error("清理未引用附件失败");
+    });
   }, intervalMs);
   timer.unref();
   return () => clearInterval(timer);
@@ -484,6 +499,14 @@ function archiveInside(root: string, file: string): string {
   const rel = relative(rootReal, fileReal);
   if (rel.length === 0 || rel.startsWith("..") || rel.split(/[/\\]/).includes("..")) throw new Error("归档路径无效");
   return fileReal;
+}
+
+function bindUploadStorage(ctx: ControlContext, now: Date): { storage: UploadStorage; since: string } {
+  const record = ensureUploadStorage(ctx.db, ctx.config, now);
+  const storage = ctx.uploads ?? createUploadStorage(ctx.config);
+  ctx.uploads = storage;
+  ctx.uploadStorageSince = record.since;
+  return { storage, since: record.since };
 }
 
 function firstAddress(

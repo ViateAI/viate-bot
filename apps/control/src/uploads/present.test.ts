@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 describe("model attachment notes", () => {
-  it("sends a header-sniffed image to a vision model and only a path for a renamed non-image", () => {
+  it("sends a header-sniffed image to a vision model and only a path for a renamed non-image", async () => {
     const dir = scratch();
     writeFileSync(join(dir, "uploads", "user-a", "img"), PNG);
     writeFileSync(join(dir, "uploads", "user-a", "fake"), Buffer.from("<svg></svg>"));
@@ -25,13 +25,13 @@ describe("model attachment notes", () => {
       { id: "img", name: "dot.png", size: PNG.length, mime: "application/octet-stream", kind: "file" },
       { id: "fake", name: "photo.png", size: 11, mime: "image/png", kind: "image" },
     ])];
-    const vision = presentForModel(entries, { vision: true, dataDir: dir, userId: "user-a" });
+    const vision = await presentForModel(entries, { vision: true, dataDir: dir, userId: "user-a" });
     const encoded = JSON.stringify(vision[0]?.message);
     expect(encoded).toContain("附件：/home/bot/uploads/m1/dot.png");
     expect(encoded).toContain("附件：/home/bot/uploads/m1/photo.png");
     expect(encoded).toContain(PNG.toString("base64"));
     expect(encoded).not.toContain(Buffer.from("<svg></svg>").toString("base64"));
-    const blind = presentForModel(entries, { vision: false, dataDir: dir, userId: "user-a" });
+    const blind = await presentForModel(entries, { vision: false, dataDir: dir, userId: "user-a" });
     expect(JSON.stringify(blind[0]?.message)).not.toContain(PNG.toString("base64"));
     expect(JSON.stringify(blind[0]?.message)).toContain("附件：/home/bot/uploads/m1/dot.png");
     const summary = renderMessageForSummary(vision[0]!.message);
@@ -39,20 +39,20 @@ describe("model attachment notes", () => {
     expect(summary).not.toContain(PNG.toString("base64"));
   });
 
-  it("keeps an image over 5 MB out of the model and says why", () => {
+  it("keeps an image over 5 MB out of the model and says why", async () => {
     const dir = scratch();
     writeFileSync(join(dir, "uploads", "user-a", "big"), PNG);
     const entries = [entry("m1", "看大图", [
       { id: "big", name: "big.png", size: 5 * 1024 * 1024 + 1, mime: "image/png", kind: "image" },
     ])];
-    const vision = presentForModel(entries, { vision: true, dataDir: dir, userId: "user-a" });
+    const vision = await presentForModel(entries, { vision: true, dataDir: dir, userId: "user-a" });
     const encoded = JSON.stringify(vision[0]?.message);
     expect(encoded).toContain("附件：/home/bot/uploads/m1/big.png");
     expect(encoded).toContain("超过 5 MB");
     expect(encoded).not.toContain(PNG.toString("base64"));
   });
 
-  it("resends the image for two later user turns and then keeps only the path", () => {
+  it("resends the image for two later user turns and then keeps only the path", async () => {
     const dir = scratch();
     writeFileSync(join(dir, "uploads", "user-a", "img"), PNG);
     const image = entry("m1", "看一下", [
@@ -62,8 +62,8 @@ describe("model attachment notes", () => {
       image,
       ...Array.from({ length: count }, (_, index) => entry(`u${index}`, "继续", [])),
     ];
-    const kept = presentForModel(withLater(2), { vision: true, dataDir: dir, userId: "user-a" });
-    const dropped = presentForModel(withLater(3), { vision: true, dataDir: dir, userId: "user-a" });
+    const kept = await presentForModel(withLater(2), { vision: true, dataDir: dir, userId: "user-a" });
+    const dropped = await presentForModel(withLater(3), { vision: true, dataDir: dir, userId: "user-a" });
     expect(JSON.stringify(kept[0]?.message)).toContain(PNG.toString("base64"));
     expect(JSON.stringify(dropped[0]?.message)).not.toContain(PNG.toString("base64"));
     expect(JSON.stringify(dropped[0]?.message)).toContain("附件：/home/bot/uploads/m1/dot.png");

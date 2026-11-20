@@ -16,6 +16,7 @@ import { openDatabase, type AppDatabase } from "../db/index.js";
 import { ensureDevUser } from "../db/users.js";
 import { createSession } from "../session.js";
 import { UploadRejected, cleanupUnreferencedUploads, saveUpload } from "./store.js";
+import { localUploadStorage } from "./storage.js";
 
 const MAX_FILE = 25 * 1024 * 1024;
 const MAX_USER = 2 * 1024 * 1024 * 1024;
@@ -298,7 +299,7 @@ describe("uploads", () => {
       now: new Date(now.getTime() - DAY - 60_000),
     });
     attachMessage(db, "user-a", kept.id);
-    expect(cleanupUnreferencedUploads(db, dir, now)).toBe(1);
+    expect(await cleanupUnreferencedUploads(db, localUploadStorage(dir), now)).toBe(1);
     expect(existsSync(join(dir, "uploads", "user-a", stale.id))).toBe(false);
     expect(readFileSync(join(dir, "uploads", "user-a", fresh.id)).toString()).toBe("fresh");
     expect(readFileSync(join(dir, "uploads", "user-a", kept.id)).toString()).toBe("kept");

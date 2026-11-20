@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { avatarFile } from "../agent/profile-tool.js";
 import type { ChatService } from "../agent/service.js";
 import { ChatError } from "../agent/service.js";
@@ -19,7 +19,7 @@ import { memoryRepository } from "../db/memories.js";
 import { quotaRepository } from "../db/quotas.js";
 import type { CredentialProvider } from "../providers.js";
 import { userScope } from "../scope.js";
-import { ownedUploadPath } from "../uploads/store.js";
+import type { UploadStorage } from "../uploads/storage.js";
 
 export interface ChatRouteDeps {
   db: AppDatabase;
@@ -31,6 +31,7 @@ export interface ChatRouteDeps {
   ensureMachine: (userId: string) => Promise<void>;
   tasks: Map<string, { activeMs: number; segmentStartedAt: number | null }>;
   now: () => Date;
+  uploads: UploadStorage;
 }
 
 export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): void {
@@ -165,8 +166,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
       const uploadIds = chat.deleteConversation(scope, request.params.id);
       if (!uploadIds) return reply.code(404).send({ error: "找不到对话" });
       for (const uploadId of uploadIds) {
-        const path = ownedUploadPath(deps.config.dataDir, scope.userId, uploadId);
-        if (path) rmSync(path, { force: true });
+        await deps.uploads.remove(scope.userId, uploadId);
       }
       return { ok: true };
     } catch (error) {

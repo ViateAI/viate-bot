@@ -142,6 +142,15 @@ Docker socket 访问相当于该 daemon 的 root 权限；不要用 `chmod 666` 
 | `VB_VIATE_CLIENT_SECRET` | 空 | viate 服务客户端密钥 |
 | `VB_ADMIN_EMAILS` | 空 | 逗号分隔。可信邮箱命中则登录后是管理员 |
 | `VB_DATA_DIR` | `/data` | SQLite、密钥和应用归档目录。库文件是 `$VB_DATA_DIR/viate-bot.sqlite` |
+| `VB_UPLOAD_STORAGE` | `local` | `local` 或 `s3`。聊天附件仍由控制面保存。下载继续由控制面代理，不发预签名 URL |
+| `VB_S3_BUCKET` | 空 | `s3` 时必填 |
+| `VB_S3_REGION` | 空 | `s3` 时必填 |
+| `VB_S3_ENDPOINT` | 空 | 可选，S3 兼容服务地址，例如 `https://s3.example` |
+| `VB_S3_FORCE_PATH_STYLE` | 关 | 只有 `1` 开启 path-style |
+| `VB_S3_PREFIX` | 空 | 可选键前缀。`team` 的对象键是 `team/uploads/<用户 id>/<上传 id>`。原始文件名不会进入键 |
+| `VB_S3_ACCESS_KEY_ID` | 空 | 可选。和 `VB_S3_SECRET_ACCESS_KEY` 同时填写，或同时留空以使用 SDK 默认凭据链。只填一个会启动失败 |
+| `VB_S3_SECRET_ACCESS_KEY` | 空 | 可选密钥。不会写入日志或错误响应 |
+| `VB_UPLOAD_STORAGE_ACCEPT_SWITCH` | 关 | 只有 `1` 允许在已有附件时更改 `VB_UPLOAD_STORAGE`。旧对象不迁移、不删除。聊天不能再预览、下载或发送它们。已经投递到 bot 机器上的副本不变 |
 | `VB_MACHINE_IMAGE` | `viate-bot/machine:dev` | 新建机器使用的镜像标签。未设置时再读 `VB_MACHINE_IMAGE_DEFAULT`，仍为空才用左边的缺省。发布镜像会把 `VB_MACHINE_IMAGE_DEFAULT` 设成同一版本的 `ghcr.io/viateai/viate-bot-machine:vX.Y.Z`。从源码运行不要设置它 |
 | `VB_IDLE_STOP_MINUTES` | `120` | 空闲多久后停机，单位分钟。非负整数。`0` 表示空闲条件一满足就停机 |
 | `VB_MAX_RUNNING_TASKS` | `20` | 控制面全局同时处于运行中的任务上限。非负整数。`0` 表示不再开始新任务 |
@@ -152,6 +161,8 @@ Docker socket 访问相当于该 daemon 的 root 权限；不要用 `chmod 666` 
 | `VB_DEV` | 关 | 只有 `1` 打开 `/dev/*` 和 `machine` 命令 |
 
 `VB_RATE_MBIT`、`VB_HASHLIMIT`、`VB_HASHLIMIT_BURST`、`VB_CONNLIMIT` 只给 WSL 里的防火墙脚本用，不是控制面配置。见 `deploy/rancher-desktop/README.md`。
+
+更改 `VB_UPLOAD_STORAGE` 不会复制附件。第一次以 `local` 启动会记下这个后端，已经上传的文件仍然可以读。没有记录且库里已有附件时，第一次就设成 `s3` 按从 local 切换处理，未设置 `VB_UPLOAD_STORAGE_ACCEPT_SWITCH=1` 则进程拒绝启动。之后如果 `uploads` 表是空的，换后端会直接记下。如果已经有附件，更换后端也会拒绝启动，直到该变量设为 `1`。确认并重启后，只有新后端上的附件可以预览、下载和发送。清理任务不会删除旧后端上的文件。同一种后端只改桶、地址或前缀是已知限制：不会要求确认，已有附件也不会标成不可用（HTTP 410）。
 
 ## Windows + Rancher Desktop
 

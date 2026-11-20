@@ -1,15 +1,18 @@
-import { createReadStream, existsSync } from "node:fs";
 import { Readable } from "node:stream";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { authenticated } from "../auth.js";
 import type { AppDatabase } from "../db/index.js";
 import { userScope, type UserScope } from "../scope.js";
 import { openMultipartFile } from "./multipart.js";
-import { UploadRejected, findOwnedUpload, ownedUploadPath, saveUpload } from "./store.js";
+import type { UploadStorage } from "./storage.js";
+import { UploadRejected, findOwnedUpload, saveUpload } from "./store.js";
+import { uploadPredatesStorage } from "./switch.js";
 
 export interface UploadRouteDeps {
   db: AppDatabase;
   dataDir: string;
+  storage: UploadStorage;
+  since: string;
   now: () => Date;
 }
 
@@ -38,6 +41,7 @@ export function registerUploadRoutes(app: FastifyInstance, deps: UploadRouteDeps
       const saved = await saveUpload({
         db: deps.db,
         dataDir: deps.dataDir,
+        storage: deps.storage,
         userId: scope.userId,
         filename: opened.filename,
         stream: opened.file,
@@ -65,12 +69,20 @@ export function registerUploadRoutes(app: FastifyInstance, deps: UploadRouteDeps
     const scope = scopeOf(request, reply);
     if (!scope) return;
     const row = findOwnedUpload(deps.db, scope.userId, request.params.id);
-    const path = row ? ownedUploadPath(deps.dataDir, scope.userId, row.id) : undefined;
-    if (!row || !path || !existsSync(path)) return reply.code(404).send({ error: "\u627e\u4e0d\u5230\u9644\u4ef6" });
-    if (row.kind === "image") {
-      return reply.header("x-content-type-options", "nosniff").type(row.mime).send(createReadStream(path));
+    if (!row) return reply.code(404).send({ error: "\u627e\u4e0d\u5230\u9644\u4ef6" });
+    if (uploadPredatesStorage(row.createdAt, deps.since)) {
+      return reply.code(410).send({ error: "附件存储已切换，原文件不可用" });
     }
-    return reply.header("content-disposition", contentDisposition(row.name)).type(row.mime).send(createReadStream(path));
+    let stream: Readable;
+    try {
+      stream = await deps.storage.get(scope.userId, row.id);
+    } catch {
+      return reply.code(404).send({ error: "\u627e\u4e0d\u5230\u9644\u4ef6" });
+    }
+    if (row.kind === "image") {
+      return reply.header("x-content-type-options", "nosniff").type(row.mime).send(stream);
+    }
+    return reply.header("content-disposition", contentDisposition(row.name)).type(row.mime).send(stream);
   });
 }
 

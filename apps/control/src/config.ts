@@ -2,6 +2,17 @@ import { join } from "node:path";
 
 export type IntegrationName = "none" | "viate";
 export type ModelApi = "openai-completions" | "openai-responses";
+export type UploadStorageName = "local" | "s3";
+
+export interface S3UploadConfig {
+  bucket: string;
+  region: string;
+  endpoint: string;
+  forcePathStyle: boolean;
+  prefix: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+}
 
 /** 只在 VB_INTEGRATION=viate 时从环境变量读入。缺项留空，启动时不报错。 */
 export interface ServiceCredentials {
@@ -51,6 +62,10 @@ export interface ControlConfig {
   dev: boolean;
   databasePath: string;
   secretKeyPath: string;
+  uploadStorage: UploadStorageName;
+  /** 只有 VB_UPLOAD_STORAGE_ACCEPT_SWITCH=1 才允许在已有附件时更换后端。 */
+  acceptUploadStorageSwitch: boolean;
+  s3: S3UploadConfig;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig {
@@ -94,6 +109,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig 
     dev: env.VB_DEV === "1",
     databasePath: join(dataDir, "viate-bot.sqlite"),
     secretKeyPath: join(dataDir, "secret.key"),
+    uploadStorage: uploadStorageName(env),
+    acceptUploadStorageSwitch: env.VB_UPLOAD_STORAGE_ACCEPT_SWITCH?.trim() === "1",
+    s3: {
+      bucket: optional(env, "VB_S3_BUCKET", ""),
+      region: optional(env, "VB_S3_REGION", ""),
+      endpoint: optional(env, "VB_S3_ENDPOINT", ""),
+      forcePathStyle: env.VB_S3_FORCE_PATH_STYLE?.trim() === "1",
+      prefix: optional(env, "VB_S3_PREFIX", ""),
+      accessKeyId: optional(env, "VB_S3_ACCESS_KEY_ID", ""),
+      secretAccessKey: optional(env, "VB_S3_SECRET_ACCESS_KEY", ""),
+    },
   };
   if (integration === "viate") {
     config.serviceCredentials = {
@@ -102,6 +128,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig 
       clientSecret: optional(env, "VB_VIATE_CLIENT_SECRET", ""),
     };
   }
+  requireUploadStorage(config);
   return config;
 }
 
@@ -194,4 +221,22 @@ function integrationName(env: NodeJS.ProcessEnv): IntegrationName {
   if (raw === undefined || raw.trim() === "" || raw.trim() === "none") return "none";
   if (raw.trim() === "viate") return "viate";
   throw new Error(`VB_INTEGRATION 必须是 none 或 viate，收到 "${raw}"`);
+}
+
+function uploadStorageName(env: NodeJS.ProcessEnv): UploadStorageName {
+  const raw = env.VB_UPLOAD_STORAGE;
+  if (raw === undefined || raw.trim() === "" || raw.trim() === "local") return "local";
+  if (raw.trim() === "s3") return "s3";
+  throw new Error("VB_UPLOAD_STORAGE 只能是 local 或 s3");
+}
+
+function requireUploadStorage(config: ControlConfig): void {
+  if (config.uploadStorage !== "s3") return;
+  if (config.s3.bucket === "") throw new Error("附件存储为 s3 时需要 VB_S3_BUCKET");
+  if (config.s3.region === "") throw new Error("附件存储为 s3 时需要 VB_S3_REGION");
+  const hasKey = config.s3.accessKeyId !== "";
+  const hasSecret = config.s3.secretAccessKey !== "";
+  if (hasKey !== hasSecret) {
+    throw new Error("VB_S3_ACCESS_KEY_ID 和 VB_S3_SECRET_ACCESS_KEY 必须同时设置或同时留空");
+  }
 }

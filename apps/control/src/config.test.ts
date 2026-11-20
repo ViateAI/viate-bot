@@ -82,6 +82,77 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ VB_INTEGRATION: "other" })).toThrow(/VB_INTEGRATION/);
   });
 
+  it("defaults upload storage to local and ignores partial S3 settings", () => {
+    const config = loadConfig({});
+    expect(config.uploadStorage).toBe("local");
+    expect(config.acceptUploadStorageSwitch).toBe(false);
+    expect(loadConfig({ VB_UPLOAD_STORAGE: "local", VB_S3_SECRET_ACCESS_KEY: "s3-secret-do-not-print" }).uploadStorage).toBe("local");
+    expect(loadConfig({ VB_UPLOAD_STORAGE_ACCEPT_SWITCH: "true" }).acceptUploadStorageSwitch).toBe(false);
+    expect(loadConfig({ VB_UPLOAD_STORAGE_ACCEPT_SWITCH: "1" }).acceptUploadStorageSwitch).toBe(true);
+  });
+
+  it("rejects an unknown upload backend, a missing bucket, and a single S3 credential without echoing the secret", () => {
+    expect(() => loadConfig({ VB_UPLOAD_STORAGE: "disk" })).toThrow(/VB_UPLOAD_STORAGE/);
+    const missingBucket = () =>
+      loadConfig({
+        VB_UPLOAD_STORAGE: "s3",
+        VB_S3_REGION: "us-east-1",
+        VB_S3_SECRET_ACCESS_KEY: "s3-secret-do-not-print",
+      });
+    expect(missingBucket).toThrow(/VB_S3_BUCKET/);
+    expect(() =>
+      loadConfig({
+        VB_UPLOAD_STORAGE: "s3",
+        VB_S3_BUCKET: "attachments",
+      }),
+    ).toThrow(/VB_S3_REGION/);
+    const onlySecret = () =>
+      loadConfig({
+        VB_UPLOAD_STORAGE: "s3",
+        VB_S3_BUCKET: "attachments",
+        VB_S3_REGION: "us-east-1",
+        VB_S3_SECRET_ACCESS_KEY: "s3-secret-do-not-print",
+      });
+    expect(onlySecret).toThrow(/VB_S3_ACCESS_KEY_ID/);
+    const onlyKey = () =>
+      loadConfig({
+        VB_UPLOAD_STORAGE: "s3",
+        VB_S3_BUCKET: "attachments",
+        VB_S3_REGION: "us-east-1",
+        VB_S3_ACCESS_KEY_ID: "test-access-key",
+      });
+    expect(onlyKey).toThrow(/VB_S3_SECRET_ACCESS_KEY/);
+    for (const run of [missingBucket, onlySecret, onlyKey, () => loadConfig({ VB_UPLOAD_STORAGE: "disk" })]) {
+      try {
+        run();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        expect(message).not.toContain("s3-secret-do-not-print");
+        expect(message).not.toContain("test-access-key");
+      }
+    }
+    const ready = loadConfig({
+      VB_UPLOAD_STORAGE: "s3",
+      VB_S3_BUCKET: "attachments",
+      VB_S3_REGION: "us-east-1",
+      VB_S3_ENDPOINT: "http://127.0.0.1:9",
+      VB_S3_FORCE_PATH_STYLE: "1",
+      VB_S3_PREFIX: "team",
+      VB_S3_ACCESS_KEY_ID: "test-access-key",
+      VB_S3_SECRET_ACCESS_KEY: "s3-secret-do-not-print",
+    });
+    expect(ready.uploadStorage).toBe("s3");
+    expect(ready.s3).toMatchObject({
+      bucket: "attachments",
+      region: "us-east-1",
+      endpoint: "http://127.0.0.1:9",
+      forcePathStyle: true,
+      prefix: "team",
+      accessKeyId: "test-access-key",
+    });
+    expect(JSON.stringify({ ...ready.s3, secretAccessKey: undefined })).not.toContain("s3-secret-do-not-print");
+  });
+
   it("defaults the model gateway and rejects bad values", () => {
     const config = loadConfig({});
     expect(config.modelApi).toBe("openai-completions");

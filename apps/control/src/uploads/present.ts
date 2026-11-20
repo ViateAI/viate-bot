@@ -1,8 +1,9 @@
-import { readFileSync } from "node:fs";
+import { Readable } from "node:stream";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, UserMessage } from "@earendil-works/pi-ai";
+import { localUploadStorage, type UploadStorage } from "./storage.js";
 import type { AttachmentRef } from "./store.js";
-import { ownedUploadPath, sniffUpload } from "./store.js";
+import { MAX_UPLOAD_BYTES, sniffUpload } from "./store.js";
 
 export const IMAGE_RETAIN_TURNS = 2;
 export const IMAGE_MODEL_BYTES = 5 * 1024 * 1024;
@@ -14,13 +15,25 @@ export interface PresentedEntry {
   attachments: AttachmentRef[];
 }
 
-export function presentForModel(
+export async function presentForModel(
   entries: readonly PresentedEntry[],
-  options: { vision: boolean; dataDir: string; userId: string; retainTurns?: number },
-): PresentedEntry[] {
+  options: {
+    vision: boolean;
+    userId: string;
+    dataDir?: string;
+    storage?: UploadStorage;
+    retainTurns?: number;
+    unavailable?: (id: string) => boolean;
+  },
+): Promise<PresentedEntry[]> {
+  const storage = options.storage ?? (options.dataDir === undefined ? undefined : localUploadStorage(options.dataDir));
   const retain = options.retainTurns ?? IMAGE_RETAIN_TURNS;
-  return entries.map((entry, index) => {
-    if (entry.message.role !== "user" || entry.attachments.length === 0) return { ...entry };
+  const presented: PresentedEntry[] = [];
+  for (const [index, entry] of entries.entries()) {
+    if (entry.message.role !== "user" || entry.attachments.length === 0 || !storage) {
+      presented.push({ ...entry });
+      continue;
+    }
     const later = entries.slice(index + 1).filter((item) => item.message.role === "user").length;
     const allowImages = options.vision && later <= retain;
     const lines: string[] = [];
@@ -30,12 +43,11 @@ export function presentForModel(
       : entry.message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
     for (const file of entry.attachments) {
       const remote = `/home/bot/uploads/${file.place ?? entry.id}/${file.name}`;
-      const local = ownedUploadPath(options.dataDir, options.userId, file.id);
       const tooBig = file.size > IMAGE_MODEL_BYTES;
       let bytes: Buffer | undefined;
-      if (local && !tooBig) {
+      if (!tooBig && options.unavailable?.(file.id) !== true) {
         try {
-          bytes = readFileSync(local);
+          bytes = await readBounded(await storage.get(options.userId, file.id), MAX_UPLOAD_BYTES);
         } catch {
           bytes = undefined;
         }
@@ -55,8 +67,9 @@ export function presentForModel(
       timestamp: entry.message.timestamp,
       content: images.length > 0 ? [{ type: "text", text }, ...images] : text,
     };
-    return { ...entry, message: next };
-  });
+    presented.push({ ...entry, message: next });
+  }
+  return presented;
 }
 
 /** 每一轮模型请求前按用户轮次丢掉过期图片。只改送出的副本，不改已经记下的消息。 */
@@ -82,4 +95,19 @@ function formatSize(size: number): string {
     return `${text.endsWith(".0") ? text.slice(0, -2) : text} KB`;
   }
   return `${size} B`;
+}
+
+async function readBounded(stream: Readable, max: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const piece of stream) {
+    const buf = Buffer.isBuffer(piece) ? piece : Buffer.from(piece);
+    total += buf.length;
+    if (total > max) {
+      stream.destroy();
+      throw new Error("附件超过上限");
+    }
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks);
 }

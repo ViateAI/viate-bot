@@ -14,6 +14,7 @@
     "machine": "tsx src/dev-machine.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1172.0",
     "@earendil-works/pi-agent-core": "1.5.2",
     "@earendil-works/pi-ai": "1.5.2",
     "@earendil-works/pi-schema": "1.5.2",

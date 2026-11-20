@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { createWriteStream, existsSync, mkdirSync, rmSync, type WriteStream } from "node:fs";
-import { rename, rm } from "node:fs/promises";
+import { createWriteStream, mkdirSync, type WriteStream } from "node:fs";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import type { AppDatabase } from "../db/index.js";
 import { ulid } from "../id.js";
+import { localUploadStorage, type UploadStorage } from "./storage.js";
+import { uploadPredatesStorage } from "./switch.js";
 
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const MAX_USER_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
@@ -50,6 +52,7 @@ export interface AttachmentRef {
 export interface SaveUploadInput {
   db: AppDatabase;
   dataDir: string;
+  storage?: UploadStorage;
   userId: string;
   filename: string;
   stream: Readable;
@@ -59,10 +62,11 @@ export interface SaveUploadInput {
 export async function saveUpload(input: SaveUploadInput): Promise<SavedUpload> {
   if (!safeSegment(input.userId)) throw new UploadRejected("\u627e\u4e0d\u5230\u7528\u6237", 404);
   const id = ulid(input.now.getTime());
+  const storage = input.storage ?? localUploadStorage(input.dataDir);
   const dir = join(input.dataDir, "uploads", input.userId);
   mkdirSync(dir, { recursive: true });
   const partPath = join(dir, `${id}.part`);
-  const finalPath = join(dir, id);
+  let inserted = false;
   const file = createWriteStream(partPath);
   const hasher = createHash("sha256");
   const heads: Buffer[] = [];
@@ -106,7 +110,13 @@ export async function saveUpload(input: SaveUploadInput): Promise<SavedUpload> {
       kind: sniffed.kind,
       createdAt,
     });
-    await rename(partPath, finalPath);
+    inserted = true;
+    await storage.put(input.userId, id, partPath, size);
+    try {
+      await rm(partPath, { force: true });
+    } catch {
+      // 正式对象已经写入。临时文件留着不影响读取。
+    }
     return {
       id,
       userId: input.userId,
@@ -127,6 +137,15 @@ export async function saveUpload(input: SaveUploadInput): Promise<SavedUpload> {
       await closed.promise;
     }
     await rm(partPath, { force: true });
+    if (inserted) {
+      input.db.$client.prepare("delete from uploads where id=? and user_id=? and message_id is null").run(id, input.userId);
+      try {
+        await storage.remove(input.userId, id);
+      } catch {
+        // 对象删除失败不能把存储服务的响应文本带回客户端。
+      }
+      if (!(error instanceof UploadRejected)) throw new UploadRejected("无法保存附件", 502);
+    }
     throw error;
   }
 }
@@ -143,7 +162,13 @@ export function findOwnedUpload(db: AppDatabase, userId: string, id: string): Sa
   return row;
 }
 
-export function readAttachments(db: AppDatabase, userId: string, uploadIds: readonly string[], dataDir: string): AttachmentRef[] {
+export async function readAttachments(
+  db: AppDatabase,
+  userId: string,
+  uploadIds: readonly string[],
+  storage: UploadStorage,
+  since = "1970-01-01T00:00:00.000Z",
+): Promise<AttachmentRef[]> {
   if (uploadIds.length > MAX_MESSAGE_ATTACHMENTS) throw new UploadRejected("一条消息最多 10 个附件", 400);
   if (new Set(uploadIds).size !== uploadIds.length) throw new UploadRejected("附件重复", 400);
   const refs: AttachmentRef[] = [];
@@ -152,8 +177,8 @@ export function readAttachments(db: AppDatabase, userId: string, uploadIds: read
     const row = findOwnedUpload(db, userId, id);
     if (!row) throw new UploadRejected("找不到附件", 404);
     if (row.messageId !== null) throw new UploadRejected("附件已经发送过", 409);
-    const ready = ownedUploadPath(dataDir, userId, row.id);
-    if (!ready || !existsSync(ready)) throw new UploadRejected("附件还没准备好", 409);
+    if (uploadPredatesStorage(row.createdAt, since)) throw new UploadRejected("附件无效", 409);
+    if (!(await storage.exists(userId, row.id))) throw new UploadRejected("附件还没准备好", 409);
     total += row.size;
     refs.push({ id: row.id, name: row.name, size: row.size, mime: row.mime, kind: row.kind });
   }
@@ -193,22 +218,22 @@ export function clearUnclaimedDeliveries(db: AppDatabase, userId: string, ids: r
   }
 }
 
-export function ownedUploadPath(dataDir: string, userId: string, id: string): string | undefined {
-  if (!safeSegment(userId) || !safeSegment(id)) return undefined;
-  return join(dataDir, "uploads", userId, id);
-}
-
-export function cleanupUnreferencedUploads(db: AppDatabase, dataDir: string, now: Date, maxAgeMs = UNREFERENCED_UPLOAD_MS): number {
+export async function cleanupUnreferencedUploads(
+  db: AppDatabase,
+  storage: UploadStorage,
+  now: Date,
+  since = "1970-01-01T00:00:00.000Z",
+  maxAgeMs = UNREFERENCED_UPLOAD_MS,
+): Promise<number> {
   const cutoff = new Date(now.getTime() - maxAgeMs).toISOString();
   const rows = db.$client
-    .prepare("select id, user_id as userId from uploads where message_id is null and created_at <= ?")
-    .all(cutoff) as Array<{ id: string; userId: string }>;
+    .prepare("select id, user_id as userId, created_at as createdAt from uploads where message_id is null and created_at <= ?")
+    .all(cutoff) as Array<{ id: string; userId: string; createdAt: string }>;
   let removed = 0;
   for (const row of rows) {
-    const path = ownedUploadPath(dataDir, row.userId, row.id);
-    if (!path) continue;
+    if (uploadPredatesStorage(row.createdAt, since)) continue;
     try {
-      rmSync(path, { force: true });
+      await storage.remove(row.userId, row.id);
     } catch {
       continue;
     }
