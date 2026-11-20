@@ -336,34 +336,34 @@ describe("admin http", () => {
     db.$client.close();
   });
 
-  it("keeps fs confine off until an administrator changes it, and writes an audit row", async () => {
+  it("keeps fs confine on until an administrator turns it off, and writes an audit row", async () => {
     const { app, db, admin, user } = await boot();
     try {
       const before = await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) });
       expect(before.statusCode).toBe(200);
-      expect(before.json()).toMatchObject({ fsConfine: false });
+      expect(before.json()).toMatchObject({ fsConfine: true });
 
       const denied = await app.inject({
         method: "PUT",
         url: "/api/admin/fs-confine",
         headers: headers(user, true),
-        payload: { enabled: true },
+        payload: { enabled: false },
       });
       expect(denied.statusCode).toBe(404);
-      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({ fsConfine: false });
+      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({ fsConfine: true });
       expect(auditRepository(db).list(adminScope("admin-1"), 20).some((row) => row.action === "fs.confine")).toBe(false);
 
       const saved = await app.inject({
         method: "PUT",
         url: "/api/admin/fs-confine",
         headers: headers(admin, true),
-        payload: { enabled: true },
+        payload: { enabled: false },
       });
       expect(saved.statusCode).toBe(200);
-      expect(saved.json()).toEqual({ fsConfine: true });
-      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({ fsConfine: true });
+      expect(saved.json()).toEqual({ fsConfine: false });
+      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({ fsConfine: false });
       const audit = auditRepository(db).list(adminScope("admin-1"), 20);
-      expect(audit.some((row) => row.action === "fs.confine" && JSON.stringify(row.attrs).includes('"enabled":true'))).toBe(true);
+      expect(audit.some((row) => row.action === "fs.confine" && JSON.stringify(row.attrs).includes('"enabled":false'))).toBe(true);
 
       const invalid = await app.inject({
         method: "PUT",
@@ -372,16 +372,16 @@ describe("admin http", () => {
         payload: { enabled: "yes" },
       });
       expect(invalid.statusCode).toBe(400);
-      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({ fsConfine: true });
+      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({ fsConfine: false });
 
       const cleared = await app.inject({
         method: "PUT",
         url: "/api/admin/fs-confine",
         headers: headers(admin, true),
-        payload: { enabled: false },
+        payload: { enabled: true },
       });
       expect(cleared.statusCode).toBe(200);
-      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({ fsConfine: false });
+      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({ fsConfine: true });
     } finally {
       await app.close();
       db.$client.close();

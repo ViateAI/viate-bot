@@ -606,7 +606,7 @@ export function AdminSettings() {
   const [saved, setSaved] = useState("");
   const [confineDraft, setConfineDraft] = useState<boolean | null>(null);
   const confineClient = useQueryClient();
-  const confineOn = confineDraft ?? settings.data?.fsConfine ?? false;
+  const confineOn = confineDraft ?? settings.data?.fsConfine ?? true;
   const saveConfine = useMutation({
     mutationFn: (enabled: boolean) => api("/api/admin/fs-confine", { method: "PUT", body: JSON.stringify({ enabled }) }),
     onSuccess: async () => {
@@ -657,7 +657,7 @@ export function AdminSettings() {
             saveConfine.mutate(enabled);
           }}
         />
-        <span>关闭时文件工具可以访问容器内 bot 用户读得到的路径；打开时只能用 /home/bot 和 /tmp；shell 命令正文两种情况下都不按目录拦截。</span>
+        <span>目录限制，默认开启。打开时文件工具和 shell 工作目录只能用 /home/bot 和 /tmp；关闭后可以访问容器内 bot 用户读得到的路径。shell 命令正文两种情况下都不按目录拦截。</span>
       </label>
       <label className="grid gap-1 text-sm">
         平台提示词（版本 {settings.data?.platformPrompt.version ?? ""}）

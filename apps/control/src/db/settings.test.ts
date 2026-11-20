@@ -30,20 +30,20 @@ describe("platform prompt", () => {
 });
 
 describe("fs confine setting", () => {
-  it("is off when the row is missing and stores only a boolean enabled flag", () => {
+  it("is on when the row is missing and turns off only for an explicit false", () => {
     const db = openDatabase(":memory:");
     migrate(db, { migrationsFolder: fileURLToPath(new URL("../../drizzle", import.meta.url)) });
     const settings = settingsRepository(db);
-    expect(settings.fsConfine()).toBe(false);
+    expect(settings.fsConfine()).toBe(true);
     settings.setFsConfine(true);
     expect(settings.getJson("fs.confine")).toEqual({ enabled: true });
     expect(settings.fsConfine()).toBe(true);
     settings.setFsConfine(false);
     expect(settings.fsConfine()).toBe(false);
     settings.setJson("fs.confine", { enabled: "yes" });
-    expect(settings.fsConfine()).toBe(false);
+    expect(settings.fsConfine()).toBe(true);
     settings.setJson("fs.confine", null);
-    expect(settings.fsConfine()).toBe(false);
+    expect(settings.fsConfine()).toBe(true);
     db.$client.close();
   });
 });

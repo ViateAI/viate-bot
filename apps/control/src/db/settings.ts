@@ -111,11 +111,11 @@ export function settingsRepository(db: AppDatabase) {
     setDefaultChannel(value: string | null): void {
       this.setJson(DEFAULT_CHANNEL_KEY, value);
     },
-    /** 没有记录、或 enabled 不是 true，都是关闭。 */
+    /** 没有可用记录时开启。只有显式 enabled: false 才关闭。 */
     fsConfine(): boolean {
       const current = this.getJson(FS_CONFINE_KEY);
-      if (!current || typeof current !== "object" || Array.isArray(current) || !("enabled" in current)) return false;
-      return current.enabled === true;
+      if (!current || typeof current !== "object" || Array.isArray(current) || !("enabled" in current)) return true;
+      return current.enabled !== false;
     },
     setFsConfine(enabled: boolean): void {
       this.setJson(FS_CONFINE_KEY, { enabled });
