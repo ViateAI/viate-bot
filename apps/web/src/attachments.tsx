@@ -124,7 +124,7 @@ export function PendingAttachments({
 }) {
   if (items.length === 0) return null;
   return (
-    <ul data-testid="pending-attachments" className="mx-auto mb-2 flex w-full max-w-3xl gap-2 overflow-x-auto px-4">
+    <ul data-testid="pending-attachments" className="dock-slot flex gap-2 overflow-x-auto">
       {items.map((item) => (
         <li key={item.id} data-testid="pending-attachment" className="flex items-center gap-2 rounded-2xl bg-elevated px-2 py-2 text-sm ring-1 ring-line">
           {item.kind === "image" && item.preview ? (

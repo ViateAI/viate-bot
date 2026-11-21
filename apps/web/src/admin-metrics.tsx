@@ -69,48 +69,52 @@ export function AdminMetrics() {
               <p className="mt-2 text-xs text-muted">计划时刻后 2 分钟内开始算按时。跳过不计入按时率。控制面停机错过的次数记在「错过」。</p>
             </div>
           ) : null}
-          <div>
-            <h3 className="mb-2 text-sm text-muted">资源异常</h3>
-            <ul className="grid gap-1 text-sm">
-              {data.anomalies.length === 0 ? <li className="text-muted">没有</li> : null}
-              {data.anomalies.map((item) => (
-                <li key={`${item.machineId}-${item.kind}`}>
-                  <ScanRow tone="dark" subject={item.machineId} status={item.kind} />
-                </li>
-              ))}
-            </ul>
+          <div className="grid gap-4 md:grid-cols-2">
+            <section className={`rounded-xl border p-4 ${data.anomalies.length > 0 ? "border-danger-border bg-danger-bg" : "border-line bg-surface"}`}>
+              <h3 className={`mb-2 text-sm ${data.anomalies.length > 0 ? "text-danger" : "text-muted"}`}>资源异常</h3>
+              <ul className="grid gap-1 text-sm">
+                {data.anomalies.length === 0 ? <li className="text-muted">没有</li> : null}
+                {data.anomalies.map((item) => (
+                  <li key={`${item.machineId}-${item.kind}`}>
+                    <ScanRow tone="dark" subject={item.machineId} status={item.kind} />
+                  </li>
+                ))}
+              </ul>
+            </section>
+            <section className={`rounded-xl border p-4 ${data.alerts.length > 0 ? "border-danger-border bg-danger-bg" : "border-line bg-surface"}`}>
+              <h3 className={`mb-2 text-sm ${data.alerts.length > 0 ? "text-danger" : "text-muted"}`}>站内告警</h3>
+              <ul className="grid gap-1 text-sm">
+                {data.alerts.length === 0 ? <li className="text-muted">没有</li> : null}
+                {data.alerts.map((item) => (
+                  <li key={`${item.kind}-${item.target}`}>
+                    <ScanRow tone="dark" subject={item.target} status={item.kind} />
+                  </li>
+                ))}
+              </ul>
+            </section>
           </div>
-          <div>
-            <h3 className="mb-2 text-sm text-muted">失败类别</h3>
-            <ul className="grid gap-1 text-sm">
-              {data.failureClasses.length === 0 ? <li className="text-muted">没有</li> : null}
-              {data.failureClasses.map((item) => (
-                <li key={item.errorClass}>
-                  <ScanRow tone="dark" subject={item.errorClass} status={String(item.count)} />
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div>
-            <h3 className="mb-2 text-sm text-muted">活跃趋势</h3>
-            <ul className="grid gap-1 text-sm">
-              {data.activeTrend.map((item) => (
-                <li key={item.day}>
-                  <ScanRow tone="dark" subject={item.day} status={String(item.count)} />
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div>
-            <h3 className="mb-2 text-sm text-muted">站内告警</h3>
-            <ul className="grid gap-1 text-sm">
-              {data.alerts.length === 0 ? <li className="text-muted">没有</li> : null}
-              {data.alerts.map((item) => (
-                <li key={`${item.kind}-${item.target}`}>
-                  <ScanRow tone="dark" subject={item.target} status={item.kind} />
-                </li>
-              ))}
-            </ul>
+          <div className="grid gap-4 md:grid-cols-2">
+            <section className="rounded-xl border border-line bg-surface p-4">
+              <h3 className="mb-2 text-sm text-muted">失败类别</h3>
+              <ul className="grid gap-1 text-sm">
+                {data.failureClasses.length === 0 ? <li className="text-muted">没有</li> : null}
+                {data.failureClasses.map((item) => (
+                  <li key={item.errorClass}>
+                    <ScanRow tone="dark" subject={item.errorClass} status={String(item.count)} />
+                  </li>
+                ))}
+              </ul>
+            </section>
+            <section className="rounded-xl border border-line bg-surface p-4">
+              <h3 className="mb-2 text-sm text-muted">活跃趋势</h3>
+              <ul className="grid gap-1 text-sm">
+                {data.activeTrend.map((item) => (
+                  <li key={item.day}>
+                    <ScanRow tone="dark" subject={item.day} status={String(item.count)} />
+                  </li>
+                ))}
+              </ul>
+            </section>
           </div>
         </>
       ) : null}
@@ -144,7 +148,7 @@ function Stat(props: { label: string; value: string }) {
   return (
     <div className="rounded-xl border border-line bg-surface px-3 py-2">
       <dt className="text-muted">{props.label}</dt>
-      <dd>{props.value}</dd>
+      <dd className="mt-1 text-2xl font-semibold tabular-nums">{props.value}</dd>
     </div>
   );
 }

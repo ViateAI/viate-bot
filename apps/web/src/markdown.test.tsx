@@ -63,6 +63,9 @@ describe("markdown replies", () => {
     expect(html).toContain("const value");
     expect(html).toContain("复制");
     expect(html).toContain("overflow-x-auto");
+    const fenced = html.slice(html.indexOf("<pre"));
+    expect(fenced).not.toContain("bg-code px-1");
+    expect(html.slice(0, html.indexOf("<pre"))).toContain("bg-code px-1");
     expect(html).toContain("<table");
     expect(html).toContain("<hr");
     expect(html).toContain('href="https://example.com/docs"');

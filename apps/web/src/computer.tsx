@@ -55,15 +55,17 @@ export function Computer({ botId }: { botId: string }) {
   return (
     <section className={owned ? "screen-own" : "screen-watch"}>
       <div className={owned ? "lease" : "watch-bar"}>
-        <strong>{owned ? "接管中" : "只读观看"}</strong>
-        <span>{owned ? "租约生效，可以输入" : "不能输入"}</span>
-        <button type="button" disabled={!lease || lease.state !== "requested"} onClick={() => void change("grant")} className="ui-btn">接管</button>
-        <button type="button" disabled={!owned} onClick={() => void change("release")} className="ui-btn-ghost">交还</button>
+        <span className="screen-status">
+          <strong>{owned ? "接管中" : "只读观看"}</strong>
+          <span>{owned ? "可以输入" : "不能输入"}</span>
+        </span>
+        <span className="screen-actions">
+          <button type="button" disabled={!lease || lease.state !== "requested"} onClick={() => void change("grant")} className="ui-btn">接管</button>
+          <button type="button" disabled={!owned} onClick={() => void change("release")} className="ui-btn-ghost">交还</button>
+        </span>
       </div>
-      <p className="px-3 py-2 text-xs leading-5 text-muted">
-        你的各个 bot 共用这一块桌面和同一个浏览器。切换 bot 不会换成另一块屏幕，也不是安全边界。现在只能看；接管生效后才能输入。别的用户和管理员看不到这块屏幕。
-      </p>
-      {error ? <p role="alert" className="ui-alert mx-3">{error}</p> : null}
+      <p className="screen-note">各 bot 共用这块桌面。只能看；接管后才能输入。</p>
+      {error ? <p role="alert" className="screen-error">{error}</p> : null}
       <div ref={target} className="screen-canvas" />
     </section>
   );

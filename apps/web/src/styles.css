@@ -108,6 +108,7 @@
   --color-ok-bg: var(--green-bg);
   --color-danger: var(--red-fg);
   --color-danger-bg: var(--red-bg);
+  --color-danger-border: var(--red-border);
   --color-info: var(--info-fg);
   --color-info-bg: var(--info-bg);
   --font-sans: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, sans-serif;
@@ -382,6 +383,36 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
+.triage a.triage-amber,
+.triage a.triage-bad,
+.triage a.triage-info {
+  font-weight: 650;
+}
+
+.triage a.triage-amber {
+  background: var(--amber-bg);
+  border-color: var(--amber-soft-border);
+  color: var(--amber-fg);
+}
+
+.triage a.triage-bad {
+  background: var(--red-bg);
+  border-color: var(--red-border);
+  color: var(--red-fg);
+}
+
+.triage a.triage-info {
+  background: var(--info-bg);
+  border-color: var(--info-border);
+  color: var(--info-fg);
+}
+
+.triage a.triage-amber strong,
+.triage a.triage-bad strong,
+.triage a.triage-info strong {
+  color: inherit;
+}
+
 .quota-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -393,6 +424,21 @@ select {
 .quota-grid > [role="alert"] {
   grid-column: 1 / -1;
   justify-self: start;
+}
+
+.bot-row {
+  position: relative;
+}
+
+.bot-row.is-selected::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--primary);
 }
 
 .stage-more {
@@ -553,7 +599,7 @@ select {
 }
 
 .stage-bar h1 {
-  min-width: 0;
+  min-width: 4.5rem;
   flex: 1;
   font-size: 15px;
   font-weight: 650;
@@ -566,7 +612,7 @@ select {
   flex: none;
   display: inline-flex;
   align-items: center;
-  max-width: 42%;
+  max-width: 36%;
   min-height: 22px;
   padding: 0 8px;
   border-radius: 999px;
@@ -634,7 +680,8 @@ select {
 }
 
 .notice-card {
-  max-width: min(68ch, 100%);
+  margin-left: 40px;
+  max-width: min(68ch, calc(100% - 40px));
   border-radius: 12px;
   border: 1px solid var(--info-border);
   background: var(--info-bg);
@@ -643,13 +690,35 @@ select {
 }
 
 .tool-card {
-  max-width: min(68ch, 92%);
+  margin-left: 40px;
+  max-width: min(68ch, calc(100% - 40px));
   border-radius: 12px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
   color: var(--fg-secondary);
   padding: 8px 12px;
   font-size: 12px;
+}
+
+.tool-card-title {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.dock-slot {
+  box-sizing: border-box;
+  width: min(100%, 760px);
+  margin-inline: auto;
+  margin-bottom: 8px;
+  padding-inline: 12px;
+  flex: none;
+}
+
+.dock-slot-scroll {
+  max-height: 42vh;
+  overflow-y: auto;
 }
 
 .composer-dock {
@@ -669,7 +738,7 @@ select {
 
 .composer-bar {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 6px;
   min-width: 0;
 }
@@ -690,8 +759,6 @@ select {
 }
 
 .hatch-banner {
-  width: min(100%, 760px);
-  margin: 0 auto 12px;
   padding: 12px;
   border-radius: 12px;
   border: 1px solid var(--amber-soft-border);
@@ -748,11 +815,49 @@ select {
 .watch-bar,
 .lease {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
   flex: none;
+}
+
+.screen-status {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.screen-status span {
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.screen-actions {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.screen-note {
+  margin: 0;
+  padding: 6px 12px 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--fg-muted);
+}
+
+.screen-error {
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--red-border);
+  border-radius: 10px;
+  background: var(--red-bg);
+  color: var(--red-fg);
+  font-size: 13px;
+  text-align: center;
 }
 
 .watch-bar {
@@ -826,6 +931,10 @@ select {
 }
 
 @media (max-width: 799px) {
+  .dock-slot-scroll {
+    max-height: 40vh;
+  }
+
   .app-shell,
   .shell-user,
   .shell-admin,

@@ -168,9 +168,9 @@ export function BotSidebar({ activeId }: { activeId?: string | undefined }) {
                         to="/b/$botId"
                         params={{ botId: bot.id }}
                         aria-current={selected ? "page" : undefined}
-                        className={`flex items-center gap-3 rounded-2xl px-2 py-2 ${selected ? "bg-active shadow-[inset_2px_0_0_var(--primary)]" : "hover:bg-hover"}`}
+                        className={`bot-row flex items-center gap-2.5 rounded-xl py-1.5 pr-2 pl-3.5 ${selected ? "is-selected bg-active" : "hover:bg-hover"}`}
                       >
-                        <BotMark name={bot.name} avatarUrl={botAvatarUrl(bot.id, bot.avatar, bot.updatedAt)} presence={bot.busy ? "live" : "idle"} className="size-12 text-sm" />
+                        <BotMark name={bot.name} avatarUrl={botAvatarUrl(bot.id, bot.avatar, bot.updatedAt)} presence={bot.busy ? "live" : "idle"} className="size-10 text-xs" />
                         <span className="min-w-0">
                           <span className="flex min-w-0 items-center gap-2">
                             <span className="truncate text-[15px] font-medium text-fg">{bot.name}</span>

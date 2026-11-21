@@ -1257,7 +1257,7 @@ function AppDetail({
       : "";
 
   return (
-    <article className="grid gap-4 lg:max-h-[calc(100dvh-9rem)] lg:overflow-auto" aria-label="应用详情" data-testid="app-detail">
+    <article className="grid gap-4 rounded-xl border border-line bg-surface/50 p-4 lg:max-h-[calc(100dvh-9rem)] lg:overflow-auto" aria-label="应用详情" data-testid="app-detail">
       <div>
         <button className={`${appGhostClass} mb-3 lg:hidden`} type="button" onClick={onClose}>返回</button>
         <h2 ref={headingRef} tabIndex={-1} className="break-all text-xl font-semibold outline-none">{row.name}</h2>
@@ -1274,25 +1274,6 @@ function AppDetail({
           {appErrorText(install.error) ? <p className="mt-1 text-danger">失败原因：{appErrorText(install.error)}</p> : null}
         </div>
       ) : null}
-      {row.privateVersions.length > 0 ? <PublishStatus name={row.name} versions={row.privateVersions} onChanged={onChanged} /> : null}
-      {row.inCatalog ? (
-        <label className="grid gap-1 text-sm">
-          指定版本
-          <input
-            className={appFieldClass}
-            value={versionText}
-            spellCheck={false}
-            disabled={forced || pending !== null}
-            aria-describedby="app-version-hint"
-            onChange={(event) => setVersionText(event.target.value)}
-          />
-          <span id="app-version-hint" className="text-muted">{forced ? "管理员推送的应用不能更换版本。" : versionHint}</span>
-        </label>
-      ) : null}
-      <ConfigEditor drafts={drafts} disabled={pending !== null} onChange={updateDraft} onAdd={() => { setDirty(true); setDrafts((current) => [...current, { id: draftId(), key: "", secret: false, value: "", existingSecret: false }]); }} onRemove={(id) => { setDirty(true); setDrafts((current) => current.filter((item) => item.id !== id)); }} />
-      {installReason ? <p id="install-block-reason" className="text-sm text-muted">{installReason}</p> : null}
-      {error ? <ErrorText>{error}</ErrorText> : null}
-      {message ? <StatusText>{message}</StatusText> : null}
       <div className="flex flex-wrap gap-2">
         {showInstall ? (
           <button
@@ -1329,6 +1310,25 @@ function AppDetail({
           </button>
         ) : null}
       </div>
+      {row.privateVersions.length > 0 ? <PublishStatus name={row.name} versions={row.privateVersions} onChanged={onChanged} /> : null}
+      {row.inCatalog ? (
+        <label className="grid gap-1 text-sm">
+          指定版本
+          <input
+            className={appFieldClass}
+            value={versionText}
+            spellCheck={false}
+            disabled={forced || pending !== null}
+            aria-describedby="app-version-hint"
+            onChange={(event) => setVersionText(event.target.value)}
+          />
+          <span id="app-version-hint" className="text-muted">{forced ? "管理员推送的应用不能更换版本。" : versionHint}</span>
+        </label>
+      ) : null}
+      <ConfigEditor drafts={drafts} disabled={pending !== null} onChange={updateDraft} onAdd={() => { setDirty(true); setDrafts((current) => [...current, { id: draftId(), key: "", secret: false, value: "", existingSecret: false }]); }} onRemove={(id) => { setDirty(true); setDrafts((current) => current.filter((item) => item.id !== id)); }} />
+      {installReason ? <p id="install-block-reason" className="text-sm text-muted">{installReason}</p> : null}
+      {error ? <ErrorText>{error}</ErrorText> : null}
+      {message ? <StatusText>{message}</StatusText> : null}
       {confirm ? (
         <AppConfirmDialog
           title={confirm.title}

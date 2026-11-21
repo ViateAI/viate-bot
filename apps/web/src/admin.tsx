@@ -56,7 +56,7 @@ interface AuditRow {
 const field = "ui-field";
 const button = "ui-btn";
 const alertClass = "ui-alert";
-const machineButton = "ui-btn-ghost";
+const machineButton = "ui-btn-ghost min-h-8 px-2.5 text-xs";
 
 export function AdminLayout() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<Me>("/api/me") });
@@ -227,18 +227,19 @@ export function AdminUsers() {
     <div className="mx-auto grid w-full min-w-0 max-w-5xl gap-6 px-4 py-6 sm:px-6 sm:py-8">
       <h1 className="text-2xl font-semibold">用户</h1>
       <div className="triage" data-testid="admin-triage">
-        <Link to="/admin/app-reviews">待审发布 <strong>{reviews.data ? reviews.data.pendingCount : "…"}</strong></Link>
-        <Link to="/admin/machines">异常机器 <strong>{machines.data ? machines.data.machines.filter((item) => item.state === "error").length : "…"}</strong></Link>
-        <a href="#provision">已登录未开通 <strong>{users.data ? users.data.users.filter((user) => !user.provisioned).length : "…"}</strong></a>
+        <Link to="/admin/app-reviews" className={reviews.data && reviews.data.pendingCount > 0 ? "triage-amber" : ""}>待审发布 <strong>{reviews.data ? reviews.data.pendingCount : "…"}</strong></Link>
+        <Link to="/admin/machines" className={machines.data && machines.data.machines.some((item) => item.state === "error") ? "triage-bad" : ""}>异常机器 <strong>{machines.data ? machines.data.machines.filter((item) => item.state === "error").length : "…"}</strong></Link>
+        <a href="#provision" className={users.data && users.data.users.some((user) => !user.provisioned) ? "triage-info" : ""}>已登录未开通 <strong>{users.data ? users.data.users.filter((user) => !user.provisioned).length : "…"}</strong></a>
       </div>
       <form
         id="provision"
-        className="grid min-w-0 gap-3 rounded-xl border border-line bg-surface p-4 md:grid-cols-4"
+        className="grid min-w-0 gap-3.5 rounded-xl border border-line bg-surface p-4 md:grid-cols-4"
         onSubmit={(event) => {
           event.preventDefault();
           provision.mutate();
         }}
       >
+        <h2 className="text-sm font-semibold md:col-span-4">开通新用户</h2>
         <label className="grid min-w-0 gap-1 text-sm">
           用户
           <select data-testid="provision-user" className={`${field} w-full min-w-0`} value={userId} onChange={(event) => { setUserId(event.target.value); setEmail(""); }} required={!email.trim()}>
@@ -328,10 +329,10 @@ export function AdminUsers() {
       {users.isPending ? <p className="text-sm text-muted">正在加载用户…</p> : null}
       {users.isError ? <p role="alert" className={alertClass}>{users.error.message}</p> : null}
       {users.data && users.data.users.length === 0 ? <p className="text-sm text-muted">没有用户</p> : null}
-      <div className="@container relative min-w-0 overflow-x-auto">
+      <div className="@container relative min-w-0 overflow-x-auto rounded-xl border border-line bg-canvas">
         <style>{".vb-user-label{display:block;font-size:.75rem;line-height:1.25rem}.vb-user-table{display:block;width:100%}.vb-user-table thead{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.vb-user-table tbody{display:block}.vb-user-table tbody tr{display:grid;grid-template-columns:minmax(0,1fr) 5.5rem;column-gap:.75rem;row-gap:.25rem;padding:.75rem 0}.vb-user-table td:nth-child(1){grid-column:1;grid-row:1;min-width:0;overflow-wrap:anywhere}.vb-user-table td:nth-child(3){grid-column:2;grid-row:1;text-align:right}.vb-user-table td:nth-child(n+2):not(:nth-child(3)){grid-column:1 / -1;min-width:0;overflow-wrap:anywhere}@container (min-width: 52rem){.vb-user-label{display:none}.vb-user-table{display:table;width:100%;max-width:100%;table-layout:fixed}.vb-user-table thead{position:static;display:table-header-group;width:auto;height:auto;margin:0;overflow:visible;clip:auto;white-space:normal}.vb-user-table tbody{display:table-row-group}.vb-user-table thead tr,.vb-user-table tbody tr{display:table-row;padding:0}.vb-user-table th,.vb-user-table td{display:table-cell;text-align:left;vertical-align:top;padding:.5rem .75rem .5rem 0;overflow-wrap:anywhere}.vb-user-table th:nth-child(n+2),.vb-user-table td:nth-child(n+2){padding-left:.75rem}.vb-user-table th:nth-child(2),.vb-user-table td:nth-child(2){width:4.5rem}.vb-user-table th:nth-child(3),.vb-user-table td:nth-child(3){width:5.75rem}.vb-user-table th:nth-child(4),.vb-user-table td:nth-child(4){width:5rem}.vb-user-table th:nth-child(5),.vb-user-table td:nth-child(5){width:6rem;white-space:nowrap}.vb-user-table th:nth-child(6),.vb-user-table td:nth-child(6){width:3.5rem}.vb-user-table th:nth-child(7),.vb-user-table td:nth-child(7){width:8.25rem;white-space:nowrap}.vb-user-table th:nth-child(8),.vb-user-table td:nth-child(8){width:19rem}}"}</style>
         <table className="vb-user-table text-left text-sm">
-          <thead className="text-muted">
+          <thead className="bg-surface text-muted">
             <tr>
               <th id="vb-user-email" scope="col" className="py-2">邮箱</th>
               <th id="vb-user-name" scope="col">名字</th>
@@ -417,12 +418,12 @@ function QuotaEditor({
         }
       }}
     >
-      <label className="text-xs text-muted">bot <input data-testid="quota-bots" className={`${field} w-16`} value={maxBots} onChange={(event) => setMaxBots(event.target.value)} /></label>
-      <label className="text-xs text-muted">并发 <input data-testid="quota-tasks" className={`${field} w-16`} value={maxConcurrentTasks} onChange={(event) => setMaxConcurrentTasks(event.target.value)} /></label>
-      <label className="text-xs text-muted">定时 <input data-testid="quota-routines" className={`${field} w-16`} value={maxRoutines} onChange={(event) => setMaxRoutines(event.target.value)} /></label>
-      <label className="text-xs text-muted">预算 <input data-testid="quota-budget" className={`${field} w-24`} placeholder="沿用全局" value={taskTokenBudget} onChange={(event) => setTaskTokenBudget(event.target.value)} /></label>
-      <label className="text-xs text-muted">步数 <input data-testid="quota-steps" className={`${field} w-20`} placeholder="沿用全局" value={taskMaxSteps} onChange={(event) => setTaskMaxSteps(event.target.value)} /></label>
-      <label className="text-xs text-muted">时长秒 <input data-testid="quota-duration" className={`${field} w-24`} placeholder="沿用全局" value={taskMaxDurationSec} onChange={(event) => setTaskMaxDurationSec(event.target.value)} /></label>
+      <label className="grid gap-1 text-xs text-muted">bot <input data-testid="quota-bots" className={`${field} w-full`} value={maxBots} onChange={(event) => setMaxBots(event.target.value)} /></label>
+      <label className="grid gap-1 text-xs text-muted">并发 <input data-testid="quota-tasks" className={`${field} w-full`} value={maxConcurrentTasks} onChange={(event) => setMaxConcurrentTasks(event.target.value)} /></label>
+      <label className="grid gap-1 text-xs text-muted">定时 <input data-testid="quota-routines" className={`${field} w-full`} value={maxRoutines} onChange={(event) => setMaxRoutines(event.target.value)} /></label>
+      <label className="grid gap-1 text-xs text-muted">预算 <input data-testid="quota-budget" className={`${field} w-full`} placeholder="沿用全局" value={taskTokenBudget} onChange={(event) => setTaskTokenBudget(event.target.value)} /></label>
+      <label className="grid gap-1 text-xs text-muted">步数 <input data-testid="quota-steps" className={`${field} w-full`} placeholder="沿用全局" value={taskMaxSteps} onChange={(event) => setTaskMaxSteps(event.target.value)} /></label>
+      <label className="grid gap-1 text-xs text-muted">时长秒 <input data-testid="quota-duration" className={`${field} w-full`} placeholder="沿用全局" value={taskMaxDurationSec} onChange={(event) => setTaskMaxDurationSec(event.target.value)} /></label>
       <button className="ui-btn-ghost text-sm" type="submit">保存</button>
       {quotaError ? <p role="alert" className="text-xs text-danger">{quotaError}</p> : null}
     </form>
@@ -471,13 +472,13 @@ export function AdminMachines() {
       {machines.isPending ? <p className="text-sm text-muted">正在加载机器…</p> : null}
       {machines.isError ? <p role="alert" className={alertClass}>{machines.error.message}</p> : null}
       {machines.data && machines.data.machines.length === 0 ? <p className="text-sm text-muted">没有机器</p> : null}
-      <ul>
+      <ul className="rounded-xl border border-line bg-surface px-3">
         {(machines.data?.machines ?? []).map((machine) => (
           <li key={machine.id} data-testid="machine-row" className="text-sm">
             <ScanRow
               tone="dark"
               subject={machine.email}
-              status={machine.state}
+              status={<span className={machineTone(machine.state)}>{machine.state}</span>}
               meta={<span>{machine.spec.cpu} CPU / {machine.spec.memMb} MB · {machine.image} · {machine.createdAt} · 健康检查 {machine.lastHeartbeatAt ?? "无"}{machine.statusDetail ? <span data-testid="machine-status-detail" className="text-danger"> · {machine.statusDetail}</span> : null}</span>}
               actions={<>
                 <button data-testid="machine-stop" className={machineButton} type="button" onClick={() => run.mutate({ id: machine.id, action: "stop" })}>停止</button>
@@ -502,7 +503,8 @@ export function AdminMachines() {
           </li>
         ))}
       </ul>
-      <form className="flex flex-wrap items-end gap-3" onSubmit={onDelete}>
+      <form className="grid max-w-xl gap-3 rounded-xl border border-line bg-surface p-4" onSubmit={onDelete}>
+        <h2 className="text-sm font-medium text-danger">删除机器</h2>
         <label className="grid gap-1 text-sm">
           确认邮箱
           <input data-testid="machine-delete-email" className={field} value={email} onChange={(event) => setEmail(event.target.value)} />
@@ -511,16 +513,25 @@ export function AdminMachines() {
       </form>
       {error ? <p data-testid="machine-delete-error" className="text-sm text-danger">{error}</p> : null}
       {stats ? <p data-testid="machine-stats">{stats}</p> : null}
-      <h2 className="text-lg font-medium">审计</h2>
-      {audit.isPending ? <p className="text-sm text-muted">正在加载审计…</p> : null}
-      {audit.isError ? <p role="alert" className={alertClass}>{audit.error.message}</p> : null}
-      <ul data-testid="audit-log" className="text-sm">
-        {(audit.data?.audit ?? []).map((row) => (
-          <li key={row.id}><ScanRow tone="dark" subject={row.action} meta={`${row.ts} · ${row.target}`} /></li>
-        ))}
-      </ul>
+      <section className="rounded-xl border border-line bg-surface p-4">
+        <h2 className="text-lg font-medium">审计</h2>
+        {audit.isPending ? <p className="text-sm text-muted">正在加载审计…</p> : null}
+        {audit.isError ? <p role="alert" className={alertClass}>{audit.error.message}</p> : null}
+        <ul data-testid="audit-log" className="text-sm">
+          {(audit.data?.audit ?? []).map((row) => (
+            <li key={row.id}><ScanRow tone="dark" subject={row.action} meta={`${row.ts} · ${row.target}`} /></li>
+          ))}
+        </ul>
+      </section>
     </div>
   );
+}
+
+function machineTone(state: string): string {
+  const base = "inline-flex max-w-full rounded-full px-2 py-0.5 text-xs font-medium";
+  if (state === "error") return `${base} bg-danger-bg text-danger`;
+  if (state === "running" || state === "运行中") return `${base} bg-ok-bg text-ok`;
+  return `${base} bg-hover text-muted`;
 }
 
 export function AdminTemplates() {
@@ -636,15 +647,17 @@ export function AdminSettings() {
   });
 
   return (
-    <>
+    <div className="mx-auto grid max-w-4xl gap-4 px-4 py-6 sm:px-6 sm:py-8">
+    <h1 className="text-2xl font-semibold">设置</h1>
     <form
-      className="mx-auto grid max-w-3xl gap-4 px-4 py-6 sm:px-6 sm:py-8"
+      className="grid gap-4"
       onSubmit={(event) => {
         event.preventDefault();
         update.mutate();
       }}
     >
-      <h1 className="text-2xl font-semibold">设置</h1>
+      <section className="grid gap-3 rounded-xl border border-line bg-surface p-4">
+        <h2 className="text-sm font-medium">基础与目录限制</h2>
       {settings.data?.integration === "viate" ? (
         <label className="grid gap-1 text-sm">
           默认渠道
@@ -667,15 +680,19 @@ export function AdminSettings() {
         />
         <span>目录限制，默认开启。打开时文件工具和 shell 工作目录只能用 /home/bot 和 /tmp；关闭后可以访问容器内 bot 用户读得到的路径。shell 命令正文两种情况下都不按目录拦截。</span>
       </label>
+      </section>
+      <section className="grid gap-3 rounded-xl border border-line bg-surface p-4">
+        <h2 className="text-sm font-medium">平台提示词</h2>
       <label className="grid gap-1 text-sm">
         平台提示词（版本 {settings.data?.platformPrompt.version ?? ""}）
         <textarea data-testid="platform-prompt" className={`${field} min-h-40`} value={prompt} placeholder={settings.data?.platformPrompt.text ?? ""} onChange={(event) => setPrompt(event.target.value)} />
       </label>
       <button className={button} type="submit">保存</button>
       {saved ? <p className="text-sm text-ok">{saved}</p> : null}
+      </section>
     </form>
     <ModelLimits settings={settings.data} />
-    </>
+    </div>
   );
 }
 
@@ -712,9 +729,9 @@ function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { c
   });
   const defaults = settings?.modelDefaults;
   return (
-    <section data-testid="model-settings" className="mx-auto grid max-w-3xl gap-3 px-4 pb-10 sm:px-6">
-      <h2 className="text-xl font-semibold">模型设置</h2>
-      <p className="text-sm text-muted">未单独设置的模型使用环境默认值：上下文 {defaults?.contextTokens ?? ""}，单次输出 {defaults?.maxTokens ?? ""}。只影响之后开始的任务。输出上限不能超过上下文窗口。</p>
+    <section data-testid="model-settings" className="grid gap-4">
+      <div className="grid gap-3 rounded-xl border border-line bg-surface p-4">
+        <h2 className="text-sm font-medium">单任务上限与限流</h2>
       <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => {
         event.preventDefault();
         if (!budgetReady) {
@@ -786,6 +803,10 @@ function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { c
         </label>
         <button className={button} type="submit" disabled={!settings?.modelRate}>保存限流</button>
       </form>
+      </div>
+      <div className="grid gap-3 rounded-xl border border-line bg-surface p-4">
+        <h2 className="text-sm font-medium">模型上下文覆盖</h2>
+        <p className="text-sm text-muted">未单独设置的模型使用环境默认值：上下文 {defaults?.contextTokens ?? ""}，单次输出 {defaults?.maxTokens ?? ""}。只影响之后开始的任务。输出上限不能超过上下文窗口。</p>
       <ul className="grid gap-1 text-sm">
         {Object.entries(settings?.modelLimits ?? {}).map(([name, limit]) => (
           <li key={name}>{name}：上下文 {limit.contextTokens}，输出 {limit.maxTokens}</li>
@@ -800,6 +821,7 @@ function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { c
         <button className={button} type="submit">保存</button>
       </form>
       {error ? <p className="text-sm text-danger">{error}</p> : null}
+      </div>
     </section>
   );
 }

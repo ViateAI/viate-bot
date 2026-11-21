@@ -399,36 +399,38 @@ export function ChatPage({ botId }: { botId: string }) {
           </ol>
         </div>
         {secret && task ? (
-          <div className="mx-auto w-full max-w-3xl px-4">
+          <div className="dock-slot">
             <SecretForm key={`${task.id}:${secret.name}`} taskId={task.id} request={secret} onDone={() => void queryClient.invalidateQueries({ queryKey: ["tasks", conversationId] })} />
           </div>
         ) : null}
         {task?.state === "waiting_approval" ? (
-          <div className="mx-auto w-full max-w-3xl px-4">
-            <section data-testid="task-approval" className="decide decide-amber mb-3 p-4">
+          <section data-testid="task-approval" className="dock-slot dock-slot-scroll">
+            <div>
               <h2 className="mb-2 text-sm font-medium text-amber-fg">待批准</h2>
               <ApprovalList taskId={task.id} />
-            </section>
-          </div>
+            </div>
+          </section>
         ) : null}
         {task?.error === "remote_unconfirmed" ? (
-          <div className="hatch-banner" data-testid="remote-unconfirmed">
-            <p><strong>本地已停等。</strong>停止只结束了本地等待。</p>
-            <p><strong>远端未确认。</strong>远端可能仍在执行。继续写操作或接管可能并发或重复。这不是远端已停止。</p>
-            {task.remoteUncertain ? (
-              <button
-                type="button"
-                data-testid="accept-remote-risk"
-                className="ui-btn-danger mt-2"
-                disabled={acceptRemote.isPending}
-                onClick={() => acceptRemote.mutate()}
-              >
-                我知道远端可能仍在执行，仍要继续
-              </button>
-            ) : null}
+          <div className="dock-slot">
+            <div className="hatch-banner" data-testid="remote-unconfirmed">
+              <p><strong>本地已停等。</strong>停止只结束了本地等待。</p>
+              <p><strong>远端未确认。</strong>远端可能仍在执行。继续写操作或接管可能并发或重复。这不是远端已停止。</p>
+              {task.remoteUncertain ? (
+                <button
+                  type="button"
+                  data-testid="accept-remote-risk"
+                  className="ui-btn-danger mt-2"
+                  disabled={acceptRemote.isPending}
+                  onClick={() => acceptRemote.mutate()}
+                >
+                  我知道远端可能仍在执行，仍要继续
+                </button>
+              ) : null}
+            </div>
           </div>
         ) : task?.error ? (
-          <div className="mx-auto mb-3 w-full max-w-3xl px-4">
+          <div className="dock-slot">
             <pre className="ui-alert max-h-48 overflow-auto whitespace-pre-wrap break-all">{task.error}</pre>
             {canContinue ? (
               <button
@@ -443,7 +445,7 @@ export function ChatPage({ botId }: { botId: string }) {
             ) : null}
           </div>
         ) : null}
-        {error ? <p className="mx-auto mb-3 w-full max-w-3xl px-4 text-sm text-danger">{error}</p> : null}
+        {error ? <p className="dock-slot text-sm text-danger">{error}</p> : null}
         <PendingAttachments items={pending} onRemove={removePending} onRetry={(id) => void retryPending(id)} />
         <form
           className="composer-dock"
@@ -472,12 +474,12 @@ export function ChatPage({ botId }: { botId: string }) {
               className="grid size-9 shrink-0 place-items-center rounded-full text-secondary hover:bg-hover"
               onClick={() => fileRef.current?.click()}
             >
-              附件
+              <Paperclip />
             </button>
             <select
               data-testid="send-mode"
               aria-label="发送方式"
-              className="h-9 max-w-[5.5rem] shrink-0 bg-transparent text-sm text-secondary"
+              className="h-9 shrink-0 rounded-lg bg-transparent px-2 text-sm text-secondary hover:bg-hover"
               value={mode}
               onChange={(event) => setMode(event.target.value === "steer" ? "steer" : "queue")}
             >
@@ -552,6 +554,7 @@ export function ChatPage({ botId }: { botId: string }) {
           });
         }}
         status={status}
+        presence={screen ? "hold" : presence}
         memories={memories.data?.memories ?? []}
         memoryReady={Boolean(memories.data)}
         onDeleteMemory={(id) => removeMemory.mutate(id)}
@@ -577,6 +580,7 @@ function ProfilePanel({
   screen,
   onToggleScreen,
   status,
+  presence,
   memories,
   memoryReady,
   onDeleteMemory,
@@ -597,6 +601,7 @@ function ProfilePanel({
   screen: boolean;
   onToggleScreen: () => void;
   status: string;
+  presence: "idle" | "live" | "wait" | "hold";
   memories: MemoryItem[];
   memoryReady: boolean;
   onDeleteMemory: (id: string) => void;
@@ -628,25 +633,18 @@ function ProfilePanel({
           关闭
         </button>
       </div>
-      <div className="flex flex-col items-center px-6 pt-4 pb-2">
-        <BotMark name={name} avatarUrl={avatarUrl} presence={screen ? "hold" : "idle"} className="size-16 text-xl" />
-        <h2 className="mt-4 text-center text-xl font-semibold">{name}</h2>
-        {bio ? <p className="mt-2 text-center text-sm text-muted">{bio}</p> : null}
-        {model ? <p className="mt-1 text-sm text-muted">{model}</p> : null}
-        <p className="mt-1 text-sm text-muted">{status}</p>
-        {primary ? <p data-testid="primary-bot" className="mt-2 text-xs font-medium text-primary">主 bot</p> : null}
-        <button
-          data-testid="delete-bot"
-          className="ui-btn-danger mt-3 disabled:cursor-not-allowed"
-          type="button"
-          disabled={primary || deleting}
-          onClick={onDelete}
-        >
-          删除 bot
-        </button>
-        {primary ? <p data-testid="delete-bot-reason" className="mt-1 text-center text-xs text-muted">主 bot 不能删除</p> : null}
+      <div className="flex items-start gap-3 px-4 pt-4 pb-1">
+        <BotMark name={name} avatarUrl={avatarUrl} presence={presence} className="size-11 shrink-0 text-sm" />
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <h2 className="truncate text-base font-semibold">{name}</h2>
+            {primary ? <span data-testid="primary-bot" className="shrink-0 rounded bg-active px-1.5 py-0.5 text-[10px] font-medium text-primary">主 bot</span> : null}
+          </div>
+          <p className="mt-0.5 truncate text-xs text-muted">{[model, status].filter((item) => item.length > 0).join(" · ")}</p>
+          {bio ? <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{bio}</p> : null}
+        </div>
       </div>
-      <div className="flex justify-center gap-6 px-6 pt-2 text-sm">
+      <div className="flex gap-6 px-4 pt-2 text-sm">
         <button
           type="button"
           className={`border-b-2 px-1 py-2 ${tab === "activity" ? "border-primary font-medium text-primary" : "border-transparent text-muted"}`}
@@ -729,6 +727,20 @@ function ProfilePanel({
           </ul>
         </div>
       </div>
+      <div className="flex items-center justify-between gap-3 border-t border-line px-4 py-3">
+        <div className="min-w-0">
+          {primary ? <p data-testid="delete-bot-reason" className="text-xs text-muted">主 bot 不能删除</p> : <p className="text-xs text-muted">删除后无法恢复</p>}
+        </div>
+        <button
+          data-testid="delete-bot"
+          className="ui-btn-danger shrink-0 disabled:cursor-not-allowed"
+          type="button"
+          disabled={primary || deleting}
+          onClick={onDelete}
+        >
+          删除 bot
+        </button>
+      </div>
     </aside>
   );
 }
@@ -741,7 +753,7 @@ function MessageItem({ message, previous, botName, avatarUrl, presence }: { mess
       {stamp ? <li className="py-1 text-center text-xs text-muted">{stamp}</li> : null}
       {message.role === "toolResult" ? (
         <li className="tool-card justify-self-start">
-          <p>工具结果{message.toolName ? ` · ${message.toolName}` : ""}{message.isError ? " · 失败" : ""}</p>
+          <p className="tool-card-title">工具结果{message.toolName ? ` · ${message.toolName}` : ""}{message.isError ? " · 失败" : ""}</p>
           <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all">{text}</pre>
         </li>
       ) : message.notice ? (
@@ -841,7 +853,7 @@ function SecretForm({ taskId, request, onDone }: { taskId: string; request: Secr
   return (
     <form
       data-testid="secret-form"
-      className="decide decide-primary mb-3 grid gap-2 p-3"
+      className="decide decide-primary grid w-full gap-2 p-3"
       onSubmit={(event) => {
         event.preventDefault();
         submit.mutate("provide");
@@ -936,6 +948,14 @@ function ArrowUp() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
       <path d="M8 12.5V3.5M8 3.5 4.5 7M8 3.5 11.5 7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function Paperclip() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
+      <path d="M7.2 9.6 11.4 5.4a2.1 2.1 0 0 1 3 3L8.2 14.6a3.4 3.4 0 0 1-4.8-4.8l6.3-6.3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

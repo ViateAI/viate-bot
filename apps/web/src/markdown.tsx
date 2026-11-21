@@ -1,6 +1,8 @@
-import { useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+const InCodeBlock = createContext(false);
 
 type MdNode = { type: string; value?: string; children?: MdNode[] };
 
@@ -47,11 +49,11 @@ function CodeBlock({ children }: { children?: ReactNode | undefined }) {
   const ref = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
   return (
-    <div className="code-block my-2">
-      <div className="flex justify-end border-b border-line px-2 py-1">
+    <div className="code-block my-2 min-w-0 max-w-full">
+      <div className="flex justify-end border-b border-line bg-surface px-2 py-1">
         <button
           type="button"
-          className="text-xs text-muted"
+          className="rounded px-1.5 py-0.5 text-xs text-muted hover:bg-hover hover:text-fg"
           onClick={() => {
             const text = ref.current?.innerText ?? "";
             void navigator.clipboard?.writeText(text).then(() => {
@@ -63,20 +65,28 @@ function CodeBlock({ children }: { children?: ReactNode | undefined }) {
           {copied ? "已复制" : "复制"}
         </button>
       </div>
-      <pre ref={ref} className="overflow-x-auto px-3 py-2 font-mono text-[13px] leading-5 whitespace-pre [&_code]:bg-transparent [&_code]:px-0">
-        {children}
-      </pre>
+      <InCodeBlock.Provider value={true}>
+        <pre ref={ref} className="min-w-0 max-w-full overflow-x-auto px-3 py-2 font-mono text-[13px] leading-5 whitespace-pre">
+          {children}
+        </pre>
+      </InCodeBlock.Provider>
     </div>
   );
+}
+
+function InlineOrBlockCode({ className, children }: { className?: string | undefined; children?: ReactNode | undefined }) {
+  const block = useContext(InCodeBlock);
+  if (block) return <code className={["block max-w-full overflow-x-auto whitespace-pre", className].filter(Boolean).join(" ")}>{children}</code>;
+  return <code className="rounded bg-code px-1 font-mono text-[0.92em]">{children}</code>;
 }
 
 const components: Components = {
   a: Link,
   img: Image,
   pre: CodeBlock,
-  h1: ({ children }) => <h1 className="mt-2 text-base font-medium">{children}</h1>,
-  h2: ({ children }) => <h2 className="mt-2 text-base font-medium">{children}</h2>,
-  h3: ({ children }) => <h3 className="mt-2 text-[15px] font-medium">{children}</h3>,
+  h1: ({ children }) => <h1 className="mt-3 mb-1 text-base font-medium">{children}</h1>,
+  h2: ({ children }) => <h2 className="mt-3 mb-1 text-base font-medium">{children}</h2>,
+  h3: ({ children }) => <h3 className="mt-3 mb-1 text-[15px] font-medium">{children}</h3>,
   p: ({ children }) => <p className="whitespace-pre-wrap break-words">{children}</p>,
   ul: ({ children }) => <ul className="list-disc pl-5">{children}</ul>,
   ol: ({ children }) => <ol className="list-decimal pl-5">{children}</ol>,
@@ -87,14 +97,15 @@ const components: Components = {
       <table className="w-full border-collapse text-left text-sm">{children}</table>
     </div>
   ),
-  th: ({ children }) => <th className="border-b border-line px-2 py-1 font-medium">{children}</th>,
-  td: ({ children }) => <td className="border-b border-line px-2 py-1">{children}</td>,
-  code: ({ children }) => <code className="rounded bg-code px-1 font-mono text-[0.92em]">{children}</code>,
+  th: ({ children }) => <th className="border-b border-line bg-surface px-3 py-2 text-left text-xs font-medium text-secondary">{children}</th>,
+  td: ({ children }) => <td className="border-b border-line px-3 py-2">{children}</td>,
+  tr: ({ children }) => <tr className="[&:last-child>td]:border-b-0">{children}</tr>,
+  code: InlineOrBlockCode,
 };
 
 export function MarkdownView({ text }: { text: string }) {
   return (
-    <div className="max-w-full break-words">
+    <div className="max-w-full space-y-2 break-words">
       <ReactMarkdown remarkPlugins={[remarkGfm, showHtmlAsText]} urlTransform={safeUrl} components={components}>
         {text}
       </ReactMarkdown>

@@ -113,26 +113,30 @@ function ReviewDetail({ id, onDecided }: { id: string; onDecided: () => void }) 
   if (detail.isPending) return <p className="text-sm text-muted">正在加载详情…</p>;
   if (!card) return <p role="alert" className="ui-alert">无法加载详情</p>;
   return (
-    <article className="grid min-w-0 gap-4 overflow-auto" data-testid="admin-review-detail">
+    <article className="grid min-w-0 gap-4 overflow-auto rounded-xl border border-line bg-surface p-4" data-testid="admin-review-detail">
+      <div>
       <h2 className="text-lg font-medium [overflow-wrap:anywhere]">{card.name} {card.version}</h2>
-      <p className="break-all text-sm">SHA-256 {card.sha256}</p>
-      <p className="whitespace-pre-wrap break-all text-sm">说明：{card.note}</p>
+        <p className="mt-2 whitespace-pre-wrap break-all text-sm text-secondary">说明：{card.note}</p>
+      </div>
+      <p className="break-all rounded-lg bg-code px-2.5 py-1.5 font-mono text-xs">SHA-256 {card.sha256}</p>
       <section className="grid gap-2">
-        <h3 className="font-medium">manifest</h3>
-        <pre className="overflow-auto whitespace-pre-wrap break-all text-sm">{card.manifest}</pre>
+        <h3 className="text-sm font-medium">manifest</h3>
+        <div className="code-block">
+          <pre className="overflow-auto whitespace-pre-wrap break-all px-3 py-2 text-sm">{card.manifest}</pre>
+          </div>
       </section>
       <section className="grid gap-2">
-        <h3 className="font-medium">文件</h3>
+        <h3 className="text-sm font-medium">文件</h3>
         <ul className="grid gap-1 text-sm">
           {card.files.map((item) => (
             <li key={item.path}>
-              <button className="break-all text-left" type="button" onClick={() => setPath(item.path)}>
+              <button className={`w-full break-all rounded-lg px-2 py-1.5 text-left ${path === item.path ? "bg-active text-primary" : "hover:bg-hover"}`} type="button" onClick={() => setPath(item.path)}>
                 {item.path} · {item.size} 字节{item.executable ? " · 可执行" : ""}
               </button>
             </li>
           ))}
         </ul>
-        {file.data ? <FileView file={file.data} /> : null}
+        {file.data ? <div className="code-block"><FileView file={file.data} /></div> : null}
       </section>
       <section className="grid gap-1 text-sm">
         <h3 className="font-medium">MCP</h3>
@@ -157,20 +161,22 @@ function ReviewDetail({ id, onDecided }: { id: string; onDecided: () => void }) 
         <h3 className="font-medium">与上一个已批准版本的差异</h3>
         {card.diff ? (
           <>
-            <p className="break-all">新增：{card.diff.added.join("、") || "无"}</p>
-            <p className="break-all">删除：{card.diff.removed.join("、") || "无"}</p>
-            <p className="break-all">修改：{card.diff.modified.join("、") || "无"}</p>
+            <p className="break-all text-ok">新增：{card.diff.added.join("、") || "无"}</p>
+            <p className="break-all text-danger">删除：{card.diff.removed.join("、") || "无"}</p>
+            <p className="break-all text-amber-fg">修改：{card.diff.modified.join("、") || "无"}</p>
           </>
         ) : <p>没有更早的已批准版本</p>}
       </section>
       {decide.isError ? <p role="alert">{decide.error.message}</p> : null}
-      <div className="flex flex-wrap items-end gap-2">
-        <button className={button} type="button" data-testid="admin-review-approve" disabled={decide.isPending} onClick={() => decide.mutate({ decision: "approve" })}>通过</button>
+      <div className="decide decide-info grid gap-3 p-3">
         <label className="grid gap-1 text-sm">
           驳回原因
           <input className={field} value={reason} onChange={(event) => setReason(event.target.value)} />
         </label>
+        <div className="flex flex-wrap gap-2">
+        <button className={button} type="button" data-testid="admin-review-approve" disabled={decide.isPending} onClick={() => decide.mutate({ decision: "approve" })}>通过</button>
         <button className={button} type="button" data-testid="admin-review-reject" disabled={decide.isPending || reason.trim().length === 0} onClick={() => decide.mutate({ decision: "reject", reason })}>驳回</button>
+      </div>
       </div>
     </article>
   );
