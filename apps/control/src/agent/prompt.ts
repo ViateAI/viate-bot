@@ -63,6 +63,38 @@ export function latestUserText(messages: Array<{ role: string; content: unknown 
   return "";
 }
 
+export interface InstalledAppSummary {
+  name: string;
+  version: string;
+  config: Record<string, string | { secret?: boolean; secretRef?: string; prefix?: string }>;
+}
+
+/** 只写应用名、版本和密钥引用。配置明文不进提示词。没有已安装应用时省略整段。 */
+export function installedAppsBlock(apps: InstalledAppSummary[]): string {
+  if (apps.length === 0) return "";
+  const lines = [
+    "已安装应用（用 mcp_inspect 查看工具，用 mcp_call 调用。需要凭证时用 save_secret_from_machine 和 link_app_credential）：",
+  ];
+  for (const app of apps) lines.push(`- ${app.name} (${app.version}) [${configStatus(app.config)}]`);
+  return lines.join("\n");
+}
+
+function configStatus(config: InstalledAppSummary["config"]): string {
+  const refs: string[] = [];
+  const plain: string[] = [];
+  for (const [key, value] of Object.entries(config)) {
+    if (value && typeof value === "object" && typeof value.secretRef === "string" && value.secretRef.length > 0) {
+      refs.push(`${key}->${value.secretRef}`);
+    } else {
+      plain.push(key);
+    }
+  }
+  if (refs.length === 0 && plain.length === 0) return "未配置";
+  if (refs.length === 0) return "已配置";
+  const shared = `已配置密钥引用: ${refs.join(", ")}`;
+  return plain.length === 0 ? shared : `${shared}；其他已配置: ${plain.join(", ")}`;
+}
+
 export function statusBlock(now: Date, machine: string, secretNames: string[] = []): string {
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const names = secretNames.length > 0 ? secretNames.join("、") : "（无）";

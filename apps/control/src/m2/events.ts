@@ -41,6 +41,8 @@ export const AUDIT_ACTIONS = {
   approvalDecided: "approval.decided",
   takeover: "takeover",
   secretForm: "secret.form",
+  secretSavedFromMachine: "secret.saved_from_machine",
+  secretLinkApp: "secret.link_app",
   appInstall: "app.install",
   /** bot 发起的安装。attrs 只有来源、版本、bot、任务和审批人，没有配置值。 */
   appInstallByBot: "app_install",

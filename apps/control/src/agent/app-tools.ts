@@ -31,7 +31,22 @@ import { MachineInstallUnconfirmedError } from "../machines/client.js";
 
 const CONFIG_KEY = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PLACEHOLDER = /^\{\{secret:([a-z0-9_]+)\}\}$/;
+const SECRET_REF_VALUE = /^([^\r\n]*)\{\{secret:([a-z0-9_]{1,64})\}\}$/;
 const REMOTE_VERSION = "1.0.0";
+
+function secretReference(value: string): { name: string; prefix?: string } | undefined {
+  if (value.split("{{secret:").length !== 2) return undefined;
+  const match = SECRET_REF_VALUE.exec(value);
+  const name = match?.[2];
+  if (!name) return undefined;
+  const prefix = match?.[1] ?? "";
+  if (prefix.length > 64 || /[\u0000-\u001F\u007F]/.test(prefix)) return undefined;
+  return prefix.length > 0 ? { name, prefix } : { name };
+}
+
+function isSecretPlaceholder(value: string): boolean {
+  return secretReference(value) !== undefined;
+}
 
 export interface InstallMcpBinding {
   userId: string;
@@ -41,7 +56,7 @@ export interface InstallMcpBinding {
   catalog: CatalogDeps;
   lookup(name: string): string | undefined;
   readFile(path: string): Promise<string | undefined>;
-  /** 安装成功后启动 MCP，把新工具放进当前任务。失败不回滚安装。 */
+  /** 安装成功后的钩子。不再把第三方工具注册进当前任务。失败不回滚安装。 */
   launch(appName: string, signal?: AbortSignal): Promise<string[]>;
   onUnconfirmed?(): void;
 }
@@ -127,7 +142,7 @@ export function scrubInstallPlaintext(args: unknown, catalog?: CatalogDeps, user
       for (const item of visible?.config ?? []) if (item.secret) secretKeys.push(item.key);
     }
   }
-  scrubMap(record.config, (key, value) => secretKeys.includes(key) && !PLACEHOLDER.test(value));
+  scrubMap(record.config, (key, value) => secretKeys.includes(key) && !isSecretPlaceholder(value));
   const remote = record.remote;
   if (!remote || typeof remote !== "object" || Array.isArray(remote)) return;
   const headers = (remote as { headers?: unknown }).headers;
@@ -138,7 +153,7 @@ export function scrubInstallPlaintext(args: unknown, catalog?: CatalogDeps, user
     } catch {
       configKey = "";
     }
-    return (isCredentialHeader(key) || secretKeys.includes(configKey)) && !PLACEHOLDER.test(value);
+    return (isCredentialHeader(key) || secretKeys.includes(configKey)) && !isSecretPlaceholder(value);
   });
 }
 
@@ -165,7 +180,7 @@ export function installMcpBlock(catalog: CatalogDeps, userId: string, args: unkn
     if (!parsed.value.version) return `目录应用必须写明版本。请使用版本 ${visible.version} 重新调用 install_mcp`;
     for (const item of visible.config) {
       const value = parsed.value.config[item.key];
-      if (item.secret && value !== undefined && !PLACEHOLDER.test(value)) return "敏感配置不能传明文，请先调用 request_secret";
+      if (item.secret && value !== undefined && !isSecretPlaceholder(value)) return "敏感配置不能传明文，请先调用 request_secret";
     }
   }
   return undefined;
@@ -188,7 +203,7 @@ export function describeInstall(catalog: CatalogDeps, userId: string, args: unkn
   if (!parsed.ok) return undefined;
   const config = Object.entries(parsed.value.config).map(([key, value]) => ({
     key,
-    display: PLACEHOLDER.test(value) ? "已填写的密钥" : value,
+    display: isSecretPlaceholder(value) ? "已填写的密钥" : value,
   }));
   const reason = parsed.value.reason;
   if (parsed.value.kind === "catalog") {
@@ -211,7 +226,7 @@ export function describeInstall(catalog: CatalogDeps, userId: string, args: unkn
       command: parsed.value.url,
       config: [...config, ...parsed.value.headers.map((item) => ({
         key: item.header,
-        display: PLACEHOLDER.test(item.value) ? "已填写的密钥" : item.value,
+        display: isSecretPlaceholder(item.value) ? "已填写的密钥" : item.value,
       }))],
       reason,
       riskyTools: [],
@@ -302,13 +317,13 @@ function readConfig(value: unknown, secretKeys: readonly string[]): Record<strin
   for (const [key, item] of Object.entries(value)) {
     if (!CONFIG_KEY.test(key)) throw new Error("配置名不合法");
     if (typeof item !== "string" || item.length === 0 || item.length > 4096) throw new Error("配置值不合法");
-    if (item.includes("{{secret:") && !PLACEHOLDER.test(item)) throw new Error("密钥占位符必须单独作为配置值");
-    if (secretKeys.includes(key) && !PLACEHOLDER.test(item)) throw new Error("敏感配置不能传明文，请先调用 request_secret");
+    if (item.includes("{{secret:") && !isSecretPlaceholder(item)) throw new Error("密钥占位符必须单独作为配置值");
+    if (secretKeys.includes(key) && !isSecretPlaceholder(item)) throw new Error("敏感配置不能传明文，请先调用 request_secret");
     output[key] = item;
   }
   for (const key of secretKeys) {
     if (!(key in output)) throw new Error(`缺少敏感配置 ${key}`);
-    if (!PLACEHOLDER.test(output[key] ?? "")) throw new Error("敏感配置不能传明文，请先调用 request_secret");
+    if (!isSecretPlaceholder(output[key] ?? "")) throw new Error("敏感配置不能传明文，请先调用 request_secret");
   }
   return output;
 }
@@ -339,8 +354,8 @@ function readRemote(value: unknown, secretKeys: readonly string[]): { name: stri
       const lower = header.toLowerCase();
       if (seen.has(lower)) throw new Error("请求头重复");
       seen.add(lower);
-      if (item.includes("{{secret:") && !PLACEHOLDER.test(item)) throw new Error("密钥占位符必须单独作为配置值");
-      if ((isCredentialHeader(header) || secretKeys.includes(headerConfigKey(header))) && !PLACEHOLDER.test(item)) {
+      if (item.includes("{{secret:") && !isSecretPlaceholder(item)) throw new Error("密钥占位符必须单独作为配置值");
+      if ((isCredentialHeader(header) || secretKeys.includes(headerConfigKey(header))) && !isSecretPlaceholder(item)) {
         throw new Error("敏感配置不能传明文，请先调用 request_secret");
       }
       headers.push({ header, value: item });
@@ -432,9 +447,8 @@ async function runInstall(binding: InstallMcpBinding, args: unknown, signal?: Ab
   });
   try {
     signal?.throwIfAborted();
-    const tools = await binding.launch(installedName, signal);
-    const listed = tools.length > 0 ? tools.join("、") : "（这个 MCP 没有新工具）";
-    return `已安装 ${installedName} ${version}。新工具：${listed}。下一轮可以直接调用。`;
+    await binding.launch(installedName, signal);
+    return `已安装 ${installedName} ${version}。用 mcp_inspect 查看工具，用 mcp_call 调用。`;
   } catch {
     return failText("安装已完成，但 MCP 启动失败。可以在应用页查看日志。");
   }
@@ -449,7 +463,7 @@ async function publishRemote(binding: InstallMcpBinding, request: RemoteSource):
   const headers = request.headers.map((item) => ({
     header: item.header,
     key: headerConfigKey(item.header),
-    secret: isCredentialHeader(item.header) || PLACEHOLDER.test(item.value),
+    secret: isCredentialHeader(item.header) || isSecretPlaceholder(item.value),
   }));
   const headerKeys = new Set(headers.map((item) => item.key));
   for (const key of Object.keys(request.config)) {
@@ -461,7 +475,7 @@ async function publishRemote(binding: InstallMcpBinding, request: RemoteSource):
     headers,
     config: Object.keys(request.config).sort().map((key) => ({
       key,
-      secret: request.secretKeys.includes(key) || PLACEHOLDER.test(request.config[key] ?? ""),
+      secret: request.secretKeys.includes(key) || isSecretPlaceholder(request.config[key] ?? ""),
     })),
   });
   const saved = await publishValidatedPackage(binding.catalog, binding.userId, pkg, {
@@ -481,7 +495,7 @@ async function publishPackage(binding: InstallMcpBinding, request: PackageSource
     args: request.args,
     config: Object.keys(request.config).sort().map((key) => ({
       key,
-      secret: request.secretKeys.includes(key) || PLACEHOLDER.test(request.config[key] ?? ""),
+      secret: request.secretKeys.includes(key) || isSecretPlaceholder(request.config[key] ?? ""),
     })),
   });
   const saved = await publishValidatedPackage(binding.catalog, binding.userId, pkg, {
@@ -495,9 +509,14 @@ function remoteConfig(request: RemoteSource, lookup: (name: string) => string | 
   const config: ConfigInput = { ...base };
   for (const item of request.headers) {
     const key = headerConfigKey(item.header);
-    const secret = isCredentialHeader(item.header) || PLACEHOLDER.test(item.value);
+    const ref = secretReference(item.value);
+    if (ref) {
+      requireLookup(ref.name, lookup);
+      config[key] = ref.prefix ? { secret: true, secretRef: ref.name, prefix: ref.prefix } : { secret: true, secretRef: ref.name };
+      continue;
+    }
     const value = resolveValue(item.value, lookup);
-    config[key] = secret ? { secret: true, value } : value;
+    config[key] = isCredentialHeader(item.header) ? { secret: true, value } : value;
   }
   return config;
 }
@@ -505,10 +524,20 @@ function remoteConfig(request: RemoteSource, lookup: (name: string) => string | 
 function resolveConfig(request: InstallRequest, lookup: (name: string) => string | undefined): ConfigInput {
   const config: ConfigInput = {};
   for (const [key, value] of Object.entries(request.config)) {
-    const resolved = resolveValue(value, lookup);
-    config[key] = request.secretKeys.includes(key) || PLACEHOLDER.test(value) ? { secret: true, value: resolved } : resolved;
+    const ref = secretReference(value);
+    if (ref) {
+      requireLookup(ref.name, lookup);
+      config[key] = ref.prefix ? { secret: true, secretRef: ref.name, prefix: ref.prefix } : { secret: true, secretRef: ref.name };
+      continue;
+    }
+    config[key] = request.secretKeys.includes(key) ? { secret: true, value } : value;
   }
   return config;
+}
+
+function requireLookup(name: string, lookup: (name: string) => string | undefined): void {
+  const found = lookup(name);
+  if (found === undefined || found.length === 0) throw new PackageCommandError(`密钥 ${name} 不存在`);
 }
 
 function resolveValue(value: string, lookup: (name: string) => string | undefined): string {

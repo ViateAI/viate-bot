@@ -1,6 +1,22 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { describe, expect, it } from "vitest";
-import { compactMessages, estimateTokens } from "./prompt.js";
+import { compactMessages, estimateTokens, installedAppsBlock } from "./prompt.js";
+
+describe("installedAppsBlock", () => {
+  it("lists names, versions, and secret references without plaintext", () => {
+    expect(installedAppsBlock([])).toBe("");
+    const text = installedAppsBlock([
+      { name: "tara", version: "1.2.0", config: { MCP_TOKEN: { secret: true, secretRef: "corp", prefix: "Bearer " }, REGION: "eu" } },
+      { name: "empty", version: "0.1.0", config: {} },
+    ]);
+    expect(text).toContain("mcp_inspect");
+    expect(text).toContain("mcp_call");
+    expect(text).toContain("tara (1.2.0) [已配置密钥引用: MCP_TOKEN->corp；其他已配置: REGION]");
+    expect(text).toContain("empty (0.1.0) [未配置]");
+    expect(text).not.toContain("eu");
+    expect(text).not.toContain("Bearer ");
+  });
+});
 
 describe("compactMessages", () => {
   it("drops the oldest group but keeps a tool call with its result", () => {

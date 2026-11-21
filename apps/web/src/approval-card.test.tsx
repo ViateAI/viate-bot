@@ -102,6 +102,21 @@ describe("ApprovalCard", () => {
     expect(allowTag(html, "profile")).not.toContain("disabled");
   });
 
+  it("titles an mcp call with the app and tool and can remember it", () => {
+    const html = markup({
+      id: "call",
+      taskId: "task-1",
+      tool: "mcp_call",
+      args: { app: "tara", tool: "ping", arguments: { text: "hi" } },
+      summary: "调用 tara · ping\n参数：{\"text\":\"hi\"}",
+    });
+    expect(html).toContain("调用 tara · ping");
+    expect(html).toContain("text");
+    expect(html).toContain("hi");
+    expect(html).toContain("以后对此自动批准");
+    expect(html).not.toContain(">mcp_call<");
+  });
+
   it("states the rule effect before allow", () => {
     const html = markup({
       id: "rule",

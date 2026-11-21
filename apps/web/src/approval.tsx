@@ -102,11 +102,38 @@ function approvalView(item: Approval): { title: string; details: ReactNode; gran
   if (item.tool === "request_app_publish") return publishView(item);
   if (item.tool === "update_bot_profile") return profileView(item);
   if (item.tool === "propose_approval_rule") return ruleView(item);
+  if (item.tool === "mcp_call") return mcpCallView(item);
   return {
     title: item.tool,
     details: <pre className={preClass}>{JSON.stringify(item.args, null, 2)}</pre>,
     grant: <p>批准后将执行工具 {item.tool}。</p>,
   };
+}
+
+function mcpCallView(item: Approval): { title: string; details: ReactNode; grant: ReactNode } {
+  const app = stringArg(item.args, "app") ?? "未知应用";
+  const tool = stringArg(item.args, "tool") ?? "未知工具";
+  const parameters = item.args && typeof item.args === "object" && "arguments" in item.args
+    ? (item.args as { arguments?: unknown }).arguments
+    : undefined;
+  let shown = "{}";
+  try {
+    shown = JSON.stringify(parameters ?? {}, null, 2);
+  } catch {
+    shown = "{}";
+  }
+  if (shown.length > 500) shown = `${shown.slice(0, 500)}…`;
+  return {
+    title: `调用 ${app} · ${tool}`,
+    details: <pre className={preClass} data-testid="mcp-call-args">{shown}</pre>,
+    grant: <p>批准后将调用应用 {app} 的工具 {tool}。</p>,
+  };
+}
+
+function stringArg(args: unknown, key: string): string | undefined {
+  if (!args || typeof args !== "object") return undefined;
+  const value = (args as Record<string, unknown>)[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function installView(item: Approval): { title: string; details: ReactNode; grant: ReactNode } {
@@ -270,7 +297,7 @@ function ruleCard(summary: string | undefined): { kind: string; category: unknow
 }
 
 function canRemember(tool: string): boolean {
-  return tool === "shell_exec" || tool === "fs_write" || tool.startsWith("browser_");
+  return tool === "shell_exec" || tool === "fs_write" || tool === "mcp_call" || tool.startsWith("browser_");
 }
 
 function approvalTone(item: Approval): string {

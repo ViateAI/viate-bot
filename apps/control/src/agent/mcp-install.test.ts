@@ -20,9 +20,11 @@ import { chatRepository } from "../db/chat.js";
 import { openDatabase } from "../db/index.js";
 import { machineRepository } from "../db/machines.js";
 import { ensureDevUser } from "../db/users.js";
+import { secretRepository } from "../db/secrets.js";
 import { createRuntime } from "../compose.js";
 import { createSession } from "../session.js";
 import { userScope } from "../scope.js";
+import { decrypt, encrypt } from "../crypto.js";
 
 const SENTINEL = "vb-mcpinst-plaintext-9f3a7c";
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -63,7 +65,7 @@ describe("bot installs an MCP in the same task", () => {
     const started = await start(machine.port, (body) => {
       const count = toolResults(body);
       if (count === 0) return namedToolSse("install_mcp", JSON.stringify({ remote: { name: "fresh", url: "https://example.com/mcp" }, reason: "tools" }));
-      if (count === 1) return namedToolSse("echo_installed", JSON.stringify({ text: "must-not-run" }));
+      if (count === 1) return namedToolSse("mcp_call", JSON.stringify({ app: "fresh", tool: "echo_installed", arguments: { text: "must-not-run" } }));
       return textSse("done");
     });
     const bot = await createBot(depsOf(started), userScope("user-a"), { name: "Ada", model: "gpt-test" });
@@ -71,7 +73,7 @@ describe("bot installs an MCP in the same task", () => {
     await waitFor(() => Boolean(started.ctx.db.$client.prepare("select id from approvals where task_id=? and state='pending'").get(sent.taskId)));
     const first = started.ctx.db.$client.prepare("select id from approvals where task_id=? and state='pending'").get(sent.taskId) as { id: string };
     started.service.approvalGate.decide("user-a", first.id, "allow");
-    await waitFor(() => Boolean(started.ctx.db.$client.prepare("select id from approvals where task_id=? and state='pending' and tool='echo_installed'").get(sent.taskId)));
+    await waitFor(() => Boolean(started.ctx.db.$client.prepare("select id from approvals where task_id=? and state='pending' and tool='mcp_call'").get(sent.taskId)));
     const next = started.ctx.db.$client.prepare("select id from approvals where task_id=? and state='pending'").get(sent.taskId) as { id: string };
     started.service.approvalGate.decide("user-a", next.id, "deny");
     await started.service.idle();
@@ -131,9 +133,15 @@ describe("bot installs an MCP in the same task", () => {
     expect(started.ctx.db.$client.prepare("select count(*) as n from app_installs").get()).toEqual({ n: 0 });
   });
 
-  it("encrypts a placeholder even without secretKeys", async () => {
+  it("resolves a placeholder without secretKeys by reference, not a private copy", async () => {
     const machine = await fakeMachine();
     const started = await start(machine.port, () => textSse("done"));
+    secretRepository(started.ctx.db).upsert(userScope("user-a"), {
+      id: "sec-token",
+      name: "token",
+      valueEnc: encrypt(started.ctx.key, SENTINEL),
+      scope: "browser",
+    });
     const result = await directInstaller(started).execute("secret", {
       package: { name: "secret-pkg", ecosystem: "npm", package: "left-pad", version: "1.2.3" },
       config: { API_TOKEN: "{{secret:token}}" }, reason: "secret",
@@ -141,6 +149,47 @@ describe("bot installs an MCP in the same task", () => {
     expect(result.isError).not.toBe(true);
     expect(storedText(started.ctx)).not.toContain(SENTINEL);
     expect(resolveMcpLaunch(catalogOf(started), "user-a", "secret-pkg").env.API_TOKEN).toBe(SENTINEL);
+    const stored = started.ctx.db.$client.prepare("select config_json as json from app_installs").get() as { json: string };
+    expect(JSON.parse(stored.json)).toEqual({ API_TOKEN: { secret: true, secretRef: "token" } });
+    expect(started.ctx.db.$client.prepare("select name from secrets").all()).toEqual([{ name: "token" }]);
+  });
+
+  it("stores a single secret placeholder and an optional prefix as a reference, not a private copy", async () => {
+    const machine = await fakeMachine();
+    const started = await start(machine.port, () => textSse("done"));
+    const plain = "shared-install-token-9f3c";
+    secretRepository(started.ctx.db).upsert(userScope("user-a"), {
+      id: "sec-corp",
+      name: "corp_token",
+      valueEnc: encrypt(started.ctx.key, plain),
+      scope: "browser",
+    });
+    const tool = installMcpTool({
+      userId: "user-a",
+      botId: "bot-review",
+      botName: "Review",
+      taskId: "task-review",
+      catalog: catalogOf(started),
+      lookup: (name) => {
+        const row = secretRepository(started.ctx.db).find(userScope("user-a"), name);
+        return row ? decrypt(started.ctx.key, row.valueEnc) : undefined;
+      },
+      readFile: async () => "1.2.3",
+      launch: async () => ["echo"],
+    });
+    const result = await tool.execute("secret-ref", {
+      package: { name: "secret-pkg", ecosystem: "npm", package: "left-pad", version: "1.2.3" },
+      config: { API_TOKEN: "Bearer {{secret:corp_token}}" },
+      reason: "share",
+    });
+    expect(result.isError).not.toBe(true);
+    const row = started.ctx.db.$client.prepare("select config_json as json from app_installs").get() as { json: string };
+    expect(JSON.parse(row.json)).toEqual({
+      API_TOKEN: { secret: true, secretRef: "corp_token", prefix: "Bearer " },
+    });
+    expect(started.ctx.db.$client.prepare("select name from secrets order by name").all()).toEqual([{ name: "corp_token" }]);
+    expect(resolveMcpLaunch(catalogOf(started), "user-a", "secret-pkg").env.API_TOKEN).toBe(`Bearer ${plain}`);
+    expect(storedText(started.ctx)).not.toContain(plain);
   });
 
   it("rejects and redacts catalog-declared secret plaintext without trusting secretKeys", async () => {
@@ -177,7 +226,11 @@ describe("bot installs an MCP in the same task", () => {
       calls.push(body);
       const count = toolResults(body);
       if (count === 0) return namedToolSse("install_mcp", JSON.stringify(args));
-      if (count === 1) return namedToolSse("echo_installed", JSON.stringify({ text: source }));
+      if (count === 1) return namedToolSse("mcp_call", JSON.stringify({
+        app: source === "catalog" ? "demo-cat" : source === "remote" ? "demo-remote" : "demo-pkg",
+        tool: "echo_installed",
+        arguments: { text: source },
+      }));
       return textSse("完成");
     });
     if (source === "catalog") {
@@ -264,7 +317,7 @@ describe("bot installs an MCP in the same task", () => {
         secretKeys: ["API_TOKEN"],
         reason: "需要密钥",
       }));
-      if (count === 2) return namedToolSse("echo_installed", JSON.stringify({ text: "secret-ok" }));
+      if (count === 2) return namedToolSse("mcp_call", JSON.stringify({ app: "demo-pkg", tool: "echo_installed", arguments: { text: "secret-ok" } }));
       return textSse("完成");
     });
     const secretBot = await createBot(depsOf(secretRun), userScope("user-a"), { name: "Ada", model: "gpt-test" });
@@ -280,7 +333,7 @@ describe("bot installs an MCP in the same task", () => {
       method: "POST",
       url: `/api/tasks/${sent.taskId}/secrets`,
       headers,
-      payload: { decision: "provide", name: "api_token", value: SENTINEL, save: false },
+      payload: { decision: "provide", name: "api_token", value: SENTINEL, save: true },
     });
     expect(provided.statusCode).toBe(200);
     await waitFor(() => Boolean(secretRun.ctx.db.$client.prepare("select id from approvals where task_id=? and state='pending'").get(sent.taskId)));
@@ -291,7 +344,8 @@ describe("bot installs an MCP in the same task", () => {
     expect(secretRun.service.approvalGate.decide("user-a", approval.id, "allow")).toBe("ok");
     await secretRun.service.idle();
     const config = secretRun.ctx.db.$client.prepare("select config_json as json from app_installs").all() as Array<{ json: string }>;
-    expect(config.some((row) => row.json.includes('"secret":true'))).toBe(true);
+    expect(config.some((row) => row.json.includes('"secretRef":"api_token"'))).toBe(true);
+    expect(secretRun.ctx.db.$client.prepare("select name from secrets").all()).toEqual([{ name: "api_token" }]);
     expect(storedText(secretRun.ctx)).not.toContain(SENTINEL);
     expect(secretBodies.join("\n")).not.toContain(SENTINEL);
     const messages = chatRepository(secretRun.ctx.db).listMessages(userScope("user-a"), sent.conversationId) ?? [];
@@ -321,11 +375,13 @@ describe("bot installs an MCP in the same task", () => {
     expect(text).not.toContain("https://example.com/bob");
   });
 
-  it("continues a task when an installed MCP fails to start and tells the model", async () => {
+  it("does not launch installed apps at task start, and reports a startup failure only when inspected", async () => {
     const machine = await fakeMachine({ fail: new Set(["broken"]) });
     const bodies: string[] = [];
     const started = await start(machine.port, (body) => {
       bodies.push(body);
+      const count = toolResults(body);
+      if (count === 0) return namedToolSse("mcp_inspect", JSON.stringify({ app: "broken" }));
       return textSse("继续");
     });
     seedBrokenInstall(started.ctx);
@@ -334,11 +390,79 @@ describe("bot installs an MCP in the same task", () => {
     await started.service.idle();
     expect(chatRepository(started.ctx.db).findTask(userScope("user-a"), sent.taskId)?.state).toBe("succeeded");
     const steps = chatRepository(started.ctx.db).listSteps(userScope("user-a"), sent.taskId) ?? [];
-    const failure = steps.find((step) => step.kind === "mcp");
-    expect(failure?.requestJson).toContain("broken");
-    expect(failure?.requestJson).toContain("启动失败");
-    expect(bodies.some((body) => body.includes("应用 broken 的工具当前不可用"))).toBe(true);
+    expect(steps.find((step) => step.kind === "mcp")).toBeUndefined();
+    expect(bodies[0]).not.toContain("应用 broken 的工具当前不可用");
+    expect(bodies[0]).toContain("mcp_inspect");
+    const messages = chatRepository(started.ctx.db).listMessages(userScope("user-a"), sent.conversationId) ?? [];
+    expect(messages.some((message) => message.contentJson.includes("应用 broken 的工具当前不可用（启动失败）"))).toBe(true);
   });
+
+  it("shares one saved file across two apps and uses the new value after the secret changes", async () => {
+    const one = "chain-secret-one";
+    const two = "chain-secret-two";
+    const machine = await chainMachine();
+    const started = await start(machine.port, (body) => {
+      const count = toolResults(body);
+      if (count === 0) return namedToolSse("fs_write", JSON.stringify({ path: "/home/bot/token.txt", content: `Bearer ${one}\n` }));
+      if (count === 1) return namedToolSse("save_secret_from_machine", JSON.stringify({ name: "corp", path: "/home/bot/token.txt", stripPrefix: "Bearer " }));
+      if (count === 2) return namedToolSse("link_app_credential", JSON.stringify({
+        secretName: "corp",
+        targets: [
+          { app: "tara", key: "MCP_TOKEN", prefix: "Bearer " },
+          { app: "biops", key: "API_TOKEN" },
+        ],
+      }));
+      if (count === 3) return namedToolSse("mcp_inspect", JSON.stringify({ app: "tara" }));
+      if (count === 4) return namedToolSse("mcp_call", JSON.stringify({ app: "tara", tool: "show_token", arguments: {} }));
+      if (count === 5) return namedToolSse("mcp_call", JSON.stringify({ app: "biops", tool: "show_token", arguments: {} }));
+      if (count === 6) return namedToolSse("fs_write", JSON.stringify({ path: "/home/bot/token.txt", content: `${two}\n` }));
+      if (count === 7) return namedToolSse("save_secret_from_machine", JSON.stringify({ name: "corp", path: "/home/bot/token.txt", stripPrefix: "Bearer " }));
+      if (count === 8) return namedToolSse("mcp_call", JSON.stringify({ app: "tara", tool: "show_token", arguments: {} }));
+      return textSse("完成");
+    });
+    seedSharedApps(started.ctx);
+    const bot = await createBot(depsOf(started), userScope("user-a"), { name: "Ada", model: "gpt-test" });
+    started.ctx.db.$client.prepare("update bots set settings_json=? where id=?").run(JSON.stringify({ alwaysAllow: ["fs_write", "mcp"] }), bot.id);
+    const sent = await started.service.send({ userId: "user-a", botId: bot.id, text: "绑定两个应用", mode: "queue" });
+    await started.service.idle();
+    expect(chatRepository(started.ctx.db).findTask(userScope("user-a"), sent.taskId)?.state).toBe("succeeded");
+    expect(machine.launches.map((item) => `${item.app}:${item.token}`)).toEqual([
+      `tara:Bearer ${one}`,
+      `biops:${one}`,
+      `tara:Bearer ${two}`,
+    ]);
+    expect(machine.files.has("/home/bot/token.txt")).toBe(false);
+    const configs = started.ctx.db.$client.prepare("select config_json as json from app_installs order by id").all() as Array<{ json: string }>;
+    const text = configs.map((row) => row.json).join("\n");
+    expect(text).toContain('"secretRef":"corp"');
+    expect(text).toContain('"REGION":"eu"');
+    expect(text).not.toContain(one);
+    expect(text).not.toContain(two);
+    expect(started.ctx.db.$client.prepare("select name from secrets order by name").all()).toEqual([{ name: "corp" }]);
+    const messages = chatRepository(started.ctx.db).listMessages(userScope("user-a"), sent.conversationId) ?? [];
+    const visible = messages.map((message) => message.contentJson).join("\n");
+    expect(visible).toContain("show_token");
+    expect(visible).toContain("schema 已截断");
+    expect(visible).toContain("当前任务可直接通过 mcp_inspect / mcp_call 使用");
+    const callResults = messages.filter((message) => message.contentJson.includes('"toolName":"mcp_call"'));
+    expect(callResults).toHaveLength(3);
+    for (const message of callResults) {
+      expect(message.contentJson).toContain("token:{{secret:app_secret}}");
+      expect(message.contentJson).not.toContain(one);
+      expect(message.contentJson).not.toContain(two);
+    }
+    const saves = messages.filter((message) => message.contentJson.includes('"toolName":"save_secret_from_machine"'));
+    expect(saves).toHaveLength(2);
+    for (const message of saves) {
+      expect(message.contentJson).not.toContain(one);
+      expect(message.contentJson).not.toContain(two);
+    }
+    const audit = started.ctx.db.$client.prepare("select action, attrs_json as attrs from audit_log").all() as Array<{ action: string; attrs: string }>;
+    const secretAudit = audit.filter((row) => row.action === "secret.saved_from_machine" || row.action === "secret.link_app");
+    expect(secretAudit.length).toBeGreaterThanOrEqual(3);
+    expect(secretAudit.map((row) => row.attrs).join("\n")).not.toContain(one);
+    expect(secretAudit.map((row) => row.attrs).join("\n")).not.toContain(two);
+  }, 15000);
 });
 
 function catalogOf(started: Started) {
@@ -366,6 +490,95 @@ function seedBrokenInstall(ctx: ControlContext): void {
   ctx.db.$client.prepare("insert into apps (id,name,source,owner_user_id,created_at) values ('app-broken','broken','user','user-a',?)").run(now);
   ctx.db.$client.prepare("insert into app_versions (id,app_id,version,manifest_json,archive_path,sha256,status,recommended,created_at) values ('ver-broken','app-broken','1.0.0','{}','/tmp/vb-missing','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','active',0,?)").run(now);
   ctx.db.$client.prepare("insert into app_installs (id,machine_id,app_version_id,forced,desired,state,config_json,updated_at) values ('inst-broken','machine-a','ver-broken',0,'present','installed','{}',?)").run(now);
+}
+
+function seedSharedApps(ctx: ControlContext): void {
+  const now = new Date().toISOString();
+  ctx.db.$client.prepare("insert into apps (id,name,source,owner_user_id,created_at) values ('app-tara','tara','user','user-a',?)").run(now);
+  ctx.db.$client.prepare("insert into apps (id,name,source,owner_user_id,created_at) values ('app-biops','biops','user','user-a',?)").run(now);
+  ctx.db.$client.prepare("insert into app_versions (id,app_id,version,manifest_json,archive_path,sha256,status,recommended,created_at) values ('ver-tara','app-tara','1.0.0','{}','/tmp/vb-tara','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','active',0,?)").run(now);
+  ctx.db.$client.prepare("insert into app_versions (id,app_id,version,manifest_json,archive_path,sha256,status,recommended,created_at) values ('ver-biops','app-biops','2.0.0','{}','/tmp/vb-biops','cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc','active',0,?)").run(now);
+  ctx.db.$client.prepare("insert into app_installs (id,machine_id,app_version_id,forced,desired,state,config_json,updated_at) values ('inst-tara','machine-a','ver-tara',0,'present','installed',?,?)").run(JSON.stringify({ REGION: "eu" }), now);
+  ctx.db.$client.prepare("insert into app_installs (id,machine_id,app_version_id,forced,desired,state,config_json,updated_at) values ('inst-biops','machine-a','ver-biops',0,'present','installed','{}',?)").run(now);
+  ctx.db.$client.prepare(
+    "insert into secrets (id,user_id,name,value_enc,scope,created_at) values ('sec-private-biops','user-a','app:inst-biops:API_TOKEN',?,'app',?)",
+  ).run(encrypt(ctx.key, "private-copy-should-go"), now);
+}
+
+async function chainMachine(): Promise<{ port: number; files: Map<string, string>; launches: Array<{ app: string; token: string }> }> {
+  const files = new Map<string, string>();
+  const launches: Array<{ app: string; token: string }> = [];
+  const sessions = new Map<string, string>();
+  let sessionCount = 0;
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => {
+      const path = (req.url ?? "").split("?")[0] ?? "";
+      const body = chunks.length === 0 ? {} : JSON.parse(Buffer.concat(chunks).toString("utf8")) as { path?: string; content?: string; env?: Record<string, string> };
+      if (req.method === "POST" && path === "/fs/write") {
+        files.set(body.path ?? "", body.content ?? "");
+        json(res, 200, { path: body.path, bytes: Buffer.byteLength(body.content ?? "") });
+        return;
+      }
+      if (req.method === "POST" && path === "/fs/read") {
+        const content = files.get(body.path ?? "");
+        if (content === undefined) {
+          json(res, 404, { error: "missing" });
+          return;
+        }
+        json(res, 200, { path: body.path, content, truncated: false });
+        return;
+      }
+      if (req.method === "POST" && path === "/fs/delete") {
+        files.delete(body.path ?? "");
+        json(res, 200, { path: body.path });
+        return;
+      }
+      const inspect = /^\/apps\/([^/]+)$/.exec(path);
+      if (req.method === "GET" && inspect) {
+        json(res, 200, { mcpServers: ["main"] });
+        return;
+      }
+      const launch = /^\/apps\/([^/]+)\/mcp\/([^/]+)$/.exec(path);
+      if (req.method === "POST" && launch) {
+        sessionCount += 1;
+        const id = sessionCount.toString(16).padStart(32, "0");
+        const app = decodeURIComponent(launch[1] ?? "");
+        const token = body.env?.MCP_TOKEN ?? body.env?.API_TOKEN ?? "";
+        sessions.set(id, token);
+        launches.push({ app, token });
+        json(res, 200, { server: id, running: true });
+        return;
+      }
+      if (req.method === "DELETE" && path.startsWith("/mcp/")) {
+        json(res, 200, { running: false });
+        return;
+      }
+      json(res, 404, { error: "no" });
+    });
+  });
+  const sockets = new WebSocketServer({ server });
+  const longNote = "Z".repeat(1500);
+  sockets.on("connection", (socket, request) => {
+    const id = decodeURIComponent((request.url ?? "").split("?")[0]?.split("/").pop() ?? "");
+    socket.on("message", (data) => {
+      const message = JSON.parse(data.toString()) as { id?: number; method?: string };
+      if (message.id === undefined) return;
+      const result = message.method === "tools/list"
+        ? { tools: [{ name: "show_token", description: "show", inputSchema: { type: "object", properties: { note: { type: "string", description: longNote } } } }] }
+        : { content: [{ type: "text", text: `token:${sessions.get(id) ?? ""}` }], isError: false };
+      socket.send(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const port = (server.address() as AddressInfo).port;
+  cleanups.push(async () => {
+    for (const socket of sockets.clients) socket.terminate();
+    sockets.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  return { port, files, launches };
 }
 
 function storedText(ctx: ControlContext): string {

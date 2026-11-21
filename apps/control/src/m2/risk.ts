@@ -23,6 +23,7 @@ export const READ_ONLY_TOOLS: Record<string, true> = {
   desktop_screenshot: true,
   memory_search: true,
   search_apps: true,
+  mcp_inspect: true,
 };
 
 /**
@@ -34,6 +35,8 @@ export const CONTROL_PLANE_TOOLS: Record<string, true> = {
   memory_delete: true,
   propose_routine: true,
   request_secret: true,
+  save_secret_from_machine: true,
+  link_app_credential: true,
 };
 
 const BROWSER_EFFECTS: Record<string, true> = {
@@ -77,6 +80,20 @@ export function skipsApproval(category: ApprovalCategory | undefined, settings: 
   if (!category) return true;
   if (category === "app_install" || category === "app_publish" || category === "bot_profile" || category === "rule_proposal") return false;
   return settings.alwaysAllow.includes(category);
+}
+
+/** mcp_call 只按「应用名:工具名」判断。裸工具名会把另一个应用的同名普通工具误判成高风险。 */
+export function mcpCallCategory(args: unknown, risky?: ReadonlySet<string>): "mcp" | "risky_tool" {
+  const record = args && typeof args === "object" ? args as Record<string, unknown> : undefined;
+  const app = typeof record?.app === "string" ? record.app : undefined;
+  const tool = typeof record?.tool === "string" ? record.tool : undefined;
+  if (app && tool && risky?.has(`${app}:${tool}`)) return "risky_tool";
+  return "mcp";
+}
+
+export function classifyTool(name: string, args: unknown, risky?: ReadonlySet<string>): ApprovalCategory | undefined {
+  if (name === "mcp_call") return mcpCallCategory(args, risky);
+  return approvalClass(name, risky);
 }
 
 export function approvalClass(name: string, risky?: ReadonlySet<string>): ApprovalCategory | undefined {

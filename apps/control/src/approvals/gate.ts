@@ -6,7 +6,7 @@ import { emitOps, opsMinutes } from "../ops/rollup.js";
 import type { AppDatabase } from "../db/index.js";
 import { ulid } from "../id.js";
 import { AUDIT_ACTIONS, M2_EVENTS } from "../m2/events.js";
-import { approvalClass, argsHash, canonicalJson, READ_ONLY_TOOLS, readBotSettings, skipsApproval } from "../m2/risk.js";
+import { argsHash, canonicalJson, classifyTool, READ_ONLY_TOOLS, readBotSettings, skipsApproval } from "../m2/risk.js";
 import { adminScope, userScope } from "../scope.js";
 import { profileForbidden, profileNeedsApproval } from "../agent/profile-tool.js";
 import { proposalError } from "./propose-tool.js";
@@ -93,7 +93,10 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
       const name = context.toolCall.name;
       const settings = readBotSettings(bot.settings_json);
       const risky = typeof options.riskyToolNames === "function" ? options.riskyToolNames(bot.id) : options.riskyToolNames;
-      const category = approvalClass(name, risky);
+      const category = classifyTool(name, context.args, risky);
+      if (name === "mcp_call" && (!stringField(context.args, "app") || !stringField(context.args, "tool"))) {
+        return { block: true, reason: "mcp_call 需要 app 和 tool" };
+      }
       const takeover = db.prepare("select 1 as n from takeover_leases where bot_id=? and state='active'").get(bot.id) as { n: number } | undefined;
       const task = db.prepare("select state from tasks where id=?").get(taskId) as { state: string } | undefined;
       if (!READ_ONLY_TOOLS[name] && (takeover || task?.state === "waiting_takeover")) {
@@ -207,13 +210,15 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
       return { block: true, reason };
     } };
   }
-  function autoRule(taskId: string, botId: string, userId: string, tool: string, args: unknown, category: ReturnType<typeof approvalClass>): boolean {
-    if (tool === "install_mcp" || tool === "request_app_publish" || tool === "update_bot_profile" || tool === "bulk_delete_action" || tool === "propose_approval_rule") return false;
+  function autoRule(taskId: string, botId: string, userId: string, tool: string, args: unknown, category: ReturnType<typeof classifyTool>): boolean {
+    if (tool === "install_mcp" || tool === "request_app_publish" || tool === "update_bot_profile" || tool === "bulk_delete_action" || tool === "propose_approval_rule" || tool === "mcp_inspect") return false;
     if (category !== "browser" && category !== "shell" && category !== "fs_write" && category !== "mcp") return false;
     if (category === "browser" && tool !== "browser_open") return false;
     const rules = approvalRuleRepository(options.db).active(userScope(userId), botId);
     const browserUrl = tool === "browser_open" && args && typeof args === "object" ? (args as { url?: unknown }).url : undefined;
-    const mcpApp = category === "mcp" ? options.mcpApp?.(taskId, tool) ?? undefined : undefined;
+    const mcpApp = tool === "mcp_call"
+      ? stringField(args, "app")
+      : category === "mcp" ? options.mcpApp?.(taskId, tool) ?? undefined : undefined;
     return hitRule(userId, taskId, tool, args, rules, typeof browserUrl === "string" ? browserUrl : undefined, mcpApp);
   }
   function hitRule(userId: string, taskId: string, tool: string, args: unknown, rules: ReturnType<ReturnType<typeof approvalRuleRepository>["active"]>, browserUrl: string | undefined, mcpApp: string | undefined): boolean {
@@ -228,4 +233,10 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
     return false;
   }
   return { bind, arm, decide };
+}
+
+function stringField(args: unknown, key: string): string | undefined {
+  if (!args || typeof args !== "object") return undefined;
+  const value = (args as Record<string, unknown>)[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }

@@ -39,7 +39,7 @@ import { proposalSummary, proposeApprovalRuleTool } from "../approvals/propose-t
 import { budgetFailure, resolveTaskTokenBudget } from "../task-budget.js";
 import { AVATAR_MAX_BYTES } from "./avatar.js";
 import { readModelLimits, resolveModelLimit } from "../model-limits.js";
-import { buildSystemPrompt, formatMemorySection, latestUserText, statusBlock } from "./prompt.js";
+import { buildSystemPrompt, formatMemorySection, installedAppsBlock, latestUserText, statusBlock } from "./prompt.js";
 import type { ChatHub } from "./events.js";
 import { getToolHooks } from "./hooks.js";
 import {
@@ -53,8 +53,10 @@ import {
   type SecretSubmission,
 } from "./secrets.js";
 import { maskDeep, maskSecrets } from "./text.js";
-import { appendMcpTools, MachinedMcpClient, mcpFailureCategory } from "./mcp-client.js";
+import { MachinedMcpClient } from "./mcp-client.js";
+import { createTaskMcp, summarizeMcpCall } from "./mcp-tools.js";
 import { describeInstall, installMcpBlock, installMcpTool, scrubInstallPlaintext, searchAppsTool, type InstallMcpBinding } from "./app-tools.js";
+import { linkAppCredentialTool, saveSecretFromMachineTool } from "./shared-credentials.js";
 import { installsForModelContext, privateSkillStorage, resolveMcpLaunch, type CatalogDeps, type CatalogInstaller } from "../apps/catalog.js";
 import { packageAppTool } from "../apps/package-app.js";
 import { describePublish, requestAppPublishTool } from "../apps/publish-request.js";
@@ -161,88 +163,6 @@ function catalogDeps(deps: ChatServiceDeps): CatalogDeps {
 function scrubToolArgs(name: string, args: unknown, catalog: CatalogDeps, userId: string): unknown {
   if (name === "install_mcp") scrubInstallPlaintext(args, catalog, userId);
   return args;
-}
-
-async function installedMcpTools(
-  deps: ChatServiceDeps,
-  endpoint: MachineEndpoint,
-  userId: string,
-  botId: string,
-  taskId: string,
-  used: Set<string>,
-  onUnconfirmed?: () => void,
-  signal?: AbortSignal,
-): Promise<{
-  tools: AgentTool[];
-  close: () => void;
-  client: MachinedMcpClient;
-  failures: Array<{ name: string; category: "启动失败" | "超时" | "协议错误" }>;
-  unavailable: string[];
-  owned: Array<{ app: string; name: string }>;
-}> {
-  const catalog = catalogDeps(deps);
-  const files = new MachinedClient(endpoint, deps.fetch ?? fetch);
-  const fetchImpl = deps.fetch;
-  const client = new MachinedMcpClient({
-    endpoint,
-    ...(onUnconfirmed ? { onUnconfirmed: () => { onUnconfirmed(); } } : {}),
-    ...(fetchImpl
-      ? {
-          request: async (url: string, init: { method: string; headers: Record<string, string>; body?: string; redirect?: "manual"; signal?: AbortSignal }) => {
-            const response = await fetchImpl(url, init);
-            return { ok: response.ok, status: response.status, text: () => response.text() };
-          },
-        }
-      : {}),
-    resolveLaunch: (appName) => {
-      const launch = resolveMcpLaunch(catalog, userId, appName);
-      return { env: launch.env, headers: launch.headers };
-    },
-  });
-  let names: string[] = [];
-  try {
-    names = installsForModelContext(catalog, userId, botId).map((item) => item.name);
-  } catch (error) {
-    return {
-      tools: [],
-      close: () => client.close(),
-      client,
-      failures: [{ name: "已安装应用", category: mcpFailureCategory(error) }],
-      unavailable: ["已安装应用"],
-      owned: [],
-    };
-  }
-  const tools: AgentTool[] = [];
-  const owned: Array<{ app: string; name: string }> = [];
-  const failures: Array<{ name: string; category: "启动失败" | "超时" | "协议错误" }> = [];
-  const unavailable: string[] = [];
-  for (const name of names) {
-    if (signal?.aborted) break;
-    const loading = signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
-    let added = 0;
-    let failed = false;
-    try {
-      const info = await files.inspectApp(name, loading);
-      for (const server of info.mcpServers) {
-        try {
-          const started = await client.launchApp(name, server, loading, taskId);
-          const listed = await client.listTools(started.server, loading);
-          const next = appendMcpTools(used, client, started.server, listed.tools);
-          tools.push(...next);
-          for (const tool of next) owned.push({ app: name, name: tool.name });
-          added += next.length;
-        } catch (error) {
-          failed = true;
-          failures.push({ name, category: mcpFailureCategory(error) });
-        }
-      }
-    } catch (error) {
-      failed = true;
-      failures.push({ name, category: mcpFailureCategory(error) });
-    }
-    if (failed && added === 0) unavailable.push(name);
-  }
-  return { tools, close: () => client.close(), client, failures, unavailable, owned };
 }
 
 function parseStepRequest(json: string): { toolCallId?: string } {
@@ -405,15 +325,6 @@ export function createChatService(deps: ChatServiceDeps) {
   const saved = new WeakSet<object>();
   const messageIds = new WeakMap<object, string>();
   const browsers = new BrowserPool();
-  const mcpOwners = new Map<string, Map<string, string | null>>();
-  function rememberMcp(botId: string, owned: Array<{ app: string; name: string }>): void {
-    const map = mcpOwners.get(botId) ?? new Map<string, string | null>();
-    for (const item of owned) {
-      const previous = map.get(item.name);
-      map.set(item.name, previous === undefined || previous === item.app ? item.app : null);
-    }
-    mcpOwners.set(botId, map);
-  }
   const broker = createSecretBroker({
     db: deps.db,
     key: deps.key,
@@ -432,7 +343,7 @@ export function createChatService(deps: ChatServiceDeps) {
       const names = new Set<string>();
       if (!owner) return names;
       for (const install of installsForModelContext(catalogDeps(deps), owner.userId, botId)) {
-        for (const tool of install.riskyTools) names.add(tool);
+        for (const tool of install.riskyTools) names.add(`${install.name}:${tool}`);
       }
       return names;
     },
@@ -452,6 +363,7 @@ export function createChatService(deps: ChatServiceDeps) {
       holdRun(taskId, false);
     },
     summarize(taskId, tool, args) {
+      if (tool === "mcp_call") return summarizeMcpCall(args);
       if (tool === "propose_approval_rule") return proposalSummary(args);
       if (tool === "update_bot_profile") {
         const current = deps.db.$client.prepare(
@@ -480,11 +392,6 @@ export function createChatService(deps: ChatServiceDeps) {
       const live = running.get(taskId);
       if (!live?.browser) return undefined;
       return browserApprovalUrl(live.browser, tool, args);
-    },
-    mcpApp(taskId, tool) {
-      const live = running.get(taskId);
-      if (!live) return undefined;
-      return mcpOwners.get(live.botId)?.get(tool) ?? undefined;
     },
     onRearm(taskId) {
       const meta = chat.systemTaskMeta(["waiting_approval"]).find((item) => item.id === taskId);
@@ -985,21 +892,40 @@ export function createChatService(deps: ChatServiceDeps) {
       } catch {
         skillText = "";
       }
-      const usedToolNames = new Set<string>();
-      const pendingMcp: AgentTool[] = [];
-      const installedMcp = await installedMcpTools(deps, endpoint, live.userId, live.botId, live.id, usedToolNames, () => {
-        live.remoteUnconfirmed = true;
-        chat.updateTask(scope, live.id, { error: "remote_unconfirmed" });
-        markRemoteUncertain(deps.db, { userId: live.userId, botId: live.botId, taskId: live.id });
-        publishTask(live.userId, live.conversationId, live.id);
-      }, live.resumeAbort?.signal);
-      closeMcp = installedMcp.close;
-      rememberMcp(live.botId, installedMcp.owned);
+      const fetchImpl = deps.fetch;
+      const taskMcp = createTaskMcp({
+        client: new MachinedMcpClient({
+          endpoint,
+          onUnconfirmed: () => {
+            live.remoteUnconfirmed = true;
+            chat.updateTask(scope, live.id, { error: "remote_unconfirmed" });
+            markRemoteUncertain(deps.db, { userId: live.userId, botId: live.botId, taskId: live.id });
+            publishTask(live.userId, live.conversationId, live.id);
+          },
+          ...(fetchImpl
+            ? {
+                request: async (url: string, init: { method: string; headers: Record<string, string>; body?: string; redirect?: "manual"; signal?: AbortSignal }) => {
+                  const response = await fetchImpl(url, init);
+                  return { ok: response.ok, status: response.status, text: () => response.text() };
+                },
+              }
+            : {}),
+          resolveLaunch: (appName) => {
+            const launch = resolveMcpLaunch(catalog, live.userId, appName);
+            return { env: launch.env, headers: launch.headers };
+          },
+        }),
+        files,
+        catalog,
+        userId: live.userId,
+        botId: live.botId,
+        taskId: live.id,
+      });
+      closeMcp = () => taskMcp.close();
       if (live.stopRequested) {
         finish(scope, live, "cancelled", null, seq);
         return;
       }
-      const mcpTools = installedMcp.tools;
       const durationCap = () => resolveTaskMaxDurationSec(deps.db, live.userId, deps.config.maxTaskDurationSec);
       const confineTool = (signal: AbortSignal | undefined): { signal: AbortSignal | undefined; settle: () => string | undefined } => {
         const maxSec = durationCap();
@@ -1054,20 +980,6 @@ export function createChatService(deps: ChatServiceDeps) {
           throw error;
         }
       };
-      const dress = (incoming: AgentTool[]): AgentTool[] => {
-        const guarded = incoming.map((tool) => {
-          const execute = tool.execute.bind(tool);
-          tool.execute = async (toolCallId, params, signal, onUpdate) => {
-            if (tool.name !== "request_takeover" && !READ_ONLY_TOOLS[tool.name] && remoteUncertain(deps.db, live.userId)) {
-              throw new Error("远端可能仍在执行。需要单独确认后才能继续写操作。");
-            }
-            return runLimitedTool(signal, (limited) => execute(toolCallId, params, limited, onUpdate));
-          };
-          return tool;
-        });
-        const tracked = deps.flights ? guarded.map((item) => trackExecution(live.userId, item, deps.flights!)) : guarded;
-        return bindSecrets(tracked, (name) => broker.lookup(live.userId, live.id, name));
-      };
       const installBinding: InstallMcpBinding = {
         userId: live.userId,
         botId: bot.id,
@@ -1088,19 +1000,7 @@ export function createChatService(deps: ChatServiceDeps) {
           chat.updateTask(scope, live.id, { error: "remote_unconfirmed" });
           markRemoteUncertain(deps.db, { userId: live.userId, botId: live.botId, taskId: live.id });
         },
-        launch: async (appName, signal) => {
-          const loading = signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
-          const info = await files.inspectApp(appName, loading);
-          const added: AgentTool[] = [];
-          for (const server of info.mcpServers) {
-            const started = await installedMcp.client.launchApp(appName, server, loading, live.id);
-            const listed = await installedMcp.client.listTools(started.server, loading);
-            added.push(...appendMcpTools(usedToolNames, installedMcp.client, started.server, listed.tools));
-          }
-          pendingMcp.push(...dress(added));
-          rememberMcp(live.botId, added.map((tool) => ({ app: appName, name: tool.name })));
-          return added.map((tool) => tool.name);
-        },
+        launch: async () => [],
       };
       const rawTools = [
         ...machineTools(files, {
@@ -1153,6 +1053,21 @@ export function createChatService(deps: ChatServiceDeps) {
         ...browserTools(bound),
         ...(deps.config.visionModels.includes(bot.model) ? [browserScreenshotTool(bound)] : []),
         secretTool,
+        saveSecretFromMachineTool({
+          userId: live.userId,
+          taskId: live.id,
+          catalog,
+          files,
+          confineNow: () => settingsRepository(deps.db).fsConfine(),
+          remember: (name, value) => broker.remember(live.id, name, value),
+          stopApp: (name) => taskMcp.stopApp(name),
+        }),
+        linkAppCredentialTool({
+          userId: live.userId,
+          botId: live.botId,
+          catalog,
+          stopApp: (name) => taskMcp.stopApp(name),
+        }),
         searchAppsTool(catalog, live.userId),
         packageAppTool({
           userId: live.userId,
@@ -1175,7 +1090,8 @@ export function createChatService(deps: ChatServiceDeps) {
           knownSecrets: () => broker.known(live.userId, live.id),
           apps: privateSkillStorage(catalog, live.userId),
         }),
-        ...mcpTools,
+        taskMcp.inspectTool,
+        taskMcp.callTool,
         ...memoryTools({
           knownSecrets: () => broker.known(live.userId, live.id),
           save: (content) => memoryStore.save(scope, bot.id, { id: ulid(), content, sourceTaskId: live.id }),
@@ -1210,25 +1126,6 @@ export function createChatService(deps: ChatServiceDeps) {
         proposeApprovalRuleTool({ db: deps.db, userId: live.userId, botId: bot.id }),
       ];
       seq = chat.maxSeq(scope, live.id);
-      for (const failure of installedMcp.failures) {
-        seq += 1;
-        const notice = `应用 ${failure.name} 的工具当前不可用（${failure.category}）`;
-        const step = chat.insertStep(scope, {
-          id: ulid(),
-          taskId: live.id,
-          seq,
-          kind: "mcp",
-          status: "failed",
-          requestJson: JSON.stringify({ name: "mcp_load", app: failure.name, category: failure.category }),
-        });
-        if (!step) continue;
-        chat.finishStep(scope, step.id, {
-          status: "failed",
-          responseJson: JSON.stringify({ text: notice }),
-        });
-        const current = chat.listSteps(scope, live.id)?.find((item) => item.id === step.id);
-        if (current) publishStep(live.conversationId, current);
-      }
       const guardedTools = rawTools.map((tool) => {
         const execute = tool.execute.bind(tool);
         tool.execute = async (toolCallId, params, signal, onUpdate) => {
@@ -1297,7 +1194,6 @@ export function createChatService(deps: ChatServiceDeps) {
         deps.flights ? guardedTools.map((tool) => trackExecution(live.userId, tool, deps.flights!)) : guardedTools,
         (name) => broker.lookup(live.userId, live.id, name),
       );
-      for (const tool of executable) usedToolNames.add(tool.name);
       const guard = async (context: BeforeToolCallContext, signal?: AbortSignal) => {
         const overBudget = budgetFailure(gatewayTask);
         if (overBudget) {
@@ -1381,9 +1277,11 @@ export function createChatService(deps: ChatServiceDeps) {
         }
       }
       await takeParkedMessages(scope, live, transcript, deps.config.visionModels.includes(bot.model), new Set(presented.map((entry) => entry.id)));
-      const unavailableNotice = installedMcp.unavailable
-        .map((name) => `应用 ${name} 的工具当前不可用`)
-        .join("\n");
+      const appsText = installedAppsBlock(installsForModelContext(catalog, live.userId, live.botId).map((app) => ({
+        name: app.name,
+        version: app.version,
+        config: app.config,
+      })));
       const agentHolder: { agent?: Agent } = {};
       const agent = new Agent({
         initialState: {
@@ -1392,15 +1290,10 @@ export function createChatService(deps: ChatServiceDeps) {
             bot.instructions,
             formatMemorySection(recent, matched),
             statusBlock(now(), "运行中", broker.names(live.userId)),
-          ), skillText, unavailableNotice].filter((part) => part.length > 0).join("\n\n"),
+          ), appsText, skillText].filter((part) => part.length > 0).join("\n\n"),
           model,
           tools: executable,
           messages: transcript,
-        },
-        prepareNextTurnWithContext: (turn) => {
-          if (pendingMcp.length === 0) return undefined;
-          const tools = [...(turn.context.tools ?? []), ...pendingMcp.splice(0)];
-          return { context: { ...turn.context, tools } };
         },
         streamFn: relayWithOverflowRetry(deps.streamFn, limits.contextTokens, (next, overflowSignal) =>
           compactLive(next, true, overflowSignal),

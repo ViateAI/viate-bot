@@ -234,7 +234,7 @@ describe("context summary", () => {
         res.end(textSse(body.includes("MID-ONLY") ? "第二段完成" : body.includes("再补一句") ? "续上了" : "先到这里", 80, 5));
         return;
       }
-      res.end(toolSse(4800, 10));
+      res.end(toolSse(5400, 10));
     });
     const machinePort = await listen(async (req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
@@ -242,7 +242,8 @@ describe("context summary", () => {
     });
     const { config, ctx } = await opened({
       VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`,
-      VB_MODEL_CONTEXT_TOKENS: "8000",
+      // 懒加载工具也占上下文。窗口只要大到先调用工具，再把更早的对话压成摘要。
+      VB_MODEL_CONTEXT_TOKENS: "8900",
       VB_MAX_TASK_STEPS: "2",
     });
     const scope = userScope("user-a");
@@ -338,7 +339,7 @@ describe("context summary", () => {
     const task = chat.listTasks(scope, conversation.id)?.[0];
     expect(task?.state).toBe("succeeded");
     expect(task?.error).toBeNull();
-    expect(task?.usageJson).toContain("4965");
+    expect(task?.usageJson).toContain("5565");
     const steps = chat.listSteps(scope, task?.id ?? "") ?? [];
     expect(steps.some((step) => step.kind === "compact" && step.requestJson.includes("已压缩较早的上下文"))).toBe(true);
     const summaryEvent = eventRepository(ctx.db).listByBot(bot.id).find((event) => event.attrsJson.includes('"inputTokens":50'));

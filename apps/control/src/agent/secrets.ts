@@ -170,6 +170,14 @@ export function createSecretBroker(deps: SecretBrokerDeps) {
         .map((row) => row.name)
         .sort();
     },
+    remember(taskId: string, name: string, value: string): void {
+      let bag = memory.get(taskId);
+      if (!bag) {
+        bag = new Map();
+        memory.set(taskId, bag);
+      }
+      bag.set(name, value);
+    },
     drop(taskId: string): void {
       memory.delete(taskId);
       clearArm(taskId);

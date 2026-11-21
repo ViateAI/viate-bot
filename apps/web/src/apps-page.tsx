@@ -1,6 +1,6 @@
 /**
  * 用户应用目录。不注册路由。
- * 密钥只出现在当次请求体里；响应中的密钥只能是 { secret: true }，页面不回显。
+ * 密钥只出现在当次请求体里。单独密钥响应是 { secret: true }，共享引用是 secretRef 和可选 prefix，页面都不回显明文。
  * 页面不会直接请求用户填写的 MCP 地址。
  */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -40,8 +40,8 @@ export const appApi = {
   adminIngest: "/api/admin/apps/ingest",
 } as const;
 
-export type RedactedConfig = Record<string, string | { secret: true }>;
-export type ConfigInput = Record<string, string | { secret: true; value?: string }>;
+export type RedactedConfig = Record<string, string | { secret: true } | { secret: true; secretRef: string; prefix?: string }>;
+export type ConfigInput = Record<string, string | { secret: true; value?: string } | { secret: true; secretRef: string; prefix?: string }>;
 
 export interface UserCatalogEntry {
   id: string;
@@ -154,12 +154,19 @@ export interface UserAppRow {
   privateVersions: Array<{ version: string; publishState: string; reason: string | null }>;
 }
 
+export type ConfigMode = "plain" | "secret" | "shared";
+
+const SECRET_REF_RE = /^[a-z0-9_]{1,64}$/;
+const CONFIG_CONTROL = /[\u0000-\u001F\u007F]/;
+
 export interface ConfigDraft {
   id: string;
   key: string;
-  secret: boolean;
+  mode: ConfigMode;
   value: string;
   existingSecret: boolean;
+  secretRef: string;
+  prefix: string;
 }
 
 type CatalogFilter = "all" | "catalog" | "private" | "installed";
@@ -383,9 +390,23 @@ function currentInstall(list: InstallView[]): InstallView | null {
 
 export function draftsFromConfig(config: RedactedConfig): ConfigDraft[] {
   return Object.entries(config).map(([key, value]) => {
-    if (typeof value === "string") return { id: draftId(), key, secret: false, value, existingSecret: false };
-    return { id: draftId(), key, secret: true, value: "", existingSecret: true };
+    if (typeof value === "string") return blankDraft(key, { mode: "plain", value });
+    if ("secretRef" in value && typeof value.secretRef === "string") {
+      return blankDraft(key, { mode: "shared", secretRef: value.secretRef, prefix: value.prefix ?? "" });
+    }
+    return blankDraft(key, { mode: "secret", existingSecret: true });
   });
+}
+
+export function applyConfigDraftPatch(
+  row: ConfigDraft,
+  patch: Partial<Pick<ConfigDraft, "key" | "mode" | "value" | "secretRef" | "prefix">>,
+): ConfigDraft {
+  const next = { ...row, ...patch };
+  if (patch.mode === "plain") return { ...next, secretRef: "", prefix: "" };
+  if (patch.mode === "shared") return { ...next, value: "" };
+  if (patch.mode === "secret") return { ...next, secretRef: "", prefix: "" };
+  return next;
 }
 
 export function buildConfigInput(rows: ConfigDraft[]): { ok: true; config: ConfigInput } | { ok: false; error: string } {
@@ -397,7 +418,16 @@ export function buildConfigInput(rows: ConfigDraft[]): { ok: true; config: Confi
     if (!CONFIG_KEY_RE.test(key)) return { ok: false, error: "配置名须为大写字母、数字或下划线，例如 API_TOKEN" };
     if (seen.has(key)) return { ok: false, error: `配置名重复：${key}` };
     seen.add(key);
-    if (row.secret) {
+    if (row.mode === "shared") {
+      const secretRef = row.secretRef.trim();
+      if (!SECRET_REF_RE.test(secretRef)) return { ok: false, error: `密钥名不合法：${key}` };
+      if (row.prefix.length > 64 || CONFIG_CONTROL.test(row.prefix)) return { ok: false, error: `密钥前缀不合法：${key}` };
+      config[key] = row.prefix.length > 0
+        ? { secret: true, secretRef, prefix: row.prefix }
+        : { secret: true, secretRef };
+      continue;
+    }
+    if (row.mode === "secret") {
       const value = row.value.trim();
       if (value.length > 4096) return { ok: false, error: "配置值过长" };
       if (value) config[key] = { secret: true, value };
@@ -410,6 +440,25 @@ export function buildConfigInput(rows: ConfigDraft[]): { ok: true; config: Confi
     if (value) config[key] = value;
   }
   return { ok: true, config };
+}
+
+function blankDraft(key = "", patch: Partial<Omit<ConfigDraft, "id" | "key">> = {}): ConfigDraft {
+  return {
+    id: draftId(),
+    key,
+    mode: "plain",
+    value: "",
+    existingSecret: false,
+    secretRef: "",
+    prefix: "",
+    ...patch,
+  };
+}
+
+function settleDraft(item: ConfigDraft): ConfigDraft {
+  if (item.mode === "secret") return { ...item, value: "", existingSecret: true };
+  if (item.mode === "shared") return { ...item, value: "" };
+  return item;
 }
 
 function draftId(): string {
@@ -1145,16 +1194,11 @@ function AppDetail({
     return "";
   }
 
-  function updateDraft(id: string, patch: Partial<Pick<ConfigDraft, "key" | "secret" | "value">>) {
+  function updateDraft(id: string, patch: Partial<Pick<ConfigDraft, "key" | "mode" | "value" | "secretRef" | "prefix">>) {
     setDirty(true);
     setDrafts((current) => current.map((rowDraft) => {
       if (rowDraft.id !== id) return rowDraft;
-      return {
-        ...rowDraft,
-        ...(patch.key !== undefined ? { key: patch.key } : {}),
-        ...(patch.secret !== undefined ? { secret: patch.secret } : {}),
-        ...(patch.value !== undefined ? { value: patch.value } : {}),
-      };
+      return applyConfigDraftPatch(rowDraft, patch);
     }));
   }
 
@@ -1182,7 +1226,7 @@ function AppDetail({
     setMessage("");
     try {
       await api<{ install: InstallView }>(appApi.install(row.name), { method: "POST", body: JSON.stringify(payload) });
-      setDrafts((current) => current.map((item) => (item.secret ? { ...item, value: "", existingSecret: true } : item)));
+      setDrafts((current) => current.map(settleDraft));
       setDirty(false);
       setMessage("安装已完成");
       await onChanged();
@@ -1201,7 +1245,7 @@ function AppDetail({
     try {
       const payload: ConfigUpdateRequest = { config };
       await api<{ install: InstallView }>(appApi.config(install.id), { method: "PUT", body: JSON.stringify(payload) });
-      setDrafts((current) => current.map((item) => (item.secret ? { ...item, value: "", existingSecret: true } : item)));
+      setDrafts((current) => current.map(settleDraft));
       setDirty(false);
       setMessage("配置已保存");
       await onChanged();
@@ -1333,7 +1377,7 @@ function AppDetail({
           <span id="app-version-hint" className="text-muted">{forced ? "管理员推送的应用不能更换版本。" : versionHint}</span>
         </label>
       ) : null}
-      <ConfigEditor drafts={drafts} disabled={pending !== null} onChange={updateDraft} onAdd={() => { setDirty(true); setDrafts((current) => [...current, { id: draftId(), key: "", secret: false, value: "", existingSecret: false }]); }} onRemove={(id) => { setDirty(true); setDrafts((current) => current.filter((item) => item.id !== id)); }} />
+      <ConfigEditor drafts={drafts} disabled={pending !== null} onChange={updateDraft} onAdd={() => { setDirty(true); setDrafts((current) => [...current, blankDraft()]); }} onRemove={(id) => { setDirty(true); setDrafts((current) => current.filter((item) => item.id !== id)); }} />
       {installReason ? <p id="install-block-reason" className="text-sm text-muted">{installReason}</p> : null}
       {error ? <ErrorText>{error}</ErrorText> : null}
       {message ? <StatusText>{message}</StatusText> : null}
@@ -1351,7 +1395,7 @@ function AppDetail({
   );
 }
 
-function ConfigEditor({
+export function ConfigEditor({
   drafts,
   disabled,
   onChange,
@@ -1360,40 +1404,72 @@ function ConfigEditor({
 }: {
   drafts: ConfigDraft[];
   disabled: boolean;
-  onChange: (id: string, patch: Partial<Pick<ConfigDraft, "key" | "secret" | "value">>) => void;
+  onChange: (id: string, patch: Partial<Pick<ConfigDraft, "key" | "mode" | "value" | "secretRef" | "prefix">>) => void;
   onAdd: () => void;
   onRemove: (id: string) => void;
 }) {
   return (
-    <fieldset className="grid gap-3" disabled={disabled}>
+    <fieldset className="grid min-w-0 gap-3" disabled={disabled}>
       <legend className="text-sm font-medium">配置</legend>
-      <p className="text-sm text-muted">明文留空表示删除该项。已有密钥留空表示保持不变，不会回显。保存会按当前列表覆盖整份配置。</p>
+      <p className="text-sm text-muted">明文留空表示删除该项。单独密钥留空表示保持不变，不会回显。引用共享密钥只保存密钥名和可选前缀。保存会按当前列表覆盖整份配置。</p>
       {drafts.length === 0 ? <p className="text-sm text-muted">还没有配置项。</p> : null}
       {drafts.map((draft) => {
         const hintId = `config-hint-${draft.id}`;
         return (
-          <div key={draft.id} className="grid gap-2 rounded-xl border border-line bg-surface p-3">
-            <label className="grid gap-1 text-sm">
+          <div key={draft.id} className="grid min-w-0 gap-2 rounded-xl border border-line bg-surface p-3">
+            <label className="grid min-w-0 gap-1 text-sm">
               配置名
               <input className={appFieldClass} value={draft.key} spellCheck={false} autoCapitalize="characters" onChange={(event) => onChange(draft.id, { key: event.target.value.toUpperCase() })} />
             </label>
-            <label className="flex min-h-11 items-center gap-2 text-sm">
-              <input type="checkbox" checked={draft.secret} onChange={(event) => onChange(draft.id, { secret: event.target.checked })} />
-              密钥
+            <label className="grid min-w-0 gap-1 text-sm">
+              类型
+              <select className={appFieldClass} value={draft.mode} aria-describedby={hintId} onChange={(event) => onChange(draft.id, { mode: event.target.value as ConfigMode })}>
+                <option value="plain">明文</option>
+                <option value="secret">单独密钥</option>
+                <option value="shared">引用共享密钥</option>
+              </select>
             </label>
-            <label className="grid gap-1 text-sm">
-              {draft.secret ? "密钥值" : "值"}
-              <input
-                className={appFieldClass}
-                type={draft.secret ? "password" : "text"}
-                autoComplete={draft.secret ? "new-password" : "off"}
-                value={draft.value}
-                aria-describedby={hintId}
-                placeholder={draft.secret && draft.existingSecret ? "已设置，留空则保持不变" : ""}
-                onChange={(event) => onChange(draft.id, { value: event.target.value })}
-              />
-            </label>
-            <p id={hintId} className="text-sm text-muted">{draft.secret ? "密钥只在这次提交时发送，页面不会保存或回显。" : "明文会保存在应用配置里。"}</p>
+            {draft.mode === "shared" ? (
+              <>
+                <p className="text-sm font-medium">引用共享密钥</p>
+                <label className="grid min-w-0 gap-1 text-sm">
+                  密钥名
+                  <input className={appFieldClass} value={draft.secretRef} spellCheck={false} autoComplete="off" onChange={(event) => onChange(draft.id, { secretRef: event.target.value })} />
+                </label>
+                <label className="grid min-w-0 gap-1 text-sm">
+                  前缀
+                  <input className={appFieldClass} value={draft.prefix} spellCheck={false} autoComplete="off" placeholder="可空，例如 Bearer " onChange={(event) => onChange(draft.id, { prefix: event.target.value })} />
+                </label>
+              </>
+            ) : draft.mode === "secret" ? (
+              <>
+                <p className="text-sm font-medium">{draft.existingSecret ? "已单独设置（不回显）" : "单独设置的密钥"}</p>
+                <label className="grid min-w-0 gap-1 text-sm">
+                  密钥值
+                  <input
+                    className={appFieldClass}
+                    type="password"
+                    autoComplete="new-password"
+                    value={draft.value}
+                    aria-describedby={hintId}
+                    placeholder={draft.existingSecret ? "已单独设置（不回显），留空则保持不变" : ""}
+                    onChange={(event) => onChange(draft.id, { value: event.target.value })}
+                  />
+                </label>
+              </>
+            ) : (
+              <label className="grid min-w-0 gap-1 text-sm">
+                值
+                <input className={appFieldClass} type="text" autoComplete="off" value={draft.value} aria-describedby={hintId} onChange={(event) => onChange(draft.id, { value: event.target.value })} />
+              </label>
+            )}
+            <p id={hintId} className="text-sm text-muted">
+              {draft.mode === "shared"
+                ? "注入时把前缀加在共享密钥前面。这里只保存引用，不保存明文。"
+                : draft.mode === "secret"
+                  ? "单独密钥只在这次填写时发送，页面不会保存或回显。"
+                  : "明文会保存在应用配置里。"}
+            </p>
             <button className={appGhostClass} type="button" onClick={() => onRemove(draft.id)}>移除这一项</button>
           </div>
         );

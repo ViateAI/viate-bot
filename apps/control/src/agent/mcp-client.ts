@@ -1,12 +1,9 @@
-import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { obj, unsafe, type Schema } from "@earendil-works/pi-schema";
 import type {
   MachineEndpoint,
   McpRemoteStartRequest,
   McpStartResponse,
   McpStdioStartRequest,
 } from "@viate-bot/protocol";
-import { SAVE_SKILL_TOOL_NAME, SKILL_READ_TOOL_NAME } from "./skill-tools.js";
 import { maskDeep } from "./text.js";
 
 /**
@@ -22,7 +19,7 @@ import { maskDeep } from "./text.js";
  * 命令不展开。URL 和请求头是字面量，不把 ${config.KEY} 替换成密钥。
  * args、env、cwd 只原样转发 ${PLUGIN_ROOT} 和 ${PLUGIN_DATA}，由机器做唯一一次替换。
  * 敏感值只能出现在 stdio 的 env，或 HTTP 首个源站的请求头里，不进 URL，也不进模型能看到的错误文本。
- * 未知工具用 mcpAgentTools 以原名注册。审批在 beforeToolCall，这里不放行。
+ * 第三方工具不在这里注册成 Agent 工具。任务通过 mcp_inspect / mcp_call 按应用懒加载。
  */
 export const MACHINED_MCP_PATH = "/mcp";
 export const MCP_STDIO_PATH = "/mcp/stdio";
@@ -31,46 +28,7 @@ export const MCP_LIST_TOOLS = "tools/list";
 export const MCP_CALL_TOOL = "tools/call";
 
 const SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const AGENT_TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const CWD = new Set(["./", "${PLUGIN_ROOT}", "${PLUGIN_DATA}"]);
-
-/**
- * 只读和控制面名字会跳过审批。skill_read / save_skill 留给技能工具。
- * MCP 工具不能占用这些名字，否则会顶掉原实现或绕过 beforeToolCall。
- */
-const APPROVAL_SKIP_NAMES: Record<string, true> = {
-  fs_read: true,
-  fs_list: true,
-  fs_search: true,
-  browser_snapshot: true,
-  browser_screenshot: true,
-  desktop_screenshot: true,
-  memory_search: true,
-  memory_save: true,
-  memory_delete: true,
-  propose_routine: true,
-  request_secret: true,
-  [SKILL_READ_TOOL_NAME]: true,
-  [SAVE_SKILL_TOOL_NAME]: true,
-  shell_exec: true,
-  fs_write: true,
-  bulk_delete_action: true,
-  request_takeover: true,
-  search_apps: true,
-  install_mcp: true,
-  update_bot_profile: true,
-  propose_approval_rule: true,
-  browser_open: true,
-  browser_click: true,
-  browser_type: true,
-  browser_select: true,
-  browser_scroll: true,
-  browser_tabs: true,
-  browser_wait: true,
-  desktop_mouse: true,
-  desktop_key: true,
-  desktop_type: true,
-};
 
 /** 任务步骤只记类别，不记可能夹带命令或密钥的原文。 */
 export function mcpFailureCategory(error: unknown): "启动失败" | "超时" | "协议错误" {
@@ -322,6 +280,7 @@ export class MachinedMcpClient {
   private readonly slots = new Map<string, string>();
   private readonly launchSecrets = new Map<string, Array<{ name: string; value: string }>>();
   private readonly launchChains = new Map<string, Promise<unknown>>();
+  private readonly appEpoch = new Map<string, number>();
   private generation = 0;
   private nextId = 0;
   private closed = false;
@@ -342,21 +301,27 @@ export class MachinedMcpClient {
     const slot = `${appName}\0${server}`;
     return this.enqueueLaunch(slot, async () => {
       const generation = this.generation;
+      const appEpoch = this.appEpoch.get(appName) ?? 0;
       if (this.closed) throw new Error("MCP 通道已关闭");
       const previous = this.slots.get(slot);
       if (previous) this.retire(previous);
       let material: { env: Record<string, string>; headers: Record<string, string> };
       try {
         material = await this.options.resolveLaunch!(appName);
-      } catch {
+      } catch (error) {
+        if (error instanceof Error && error.name === "CatalogRejected" && error.message.startsWith("引用的密钥")) throw error;
         throw new Error("MCP 应用启动失败");
       }
       const path = `/apps/${encodeURIComponent(appName)}/mcp/${encodeURIComponent(server)}`;
       const body: { env: Record<string, string>; headers: Record<string, string>; owner?: string } = { env: material.env, headers: material.headers };
       if (owner && /^[A-Za-z0-9_-]{1,64}$/.test(owner)) body.owner = owner;
       const response = parseStart(await this.postJson(path, body, signal), server);
-      this.slots.set(slot, response.server);
+      if (this.closed || this.generation !== generation || (this.appEpoch.get(appName) ?? 0) !== appEpoch) {
+        void this.deleteSession(response.server);
+        throw new Error("MCP 通道已关闭");
+      }
       this.publishLaunch(response.server, generation, [...Object.values(material.env), ...Object.values(material.headers)]);
+      this.slots.set(slot, response.server);
       return response;
     });
   }
@@ -421,6 +386,22 @@ export class MachinedMcpClient {
     const params: McpCallParams = { name };
     if (args !== undefined) params.arguments = args;
     return parseCall(await this.rpc(server, MCP_CALL_TOOL, params, signal));
+  }
+
+  /** 关掉这个应用已经打开的会话和本地缓存，下次启动会重新解析密钥。 */
+  stopApp(appName: string): void {
+    this.appEpoch.set(appName, (this.appEpoch.get(appName) ?? 0) + 1);
+    const prefix = `${appName}\0`;
+    const servers = new Set<string>();
+    for (const [slot, server] of this.slots) {
+      if (!slot.startsWith(prefix)) continue;
+      servers.add(server);
+      this.slots.delete(slot);
+    }
+    for (const server of servers) {
+      this.retire(server);
+      void this.deleteSession(server);
+    }
   }
 
   close(): void {
@@ -640,72 +621,6 @@ export class MachinedMcpClient {
     if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
     return pending;
   }
-}
-
-/**
- * 把 tools/list 的结果变成 agent 工具。名字和参数保持原样，执行只转发到这台机器。
- * 未知名字属于 mcp 类，要在 beforeToolCall 里按名字加规范参数审批。
- * 不读取技能的 allowed-tools，也不接受一张预先放行的名单。
- */
-export function mcpAgentTools(
-  client: Pick<MachinedMcpClient, "callTool">,
-  server: string,
-  tools: readonly McpToolDefinition[],
-): AgentTool[] {
-  assertServer(server);
-  const seen = new Set<string>();
-  return tools.map((tool) => {
-    const name = tool.name;
-    if (!AGENT_TOOL_NAME.test(name) || name in APPROVAL_SKIP_NAMES || seen.has(name)) throw new Error("工具名无效");
-    seen.add(name);
-    const parameters = tool.inputSchema?.type === "object"
-      ? unsafe<Record<string, unknown>>(tool.inputSchema as Schema)
-      : obj({}, { open: true });
-    const description = tool.description && tool.description.length > 0 ? tool.description : name;
-    const agentTool: AgentTool = {
-      name,
-      label: name,
-      description,
-      parameters,
-      execute: async (_toolCallId, params, signal) => {
-        if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("工具参数无效");
-        const args = { ...(params as Record<string, unknown>) };
-        const result = await client.callTool(server, name, args, signal);
-        const text = result.content.map((block) => block.text ?? "").filter((line) => line.length > 0).join("\n");
-        const payload: AgentToolResult = {
-          content: [{ type: "text", text: text.length > 0 ? text : "（无文本）" }],
-          details: { server, name, isError: result.isError === true },
-        };
-        if (result.isError === true) payload.isError = true;
-        return payload;
-      },
-    };
-    return agentTool;
-  });
-}
-
-/** 已占用或内置名字直接丢掉，不另起别名。同一次列出的其它工具仍注册。 */
-export function appendMcpTools(
-  used: Set<string>,
-  client: Pick<MachinedMcpClient, "callTool">,
-  server: string,
-  listed: readonly McpToolDefinition[],
-): AgentTool[] {
-  const added: AgentTool[] = [];
-  for (const tool of listed) {
-    if (used.has(tool.name)) continue;
-    let registered: AgentTool[];
-    try {
-      registered = mcpAgentTools(client, server, [tool]);
-    } catch {
-      continue;
-    }
-    const one = registered[0];
-    if (!one) continue;
-    used.add(one.name);
-    added.push(one);
-  }
-  return added;
 }
 
 function timeoutOf(value: number | undefined): number {

@@ -80,12 +80,14 @@ export function ruleMatches(
     const path = stringField(input.args, "path");
     return path !== undefined && pathPrefixMatches(path, (rule.match as FsMatch).pathPrefix);
   }
-  if (input.tool === "shell_exec" || input.tool.startsWith("browser_") || input.tool.startsWith("desktop_") || input.tool.startsWith("fs_")) {
+  const target = mcpTarget(input);
+  if (!target) return false;
+  if (target.tool === "shell_exec" || target.tool.startsWith("browser_") || target.tool.startsWith("desktop_") || target.tool.startsWith("fs_")) {
     return false;
   }
   const match = rule.match as McpMatch;
-  if (!input.mcpApp || input.mcpApp !== match.app) return false;
-  return match.tool === undefined || match.tool === input.tool;
+  if (!target.app || target.app !== match.app) return false;
+  return match.tool === undefined || match.tool === target.tool;
 }
 
 export function browserTarget(raw: string): { origin: string; pathname: string } | undefined {
@@ -199,7 +201,25 @@ export function ruleFromApproval(
     if (!path) return { error: "没有路径" };
     return parseRuleMatch("fs_write", { pathPrefix: path });
   }
+  if (tool === "mcp_call") {
+    const app = stringField(args, "app");
+    const inner = stringField(args, "tool");
+    if (!app || !inner) return { error: "没有应用或工具" };
+    if (inner === "shell_exec" || inner.startsWith("browser_") || inner.startsWith("desktop_") || inner.startsWith("fs_")) {
+      return { error: "这项不能从审批卡片自动批准" };
+    }
+    return { category: "mcp", match: { app, tool: inner } };
+  }
   return { error: "这项不能从审批卡片自动批准" };
+}
+
+function mcpTarget(input: { tool: string; args: unknown; mcpApp?: string | undefined }): { app?: string | undefined; tool: string } | undefined {
+  if (input.tool === "mcp_call") {
+    const tool = stringField(input.args, "tool");
+    if (!tool) return undefined;
+    return { app: stringField(input.args, "app") ?? input.mcpApp, tool };
+  }
+  return { app: input.mcpApp, tool: input.tool };
 }
 
 function browserRule(raw: string): { category: "browser"; match: BrowserMatch } | { error: string } {

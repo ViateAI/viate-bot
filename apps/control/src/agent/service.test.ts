@@ -1458,7 +1458,9 @@ describe("task runner", () => {
     const modelPort = await listen(async (_req, res) => {
       modelCalls += 1;
       res.writeHead(200, { "content-type": "text/event-stream" });
-      res.end(modelCalls === 1 ? toolSse(JSON.stringify({})).replace("shell_exec", "vendor.danger") : textSse("未执行"));
+      res.end(modelCalls === 1
+        ? namedToolSse("mcp_call", JSON.stringify({ app: "vendor", tool: "vendor.danger", arguments: {} }))
+        : textSse("未执行"));
     });
     const { config, ctx } = await opened({ VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`, VB_MODEL_API_KEY: "test-key" });
     const runtime = createRuntime(config, ctx.db);
@@ -1483,11 +1485,12 @@ describe("task runner", () => {
     const { service } = await appFor(ctx, config, { host: "127.0.0.1", port: machinePort, token: "machine" });
     const pending = service.send({ userId: "user-a", botId: bot.id, text: "调用风险工具", mode: "queue" });
     await waitFor(() => {
-      const row = ctx.db.$client.prepare("select state from approvals where tool='vendor.danger'").get() as { state: string } | undefined;
-      return row?.state === "pending";
+      const row = ctx.db.$client.prepare("select state, summary from approvals where tool='mcp_call'").get() as { state: string; summary: string } | undefined;
+      return row?.state === "pending" && row.summary.includes("vendor") && row.summary.includes("vendor.danger");
     });
     expect(execs).toBe(0);
-    const approval = ctx.db.$client.prepare("select id from approvals where tool='vendor.danger' and state='pending'").get() as { id: string };
+    const approval = ctx.db.$client.prepare("select id, summary from approvals where tool='mcp_call' and state='pending'").get() as { id: string; summary: string };
+    expect(approval.summary).toContain("调用 vendor · vendor.danger");
     expect(service.approvalGate.decide("user-a", approval.id, "deny")).toBe("ok");
     const sent = await pending;
     await service.idle();
@@ -1797,7 +1800,7 @@ describe("task runner", () => {
         writeStep += 1;
         if (writeStep === 1) res.end(toolSse(JSON.stringify({ cmd: "true" })));
         else if (writeStep === 2) res.end(namedToolSse("browser_click", JSON.stringify({ ref: "e1" })));
-        else if (writeStep === 3) res.end(namedToolSse("vendor.danger", "{}"));
+        else if (writeStep === 3) res.end(namedToolSse("mcp_call", JSON.stringify({ app: "vendor", tool: "vendor.danger", arguments: {} })));
         else res.end(textSse("写完"));
         return;
       }

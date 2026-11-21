@@ -8,12 +8,14 @@ import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { authenticated } from "../auth.js";
-import { decrypt } from "../crypto.js";
+import { decrypt, encrypt } from "../crypto.js";
 import { botRepository } from "../db/bots.js";
 import { openDatabase, type AppDatabase } from "../db/index.js";
 import { machineRepository } from "../db/machines.js";
 import { appInstalls, appVersions, appVisibility, auditLog, botApps, events, secrets } from "../db/schema.js";
+import { secretRepository } from "../db/secrets.js";
 import { userRepository, type UserRecord } from "../db/users.js";
+import { ulid } from "../id.js";
 import type { ResolvedSession } from "../session.js";
 import { adminScope, userScope } from "../scope.js";
 import {
@@ -50,6 +52,10 @@ const closers: Array<() => void> = [];
 let shaByte = 1;
 const SECRET = "super-secret-value-9f3a";
 const NEXT = "next-secret-value-9f3b";
+const SHARED = "shared-raw-token-9f3c";
+const SHARED_NEXT = "shared-next-token-9f3d";
+const ALICE_ONLY = "alice-only-token-9f3e";
+const BOB_ONLY = "bob-only-token-9f3f";
 
 afterEach(() => {
   for (const close of closers.splice(0)) close();
@@ -721,4 +727,165 @@ describe("catalog", () => {
     await reconcileMachineApps(ctx.deps, "machine-alice");
     expect(ctx.db.$client.prepare("select count(*) as n from routines").get()).toEqual({ n: 1 });
   });
+
+  it("injects one user secret into many apps, with or without a prefix, and redacts the reference", async () => {
+    const ctx = boot();
+    saveUserSecret(ctx, "alice", "corp_token", SHARED);
+    const manifest = JSON.stringify({
+      config: [
+        { key: "MCP_TOKEN", secret: true, env: "MCP_TOKEN", header: "Authorization", credential: "corp_sso", prefix: "Bearer " },
+        { key: "REGION", secret: false },
+      ],
+    });
+    for (const name of ["tara", "onebuild"]) {
+      const published = publish(ctx.deps, name, "1.2.0", manifest);
+      setVisibility(ctx.deps, adminScope("admin"), published.appId, { scope: "all" });
+    }
+    const tara = await installForUser(ctx.deps, "alice", "tara", {
+      config: { MCP_TOKEN: { secret: true, secretRef: "corp_token", prefix: "Bearer " }, REGION: "eu" },
+    });
+    const onebuild = await installForUser(ctx.deps, "alice", "onebuild", {
+      config: { MCP_TOKEN: { secret: true, secretRef: "corp_token" }, REGION: "us" },
+    });
+    expect(resolveMcpLaunch(ctx.deps, "alice", "tara")).toMatchObject({
+      env: { MCP_TOKEN: `Bearer ${SHARED}`, REGION: "eu" },
+      headers: { Authorization: `Bearer ${SHARED}` },
+    });
+    expect(resolveMcpLaunch(ctx.deps, "alice", "onebuild")).toMatchObject({
+      env: { MCP_TOKEN: SHARED, REGION: "us" },
+      headers: { Authorization: SHARED },
+    });
+    expect(listUserInstalls(ctx.deps, "alice").find((item) => item.name === "tara")?.config).toEqual({
+      MCP_TOKEN: { secret: true, secretRef: "corp_token", prefix: "Bearer " },
+      REGION: "eu",
+    });
+    expect(listUserInstalls(ctx.deps, "alice").find((item) => item.name === "onebuild")?.config).toEqual({
+      MCP_TOKEN: { secret: true, secretRef: "corp_token" },
+      REGION: "us",
+    });
+    expect(JSON.stringify(installsForModelContext(ctx.deps, "alice"))).not.toContain(SHARED);
+    expect(configText(ctx, tara.id)).not.toContain(SHARED);
+    expect(configText(ctx, onebuild.id)).not.toContain(SHARED);
+    expect(ctx.db.select().from(secrets).all().map((row) => row.name).sort()).toEqual(["corp_token"]);
+
+    const catalog = await import("./catalog.js");
+    expect(catalog.manifestConfigItems?.(manifest)).toEqual([
+      { key: "MCP_TOKEN", secret: true, env: "MCP_TOKEN", header: "Authorization", credential: "corp_sso", prefix: "Bearer " },
+      { key: "REGION", secret: false },
+    ]);
+
+    saveUserSecret(ctx, "alice", "corp_token", SHARED_NEXT);
+    expect(resolveMcpLaunch(ctx.deps, "alice", "tara").headers.Authorization).toBe(`Bearer ${SHARED_NEXT}`);
+    expect(resolveMcpLaunch(ctx.deps, "alice", "onebuild").env.MCP_TOKEN).toBe(SHARED_NEXT);
+    expect(configText(ctx, tara.id)).not.toContain(SHARED_NEXT);
+
+    ctx.db.delete(secrets).where(eq(secrets.name, "corp_token")).run();
+    expect(() => resolveMcpLaunch(ctx.deps, "alice", "tara")).toThrow(expect.objectContaining({
+      statusCode: 400,
+      message: "引用的密钥 corp_token 不存在，请先登录或保存该密钥",
+    }));
+    expect(() => resolveMcpLaunch(ctx.deps, "alice", "onebuild")).toThrow(expect.objectContaining({
+      statusCode: 400,
+      message: "引用的密钥 corp_token 不存在，请先登录或保存该密钥",
+    }));
+  });
+
+  it("refuses another user's secret, an app-scoped name, and a missing reference", async () => {
+    const ctx = boot();
+    machineRepository(ctx.db).insert(userScope("bob"), {
+      id: "machine-bob",
+      userId: "bob",
+      state: "running",
+      containerId: "c",
+      networkId: "n",
+      volumeName: "vol-bob",
+      imageVersion: "dev",
+      spec: { cpu: 1, memMb: 512, diskGb: 10 },
+      tokenEnc: "enc",
+    });
+    saveUserSecret(ctx, "alice", "corp_token", ALICE_ONLY);
+    saveUserSecret(ctx, "bob", "corp_token", BOB_ONLY);
+    const published = publish(ctx.deps, "relay", "1.0.0", JSON.stringify({
+      config: [{ key: "MCP_TOKEN", secret: true, header: "Authorization" }],
+    }));
+    setVisibility(ctx.deps, adminScope("admin"), published.appId, { scope: "all" });
+    const bob = await installForUser(ctx.deps, "bob", "relay", {
+      config: { MCP_TOKEN: { secret: true, secretRef: "corp_token" } },
+    });
+    expect(resolveMcpLaunch(ctx.deps, "bob", "relay").headers.Authorization).toBe(BOB_ONLY);
+    expect(resolveMcpLaunch(ctx.deps, "bob", "relay").headers.Authorization).not.toBe(ALICE_ONLY);
+    expect(configText(ctx, bob.id)).not.toContain(ALICE_ONLY);
+    expect(configText(ctx, bob.id)).not.toContain(BOB_ONLY);
+
+    const aliceApp = publish(ctx.deps, "vault", "1.0.0", JSON.stringify({
+      config: [{ key: "MCP_TOKEN", secret: true }],
+    }));
+    setVisibility(ctx.deps, adminScope("admin"), aliceApp.appId, { scope: "all" });
+    await expect(installForUser(ctx.deps, "alice", "vault", {
+      config: { MCP_TOKEN: { secret: true, secretRef: "missing_token" } },
+    })).rejects.toMatchObject({
+      statusCode: 400,
+      message: "引用的密钥 missing_token 不存在，请先登录或保存该密钥",
+    });
+    await expect(installForUser(ctx.deps, "alice", "vault", {
+      config: { MCP_TOKEN: { secret: true, secretRef: "app:install:MCP_TOKEN" } },
+    })).rejects.toMatchObject({ statusCode: 400 });
+    await expect(installForUser(ctx.deps, "alice", "vault", {
+      config: { MCP_TOKEN: { secret: true, secretRef: "corp_token", prefix: "Bearer\n" } },
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(listUserInstalls(ctx.deps, "alice").filter((item) => item.state === "installed")).toEqual([]);
+    expect(persisted(ctx.db)).not.toContain(ALICE_ONLY);
+    expect(persisted(ctx.db)).not.toContain(BOB_ONLY);
+  });
+
+  it("replaces a private secret copy with a shared reference and keeps the other keys", async () => {
+    const ctx = boot();
+    saveUserSecret(ctx, "alice", "corp_token", SHARED);
+    const published = publish(ctx.deps, "biops", "1.0.0", JSON.stringify({
+      config: [
+        { key: "MCP_TOKEN", secret: true, env: "MCP_TOKEN" },
+        { key: "REGION", secret: false },
+      ],
+    }));
+    setVisibility(ctx.deps, adminScope("admin"), published.appId, { scope: "all" });
+    const installed = await installForUser(ctx.deps, "alice", "biops", {
+      config: { MCP_TOKEN: SECRET, REGION: "eu" },
+    });
+    expect(ctx.db.select().from(secrets).where(eq(secrets.name, catalogSecretName(installed.id, "MCP_TOKEN"))).get()).toBeTruthy();
+
+    const catalog = await import("./catalog.js");
+    expect(typeof catalog.bindSecretRefs).toBe("function");
+    expect(typeof catalog.manifestConfigItems).toBe("function");
+    const declared = catalog.manifestConfigItems?.(published ? ctx.db.select().from(appVersions).where(eq(appVersions.id, published.versionId)).get()?.manifestJson ?? "" : "");
+    expect(declared).toEqual([
+      { key: "MCP_TOKEN", secret: true, env: "MCP_TOKEN" },
+      { key: "REGION", secret: false },
+    ]);
+    const bound = catalog.bindSecretRefs?.(ctx.deps, "alice", "corp_token", [
+      { installId: installed.id, key: "MCP_TOKEN", prefix: "Bearer " },
+    ]);
+    expect(bound).toEqual([{ installId: installed.id, appName: "biops", key: "MCP_TOKEN", prefix: "Bearer " }]);
+    expect(ctx.db.select().from(secrets).where(eq(secrets.name, catalogSecretName(installed.id, "MCP_TOKEN"))).get()).toBeUndefined();
+    expect(listUserInstalls(ctx.deps, "alice").find((item) => item.id === installed.id)?.config).toEqual({
+      MCP_TOKEN: { secret: true, secretRef: "corp_token", prefix: "Bearer " },
+      REGION: "eu",
+    });
+    expect(resolveMcpLaunch(ctx.deps, "alice", "biops").env).toEqual({ MCP_TOKEN: `Bearer ${SHARED}`, REGION: "eu" });
+    expect(configText(ctx, installed.id)).not.toContain(SECRET);
+    expect(configText(ctx, installed.id)).not.toContain(SHARED);
+    expect(ctx.installed.length).toBe(1);
+  });
 });
+
+function saveUserSecret(ctx: ReturnType<typeof boot>, userId: string, name: string, value: string): void {
+  secretRepository(ctx.db).upsert(userScope(userId), {
+    id: ulid(),
+    name,
+    valueEnc: encrypt(ctx.key, value),
+    scope: "browser",
+  });
+}
+
+function configText(ctx: ReturnType<typeof boot>, installId: string): string {
+  return ctx.db.select().from(appInstalls).where(eq(appInstalls.id, installId)).get()?.configJson ?? "";
+}

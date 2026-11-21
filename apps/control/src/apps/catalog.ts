@@ -58,6 +58,9 @@ const DESIRED_ABSENT = "absent";
 const SECRET_SCOPE = "app";
 const NAME_RE = /^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$/;
 const CONFIG_KEY = /^[A-Z][A-Z0-9_]{0,63}$/;
+const USER_SECRET_NAME = /^[a-z0-9_]{1,64}$/;
+const CREDENTIAL_NAME = /^[a-z0-9_.-]{1,64}$/;
+const CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$/;
 const SOURCE_RE = /^[a-z][a-z0-9_-]{0,31}$/;
@@ -136,9 +139,30 @@ export function privateSkillStorage(deps: CatalogDeps, userId: string): PrivateA
   };
 }
 
-export type ConfigValue = string | { secret: true; value?: string };
+export type ConfigValue =
+  | string
+  | { secret: true; value?: string }
+  | { secret: true; secretRef: string; prefix?: string };
 export type ConfigInput = Record<string, ConfigValue>;
-export type RedactedConfig = Record<string, string | { secret: true }>;
+export type RedactedConfig = Record<
+  string,
+  string | { secret: true } | { secret: true; secretRef: string; prefix?: string }
+>;
+
+export interface ManifestConfigItem {
+  key: string;
+  secret: boolean;
+  credential?: string;
+  prefix?: string;
+  env?: string;
+  header?: string;
+}
+
+export interface SecretRefTarget {
+  installId: string;
+  key: string;
+  prefix?: string;
+}
 
 export interface PublishCatalogInput {
   name: string;
@@ -1666,10 +1690,17 @@ function storeConfig(deps: CatalogDeps, userId: string, installId: string, manif
   }
   const existing = loadInstallSecrets(deps, userId, installId);
   const secretPlain = new Map<string, string>();
+  const secretRefs = new Map<string, { secretRef: string; prefix?: string }>();
   const plain = new Map<string, string>();
   let wroteSecret = false;
   for (const [key, value] of Object.entries(input)) {
     const forceSecret = declared.secret.has(key);
+    if (isSecretRefValue(value)) {
+      const ref = normalizeSecretRef(value);
+      requireUserSecret(deps, userId, ref.secretRef);
+      secretRefs.set(key, ref);
+      continue;
+    }
     if (typeof value === "string" && !forceSecret) {
       plain.set(key, value);
       continue;
@@ -1693,12 +1724,19 @@ function storeConfig(deps: CatalogDeps, userId: string, installId: string, manif
     redacted[key] = maskSecrets(text, masks);
   }
   for (const key of [...secretPlain.keys()].sort()) redacted[key] = { secret: true };
+  for (const key of [...secretRefs.keys()].sort()) {
+    const ref = secretRefs.get(key);
+    if (!ref) continue;
+    redacted[key] = ref.prefix
+      ? { secret: true, secretRef: ref.secretRef, prefix: ref.prefix }
+      : { secret: true, secretRef: ref.secretRef };
+  }
   for (const [key, row] of existing) {
     if (!secretPlain.has(key)) deps.db.delete(secrets).where(eq(secrets.id, row.id)).run();
   }
   for (const [key, value] of secretPlain) {
     const supplied = input[key];
-    const replaced = typeof supplied === "string" || supplied?.value !== undefined;
+    const replaced = typeof supplied === "string" || (supplied !== undefined && "value" in supplied && supplied.value !== undefined);
     if (!replaced) continue;
     const name = catalogSecretName(installId, key);
     const valueEnc = encrypt(deps.key, value);
@@ -1750,9 +1788,48 @@ export function resolveMcpLaunch(deps: CatalogDeps, userId: string, name: string
   try {
     const injection = materializeInjection(deps, userId, live.installId);
     return { installId: live.installId, name, env: injection.env, headers: injection.headers };
-  } catch {
+  } catch (error) {
+    if (error instanceof CatalogRejected && error.statusCode === 400) throw error;
     throw new CatalogRejected("请求失败", 502);
   }
+}
+
+/** 把已有用户密钥引用写进安装配置。不重装，不复制密文，不停 MCP。 */
+export function bindSecretRefs(
+  deps: CatalogDeps,
+  userId: string,
+  secretName: string,
+  targets: readonly SecretRefTarget[],
+): Array<{ installId: string; appName: string; key: string; prefix?: string }> {
+  if (!USER_SECRET_NAME.test(secretName) || secretName.startsWith("app:")) throw new CatalogRejected("密钥名不合法", 400);
+  requireUserSecret(deps, userId, secretName);
+  if (targets.length === 0) throw new CatalogRejected("没有可绑定的应用", 400);
+  const bound: Array<{ installId: string; appName: string; key: string; prefix?: string }> = [];
+  for (const target of targets) {
+    if (!CONFIG_KEY.test(target.key)) throw new CatalogRejected("配置名不合法", 400);
+    const prefix = target.prefix && target.prefix.length > 0 ? target.prefix : undefined;
+    if (prefix !== undefined && !validPrefix(prefix)) throw new CatalogRejected("密钥前缀不合法", 400);
+    const owned = findOwnedInstall(deps.db, userId, target.installId);
+    if (!owned || owned.install.desired !== DESIRED_PRESENT || owned.install.state !== "installed") {
+      throw new CatalogRejected("找不到", 404);
+    }
+    const declared = readManifestConfig(owned.version.manifestJson);
+    if (declared.restricted && !declared.keys.has(target.key)) throw new CatalogRejected("配置项不在应用声明里", 400);
+    if (declared.restricted && !declared.secret.has(target.key)) throw new CatalogRejected("配置项不是密钥", 400);
+    const next: ConfigInput = { ...toRedacted(owned.install.configJson) };
+    next[target.key] = prefix
+      ? { secret: true, secretRef: secretName, prefix }
+      : { secret: true, secretRef: secretName };
+    storeConfig(deps, userId, target.installId, owned.version.manifestJson, next);
+    materializeInjection(deps, userId, target.installId);
+    bound.push({
+      installId: target.installId,
+      appName: owned.app.name,
+      key: target.key,
+      ...(prefix ? { prefix } : {}),
+    });
+  }
+  return bound;
 }
 
 /** 按声明把值放进 stdio env 或 HTTP header。字符串原样传递，不展开 ${config.KEY}。 */
@@ -1774,7 +1851,7 @@ function materializeInjection(
   const env: Record<string, string> = {};
   const headers: Record<string, string> = {};
   for (const [key, value] of Object.entries(config)) {
-    const plain = typeof value === "string" ? value : stored.get(key)?.value;
+    const plain = injectedValue(deps, userId, value, stored.get(key)?.value);
     if (plain === undefined) throw new CatalogRejected("安装失败", 502);
     const header = declared.header.get(key);
     const named = declared.env.get(key);
@@ -1842,6 +1919,91 @@ function loadInstallSecrets(
     map.set(key, { id: row.id, value });
   }
   return map;
+}
+
+function injectedValue(
+  deps: CatalogDeps,
+  userId: string,
+  value: RedactedConfig[string],
+  stored: string | undefined,
+): string | undefined {
+  if (typeof value === "string") return value;
+  if ("secretRef" in value && typeof value.secretRef === "string") {
+    const prefix = "prefix" in value && typeof value.prefix === "string" ? value.prefix : "";
+    if (prefix && !validPrefix(prefix)) throw new CatalogRejected("密钥前缀不合法", 400);
+    return `${prefix}${requireUserSecret(deps, userId, value.secretRef)}`;
+  }
+  return stored;
+}
+
+function redactedSecret(value: Record<string, unknown>): { secret: true } | { secret: true; secretRef: string; prefix?: string } {
+  if (typeof value.secretRef !== "string" || !USER_SECRET_NAME.test(value.secretRef) || value.secretRef.startsWith("app:")) {
+    return { secret: true };
+  }
+  const prefix = typeof value.prefix === "string" && value.prefix.length > 0 && validPrefix(value.prefix) ? value.prefix : undefined;
+  return prefix ? { secret: true, secretRef: value.secretRef, prefix } : { secret: true, secretRef: value.secretRef };
+}
+
+function collectManifestConfig(config: unknown): ManifestConfigItem[] | undefined {
+  if (Array.isArray(config)) {
+    const items: ManifestConfigItem[] = [];
+    for (const item of config) {
+      if (!isRecord(item) || typeof item.key !== "string" || !CONFIG_KEY.test(item.key)) continue;
+      items.push(manifestItem(item.key, item));
+    }
+    return items;
+  }
+  if (!isRecord(config)) return undefined;
+  const items: ManifestConfigItem[] = [];
+  for (const [key, spec] of Object.entries(config)) {
+    if (!CONFIG_KEY.test(key)) continue;
+    items.push(manifestItem(key, isRecord(spec) ? spec : {}));
+  }
+  return items;
+}
+
+function manifestItem(key: string, spec: Record<string, unknown>): ManifestConfigItem {
+  const item: ManifestConfigItem = { key, secret: spec.secret === true };
+  if (typeof spec.credential === "string" && CREDENTIAL_NAME.test(spec.credential)) item.credential = spec.credential;
+  if (typeof spec.prefix === "string" && validPrefix(spec.prefix)) item.prefix = spec.prefix;
+  if (typeof spec.env === "string" && ENV_NAME.test(spec.env)) item.env = spec.env;
+  if (typeof spec.header === "string" && HEADER_NAME.test(spec.header)) item.header = spec.header;
+  return item;
+}
+
+function isSecretRefValue(value: ConfigValue): value is { secret: true; secretRef: string; prefix?: string } {
+  return typeof value !== "string" && "secretRef" in value && typeof value.secretRef === "string";
+}
+
+function normalizeSecretRef(value: { secretRef: string; prefix?: string }): { secret: true; secretRef: string; prefix?: string } {
+  if (!USER_SECRET_NAME.test(value.secretRef) || value.secretRef.startsWith("app:")) throw new CatalogRejected("密钥名不合法", 400);
+  if (value.prefix === undefined || value.prefix.length === 0) return { secret: true, secretRef: value.secretRef };
+  if (!validPrefix(value.prefix)) throw new CatalogRejected("密钥前缀不合法", 400);
+  return { secret: true, secretRef: value.secretRef, prefix: value.prefix };
+}
+
+function validPrefix(value: string): boolean {
+  return value.length <= 64 && !CONTROL_CHARS.test(value);
+}
+
+function requireUserSecret(deps: CatalogDeps, userId: string, name: string): string {
+  if (!USER_SECRET_NAME.test(name) || name.startsWith("app:")) throw new CatalogRejected("密钥名不合法", 400);
+  const row = deps.db
+    .select()
+    .from(secrets)
+    .where(and(eq(secrets.userId, userId), eq(secrets.name, name)))
+    .get();
+  if (!row || row.scope === SECRET_SCOPE || row.name.startsWith("app:")) {
+    throw new CatalogRejected(`引用的密钥 ${name} 不存在，请先登录或保存该密钥`, 400);
+  }
+  try {
+    const value = decrypt(deps.key, row.valueEnc);
+    if (value.length === 0) throw new CatalogRejected(`引用的密钥 ${name} 不存在，请先登录或保存该密钥`, 400);
+    return value;
+  } catch (error) {
+    if (error instanceof CatalogRejected) throw error;
+    throw new CatalogRejected(`引用的密钥 ${name} 不存在，请先登录或保存该密钥`, 400);
+  }
 }
 
 function proposeTemplateRoutines(
@@ -2201,10 +2363,20 @@ function toRedacted(configJson: string): RedactedConfig {
       continue;
     }
     if (isRecord(value) && value.secret === true) {
-      output[key] = { secret: true };
+      output[key] = redactedSecret(value);
     }
   }
   return output;
+}
+
+export function manifestConfigItems(manifestJson: string): ManifestConfigItem[] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(manifestJson) as unknown;
+  } catch {
+    return undefined;
+  }
+  return collectManifestConfig(configNode(parsed));
 }
 
 function readManifestConfig(manifestJson: string): {
@@ -2348,6 +2520,14 @@ function parseConfigInput(value: unknown): ConfigInput {
       continue;
     }
     if (isRecord(item) && item.secret === true) {
+      if (item.secretRef !== undefined) {
+        if (item.prefix !== undefined && typeof item.prefix !== "string") throw new CatalogRejected("密钥前缀不合法", 400);
+        output[key] = normalizeSecretRef({
+          secretRef: typeof item.secretRef === "string" ? item.secretRef : "",
+          ...(typeof item.prefix === "string" ? { prefix: item.prefix } : {}),
+        });
+        continue;
+      }
       const raw = item.value;
       if (raw === undefined) {
         output[key] = { secret: true };

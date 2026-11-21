@@ -62,6 +62,11 @@ describe("auto-approval rules", () => {
     expect(ruleMatches(one, { now: 0, tool: "other", args: {}, mcpApp: "demo" })).toBe(false);
     expect(ruleMatches(all, { now: 0, tool: "ping", args: {}, mcpApp: "other" })).toBe(false);
     expect(ruleMatches(all, { now: 0, tool: "shell_exec", args: { cmd: "true" }, mcpApp: "demo" })).toBe(false);
+    expect(ruleMatches(all, { now: 0, tool: "mcp_call", args: { app: "demo", tool: "ping", arguments: { q: 1 } } })).toBe(true);
+    expect(ruleMatches(one, { now: 0, tool: "mcp_call", args: { app: "demo", tool: "ping" } })).toBe(true);
+    expect(ruleMatches(one, { now: 0, tool: "mcp_call", args: { app: "demo", tool: "other" } })).toBe(false);
+    expect(ruleMatches(all, { now: 0, tool: "mcp_call", args: { app: "other", tool: "ping" } })).toBe(false);
+    expect(ruleMatches(all, { now: 0, tool: "mcp_call", args: { app: "demo", tool: "shell_exec" } })).toBe(false);
   });
 
   it("ignores expired rules and exempt tools", () => {
@@ -84,6 +89,12 @@ describe("auto-approval rules", () => {
     });
     expect(ruleFromApproval("shell_exec", { cmd: "echo hi; id" }, undefined)).toEqual({ error: "命令前缀无效，或包含 shell 元字符" });
     expect(ruleFromApproval("desktop_mouse", {}, undefined)).toEqual({ error: "这项不能自动批准" });
+    expect(ruleFromApproval("mcp_call", { app: "demo", tool: "ping", arguments: { text: "hi" } }, undefined)).toEqual({
+      category: "mcp",
+      match: { app: "demo", tool: "ping" },
+    });
+    expect(ruleFromApproval("mcp_call", { app: "demo" }, undefined)).toEqual({ error: "没有应用或工具" });
+    expect(ruleFromApproval("mcp_call", { app: "demo", tool: "shell_exec" }, undefined)).toEqual({ error: "这项不能从审批卡片自动批准" });
     expect(parseRuleMatch("desktop", {})).toEqual({ error: "不支持这类自动审批" });
   });
 });
