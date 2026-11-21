@@ -8,6 +8,7 @@ import {
   listMachines,
   machineStats,
   provisionUser,
+  selfServeProvision,
   rebuildMachine,
   restartMachine,
   startMachine,
@@ -38,6 +39,17 @@ export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & 
     if (!path.startsWith("/api/admin")) return;
     const resolved = authenticated.get(request);
     if (!resolved?.user.isAdmin) return reply.code(404).send({ error: "找不到" });
+  });
+
+  app.post("/api/me/provision", async (request, reply) => {
+    const resolved = authenticated.get(request);
+    if (!resolved) return reply.code(401).send({ error: "未登录" });
+    try {
+      const result = await selfServeProvision(deps, resolved.user.id);
+      return reply.code(201).send(result);
+    } catch (error) {
+      return sendError(reply, error);
+    }
   });
 
   app.get<{ Querystring: { limit?: string } }>("/api/admin/users", async (request, reply) => {

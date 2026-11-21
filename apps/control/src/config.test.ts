@@ -21,9 +21,31 @@ describe("loadConfig", () => {
     expect(config.integration).toBe("none");
     expect(config.allowSignup).toBe(false);
     expect(config.oidcTrustEmail).toBe(false);
+    expect(config.allowSelfServe).toBe(false);
+    expect(config.allowNewBot).toBe(true);
+    expect(config.maxProvisionedUsers).toBe(0);
     expect(config.oidcIssuer).toBe("");
     expect(config.modelBaseUrl).toBe("");
     expect(config.serviceCredentials).toBeUndefined();
+  });
+
+  it("parses self-serve switches and rejects a bad provision cap", () => {
+    const enabled = loadConfig({
+      VB_ALLOW_SELF_SERVE: "true",
+      VB_ALLOW_NEW_BOT: "0",
+      VB_MAX_PROVISIONED_USERS: "12",
+    });
+    expect(enabled.allowSelfServe).toBe(true);
+    expect(enabled.allowNewBot).toBe(false);
+    expect(enabled.maxProvisionedUsers).toBe(12);
+    expect(loadConfig({ VB_ALLOW_SELF_SERVE: "1" }).allowSelfServe).toBe(true);
+    expect(loadConfig({ VB_ALLOW_NEW_BOT: "false" }).allowNewBot).toBe(false);
+    expect(loadConfig({ VB_MAX_PROVISIONED_USERS: "0" }).maxProvisionedUsers).toBe(0);
+    expect(() => loadConfig({ VB_ALLOW_SELF_SERVE: "yes" })).toThrow(/VB_ALLOW_SELF_SERVE/);
+    expect(() => loadConfig({ VB_ALLOW_NEW_BOT: "no" })).toThrow(/VB_ALLOW_NEW_BOT/);
+    expect(() => loadConfig({ VB_MAX_PROVISIONED_USERS: "-1" })).toThrow(/VB_MAX_PROVISIONED_USERS/);
+    expect(() => loadConfig({ VB_MAX_PROVISIONED_USERS: "1.5" })).toThrow(/VB_MAX_PROVISIONED_USERS/);
+    expect(() => loadConfig({ VB_MAX_PROVISIONED_USERS: "many" })).toThrow(/VB_MAX_PROVISIONED_USERS/);
   });
 
   it("rejects a non-integer idle timeout", () => {

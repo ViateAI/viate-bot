@@ -150,6 +150,8 @@ export function registerAuth(app: FastifyInstance, deps: AuthDeps): void {
       isAdmin: user.isAdmin,
       provisioned: quotaRepository(deps.db).find(userScope(user.id)) !== undefined,
       showProcess: userShowsProcess(deps.db, userScope(user.id)),
+      allowSelfServe: deps.config.allowSelfServe,
+      allowNewBot: deps.config.allowNewBot,
       csrf: resolved.session.csrf,
     };
   });

@@ -51,6 +51,10 @@ export function quotaRepository(db: AppDatabase) {
       const row = db.select().from(quotas).where(eq(quotas.userId, scope.userId)).get();
       return row ? toRecord(row) : undefined;
     },
+    /** 已开通人数。自助名额在容量锁内读这一行数，避免并发超卖。 */
+    count(): number {
+      return db.select({ userId: quotas.userId }).from(quotas).all().length;
+    },
     /** 开发种子。没有这一行时用户算未开通。已有行不覆盖。 */
     seed(userId: string, patch: Partial<QuotaDraft> = {}): void {
       if (db.select().from(quotas).where(eq(quotas.userId, userId)).get()) return;

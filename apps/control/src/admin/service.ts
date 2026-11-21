@@ -100,7 +100,44 @@ export async function provisionUser(deps: ProvisionDeps, scope: AdminScope, inpu
   return withLock(user.id, () => provisionLocked(deps, scope, input, user));
 }
 
-async function provisionLocked(deps: ProvisionDeps, scope: AdminScope, input: ProvisionInput, user: UserRecord) {
+const SELF_SERVE_CAPACITY = "self-serve-capacity";
+
+/**
+ * 已登录且没有配额的用户开通自己的第一台机器。
+ * 名额上限大于 0 时，容量锁包住整段开通：配额行要到健康检查之后才写入，
+ * 只在检查瞬间加锁仍会让两个人同时通过并超卖。管理员代开不走这里。
+ */
+export async function selfServeProvision(deps: ProvisionDeps, userId: string) {
+  if (!deps.config.allowSelfServe) throw new AdminRejected("未开启自助开通", 403);
+  const existing = userRepository(deps.db).findById(userId);
+  if (!existing) throw new AdminRejected("找不到用户", 404);
+  if (existing.status === "disabled") throw new AdminRejected("用户已禁用", 403);
+  const open = () => withLock(existing.id, () => openSelfServe(deps, existing.id));
+  if (deps.config.maxProvisionedUsers > 0) return withLock(SELF_SERVE_CAPACITY, open);
+  return open();
+}
+
+async function openSelfServe(deps: ProvisionDeps, userId: string) {
+  const user = userRepository(deps.db).findById(userId);
+  if (!user) throw new AdminRejected("找不到用户", 404);
+  if (user.status === "disabled") throw new AdminRejected("用户已禁用", 403);
+  const quotas = quotaRepository(deps.db);
+  if (quotas.find(userScope(user.id))) throw new AdminRejected("已经开通", 409);
+  const max = deps.config.maxProvisionedUsers;
+  if (max > 0 && quotas.count() >= max) throw new AdminRejected("开通名额已满，请联系管理员", 409);
+  const templates = settingsRepository(deps.db).templates();
+  const template = templates.find((item) => item.id === "general") ?? templates[0];
+  if (!template) throw new AdminRejected("管理员尚未配置默认模板，请联系管理员", 503);
+  return provisionLocked(deps, adminScope(user.id), { userId: user.id, templateId: template.id }, user, "user.self_serve_provision");
+}
+
+async function provisionLocked(
+  deps: ProvisionDeps,
+  scope: AdminScope,
+  input: ProvisionInput,
+  user: UserRecord,
+  auditAction = "user.provision",
+) {
   const audit = auditRepository(deps.db);
   const quotas = quotaRepository(deps.db);
   let userId = "";
@@ -166,7 +203,7 @@ async function provisionLocked(deps: ProvisionDeps, scope: AdminScope, input: Pr
     writeWelcome(deps.db, user.id, bot.id, template, model, deps.now ?? (() => new Date()));
     if (!quotas.insert(scope, user.id, quota)) throw new AdminRejected("已经开通", 409);
     quotaInserted = true;
-    audit.write(scope, "user.provision", user.id, { botId: bot.id, templateId: template.id, ok: true });
+    audit.write(scope, auditAction, user.id, { botId: bot.id, templateId: template.id, ok: true });
     return {
       userId: user.id,
       botId: bot.id,
@@ -206,7 +243,7 @@ async function provisionLocked(deps: ProvisionDeps, scope: AdminScope, input: Pr
     const original = error instanceof Error ? error.message : "开通失败";
     const message = rollbackErrors.length > 0 ? `${original}；回滚未完成：${rollbackErrors.join("、")}` : original;
     const target = userId || input.userId || input.subject || "unknown";
-    audit.write(scope, "user.provision", target, { ok: false, error: message.slice(0, 200) });
+    audit.write(scope, auditAction, target, { ok: false, error: message.slice(0, 200) });
     if (rollbackErrors.length === 0 && (error instanceof AdminRejected || error instanceof BotRejected)) throw error;
     throw new AdminRejected(message, 503);
   }

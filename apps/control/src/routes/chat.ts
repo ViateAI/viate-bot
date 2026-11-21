@@ -61,6 +61,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
   app.post("/api/bots", async (request, reply) => {
     const scope = scopeOf(request, reply);
     if (!scope) return;
+    if (!deps.config.allowNewBot) return reply.code(403).send({ error: "管理员已关闭自建 bot" });
     const body = record(request.body);
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const model = typeof body.model === "string" ? body.model.trim() : "";

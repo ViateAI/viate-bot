@@ -99,6 +99,9 @@ Read from the process environment only. Defaults are the values in `apps/control
 | `VB_OIDC_CLIENT_ID` | empty | OIDC client id |
 | `VB_OIDC_CLIENT_SECRET` | empty | OIDC client secret |
 | `VB_ALLOW_SIGNUP` | `false` | `true` lets an unknown identity create a user with no bot. It does not provision a bot |
+| `VB_ALLOW_SELF_SERVE` | `false` | `true` lets a signed-in user with no quota provision their first bot and machine. It does not change who can log in |
+| `VB_ALLOW_NEW_BOT` | `true` | `false` makes `POST /api/bots` return 403. Admin provisioning and the self-serve first bot still work |
+| `VB_MAX_PROVISIONED_USERS` | `0` | Cap on self-serve provisions, counted as quota rows. `0` means no cap. Admin provisioning is not blocked |
 | `VB_OIDC_TRUST_EMAIL` | `false` | **Global email-trust switch, not only the first admin login.** Off: only `email_verified=true` can match an admin by email, bind the single unbound user, or pass the first admin login. On: those three paths trust an unverified email from the IdP (`false` or missing), but the email claim must be non-empty. Anyone who can obtain an admin email at the IdP becomes an admin. Anyone who can obtain a pre-provisioned email can bind that still-unbound user and reach their bots, machine, and data, even when signup is closed and the email is not an admin. Already-bound users still match only `(provider, sub)`, not email. Turn this on only when the IdP has no open signup, or accounts are created by an admin and untrusted users cannot change the email. Confirm that before using another IdP. viate always reports `email_verified=false`, so viate needs this on |
 | `VB_MODEL_BASE_URL` | empty | Model gateway. Required when calling a model |
 | `VB_MODEL_API_KEY` | empty | Shared key. Required in shared-key mode |

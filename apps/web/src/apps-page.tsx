@@ -745,7 +745,15 @@ export function AppsPage() {
         </div>
       </div>
       {me.data && !me.data.provisioned ? (
-        <p data-testid="not-provisioned" className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-secondary">尚未开通，请联系管理员。开通前不能安装。</p>
+        <p data-testid="not-provisioned" className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-secondary">
+          尚未开通，请联系管理员。开通前不能安装。
+          {me.data.allowSelfServe ? (
+            <>
+              {" "}
+              <a href="/" className="text-primary underline">前往自助开通</a>
+            </>
+          ) : null}
+        </p>
       ) : null}
       {privateOpen ? (
         <PrivatePanel

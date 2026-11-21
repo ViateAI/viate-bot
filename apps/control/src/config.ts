@@ -28,6 +28,12 @@ export interface ControlConfig {
   oidcClientSecret: string;
   allowSignup: boolean;
   oidcTrustEmail: boolean;
+  /** 已登录且无配额的用户能否自己开通首个 bot。只读环境变量。 */
+  allowSelfServe: boolean;
+  /** 已开通用户能否再 POST /api/bots。管理员代开和自助首开不受影响。 */
+  allowNewBot: boolean;
+  /** 自助开通人数上限。0 表示不限制。管理员代开不看这个上限。 */
+  maxProvisionedUsers: number;
   modelBaseUrl: string;
   modelApiKey: string;
   /** 为空表示不限制。非空时，网关和创建 bot 都只接受列表里的模型。 */
@@ -78,6 +84,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControlConfig 
     oidcClientSecret: optional(env, "VB_OIDC_CLIENT_SECRET", ""),
     allowSignup: flag(env, "VB_ALLOW_SIGNUP", false),
     oidcTrustEmail: flag(env, "VB_OIDC_TRUST_EMAIL", false),
+    allowSelfServe: flag(env, "VB_ALLOW_SELF_SERVE", false),
+    allowNewBot: flag(env, "VB_ALLOW_NEW_BOT", true),
+    maxProvisionedUsers: integer(env, "VB_MAX_PROVISIONED_USERS", 0),
     modelBaseUrl: optional(env, "VB_MODEL_BASE_URL", ""),
     modelApiKey: optional(env, "VB_MODEL_API_KEY", ""),
     models: list(env, "VB_MODELS"),

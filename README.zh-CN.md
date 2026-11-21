@@ -120,6 +120,9 @@ Docker socket 访问相当于该 daemon 的 root 权限；不要用 `chmod 666` 
 | `VB_OIDC_CLIENT_ID` | 空 | OIDC client id |
 | `VB_OIDC_CLIENT_SECRET` | 空 | OIDC client secret |
 | `VB_ALLOW_SIGNUP` | `false` | `true` 时，未知身份可以建一个还没有 bot 的用户。不会自动开通 bot |
+| `VB_ALLOW_SELF_SERVE` | `false` | `true` 时，已登录且没有配额的用户可以一键开通首个 bot 和机器。不改变谁能登录 |
+| `VB_ALLOW_NEW_BOT` | `true` | `false` 时普通用户 `POST /api/bots` 返回 403。管理员代开和自助首开仍可用 |
+| `VB_MAX_PROVISIONED_USERS` | `0` | 自助开通人数上限，按配额行计数。`0` 表示不限制。管理员代开不受限 |
 | `VB_OIDC_TRUST_EMAIL` | `false` | **全局邮箱信任开关，不仅用于管理员首登。** 关闭时只有 `email_verified=true` 才能按邮箱认管理员、自动绑定唯一未绑定用户或放行管理员首登。打开后这三条路径都信任 IdP 的未验证邮箱（含 `false` 或缺失），但仍须有非空邮箱声明。能在 IdP 拿到管理员邮箱的人可成为管理员；能拿到任意预开通邮箱的人也可绑定该唯一未绑定用户并访问其 bot、机器及数据，即使关闭注册且邮箱不在管理员列表。已绑定用户仍只按 `(provider, sub)` 匹配，不按邮箱合并。只有 IdP 不开放自助注册、或账号由管理员创建且邮箱不可由不可信用户任意修改时才应打开；对接其他 IdP 先确认。viate 的 `email_verified` 恒为 `false`，接 viate 时需要打开 |
 | `VB_MODEL_BASE_URL` | 空 | 模型网关地址。调用模型时必须有值 |
 | `VB_MODEL_API_KEY` | 空 | 共享 key。共享模式下调用模型时必须有值 |

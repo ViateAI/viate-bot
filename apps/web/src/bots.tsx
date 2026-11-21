@@ -67,11 +67,21 @@ export function BotSidebar({ activeId }: { activeId?: string | undefined }) {
     },
     onError: (caught: Error) => setError(caught.message),
   });
+  const provision = useMutation({
+    mutationFn: () => api<{ botId: string }>("/api/me/provision", { method: "POST" }),
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ["me"] });
+      await queryClient.invalidateQueries({ queryKey: ["bots"] });
+      await navigate({ to: "/b/$botId", params: { botId: result.botId } });
+    },
+  });
 
   function onSubmit(event: FormEvent) {
     event.preventDefault();
     create.mutate();
   }
+
+  const canCreateBot = me.data?.provisioned === true && me.data.allowNewBot !== false;
 
   const listed = (bots.data?.bots ?? []).filter((bot) => {
     const needle = query.trim().toLowerCase();
@@ -92,23 +102,41 @@ export function BotSidebar({ activeId }: { activeId?: string | undefined }) {
             onChange={(event) => setQuery(event.target.value)}
           />
         </label>
-        <button
-          type="button"
-          className="grid size-11 shrink-0 place-items-center rounded-full bg-elevated text-fg ring-1 ring-line hover:bg-hover"
-          aria-expanded={creating}
-          aria-label={creating ? "关闭新建" : "新建 bot"}
-          onClick={() => setCreating((open) => !open)}
-        >
-          <PlusIcon />
-        </button>
+        {canCreateBot ? (
+          <button
+            type="button"
+            className="grid size-11 shrink-0 place-items-center rounded-full bg-elevated text-fg ring-1 ring-line hover:bg-hover"
+            aria-expanded={creating}
+            aria-label={creating ? "关闭新建" : "新建 bot"}
+            onClick={() => setCreating((open) => !open)}
+          >
+            <PlusIcon />
+          </button>
+        ) : null}
       </div>
       {me.data && !me.data.provisioned ? (
-        <p data-testid="not-provisioned" className="mx-3 rounded-2xl bg-elevated px-4 py-6 text-sm text-secondary ring-1 ring-line">
-          尚未开通，请联系管理员
-        </p>
+        me.data.allowSelfServe === true ? (
+          <div data-testid="not-provisioned" className="mx-3 grid gap-3 rounded-2xl bg-elevated px-4 py-6 text-sm text-secondary ring-1 ring-line">
+            <p>你还没有开通工作环境，可一键开通你的默认助手与专属机器。</p>
+            <button
+              type="button"
+              data-testid="self-serve-provision"
+              className="ui-btn"
+              disabled={provision.isPending}
+              onClick={() => provision.mutate()}
+            >
+              {provision.isPending ? "正在开通…" : "开通我的助手"}
+            </button>
+            {provision.isError ? <p role="alert" className="text-danger">{provision.error.message}</p> : null}
+          </div>
+        ) : (
+          <p data-testid="not-provisioned" className="mx-3 rounded-2xl bg-elevated px-4 py-6 text-sm text-secondary ring-1 ring-line">
+            尚未开通，请联系管理员
+          </p>
+        )
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-          {creating ? (
+          {creating && canCreateBot ? (
             <form className="grid gap-3 rounded-2xl bg-elevated p-3 ring-1 ring-line" onSubmit={onSubmit}>
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-medium">新建 bot</h2>
@@ -157,7 +185,7 @@ export function BotSidebar({ activeId }: { activeId?: string | undefined }) {
               {bots.isPending ? <p className="px-2 py-3 text-sm text-muted">正在加载…</p> : null}
               {bots.isError ? <p role="alert" className="px-2 py-3 text-sm text-danger">{bots.error.message}</p> : null}
               {bots.data && listed.length === 0 ? (
-                <p className="px-2 py-6 text-sm text-muted">{query.trim() ? "没有匹配的 bot" : "还没有 bot。点右上角加号创建一个。"}</p>
+                <p className="px-2 py-6 text-sm text-muted">{query.trim() ? "没有匹配的 bot" : canCreateBot ? "还没有 bot。点右上角加号创建一个。" : "还没有 bot。"}</p>
               ) : null}
               <ul className="grid gap-1">
                 {listed.map((bot) => {

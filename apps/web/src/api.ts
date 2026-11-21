@@ -49,6 +49,8 @@ export interface Me {
   isAdmin: boolean;
   provisioned: boolean;
   showProcess: boolean;
+  allowSelfServe?: boolean;
+  allowNewBot?: boolean;
   csrf: string;
 }
 
