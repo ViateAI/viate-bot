@@ -55,6 +55,10 @@ interface AuditRow {
 
 const field = "ui-field";
 const button = "ui-btn";
+
+function splitConfinePaths(text: string): string[] {
+  return text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+}
 const alertClass = "ui-alert";
 const machineButton = "ui-btn-ghost min-h-8 px-2.5 text-xs";
 
@@ -618,6 +622,7 @@ export function AdminSettings() {
       models: string[];
       modelRate: { userPerMin: number; botPerMin: number };
       fsConfine: boolean;
+      fsConfineConfig?: { enabled: boolean; allow: string[]; deny: string[] };
     }>("/api/admin/settings"),
   });
   const [prompt, setPrompt] = useState("");
@@ -626,12 +631,39 @@ export function AdminSettings() {
   const [confineDraft, setConfineDraft] = useState<boolean | null>(null);
   const confineClient = useQueryClient();
   const confineOn = confineDraft ?? settings.data?.fsConfine ?? true;
+  const [allowText, setAllowText] = useState<string | null>(null);
+  const [denyText, setDenyText] = useState<string | null>(null);
+  const [listError, setListError] = useState("");
+  const [listSaved, setListSaved] = useState("");
+  const allowValue = allowText ?? (settings.data?.fsConfineConfig?.allow ?? []).join("\n");
+  const denyValue = denyText ?? (settings.data?.fsConfineConfig?.deny ?? []).join("\n");
   const saveConfine = useMutation({
     mutationFn: (enabled: boolean) => api("/api/admin/fs-confine", { method: "PUT", body: JSON.stringify({ enabled }) }),
     onSuccess: async () => {
       setConfineDraft(null);
       setSaved("");
       await confineClient.invalidateQueries({ queryKey: ["admin-settings"] });
+    },
+  });
+  const saveLists = useMutation({
+    mutationFn: () => api("/api/admin/fs-confine", {
+      method: "PUT",
+      body: JSON.stringify({
+        enabled: confineOn,
+        allow: splitConfinePaths(allowValue),
+        deny: splitConfinePaths(denyValue),
+      }),
+    }),
+    onSuccess: async () => {
+      setAllowText(null);
+      setDenyText(null);
+      setListError("");
+      setListSaved("目录名单已保存");
+      await confineClient.invalidateQueries({ queryKey: ["admin-settings"] });
+    },
+    onError: (error: Error) => {
+      setListSaved("");
+      setListError(error.message);
     },
   });
   const update = useMutation({
@@ -678,8 +710,51 @@ export function AdminSettings() {
             saveConfine.mutate(enabled);
           }}
         />
-        <span>目录限制，默认开启。打开时文件工具和 shell 工作目录只能用 /home/bot 和 /tmp；关闭后可以访问容器内 bot 用户读得到的路径。shell 命令正文两种情况下都不按目录拦截。</span>
+        <span>目录限制，默认开启。打开时文件工具和 shell 工作目录按白名单和黑名单限制；白名单留空则只能用 /home/bot 和 /tmp。关闭后可以访问容器内 bot 用户读得到的路径。shell 命令正文两种情况下都不按目录拦截。</span>
       </label>
+      {confineOn ? (
+        <div className="grid gap-3">
+          <label className="grid gap-1 text-sm">
+            允许目录白名单
+            <textarea
+              data-testid="fs-confine-allow"
+              className={`${field} min-h-24`}
+              value={allowValue}
+              placeholder={"每行一个绝对路径。留空表示使用默认 /home/bot 和 /tmp"}
+              onChange={(event) => {
+                setAllowText(event.target.value);
+                setListSaved("");
+              }}
+            />
+          </label>
+          <label className="grid gap-1 text-sm">
+            拒绝目录黑名单
+            <textarea
+              data-testid="fs-confine-deny"
+              className={`${field} min-h-24`}
+              value={denyValue}
+              placeholder="每行一个绝对路径，优先级高于白名单"
+              onChange={(event) => {
+                setDenyText(event.target.value);
+                setListSaved("");
+              }}
+            />
+          </label>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              data-testid="fs-confine-save"
+              className={button}
+              type="button"
+              disabled={saveLists.isPending}
+              onClick={() => saveLists.mutate()}
+            >
+              保存目录名单
+            </button>
+            {listSaved ? <p className="text-sm text-ok">{listSaved}</p> : null}
+            {listError ? <p className="text-sm text-danger">{listError}</p> : null}
+          </div>
+        </div>
+      ) : null}
       </section>
       <section className="grid gap-3 rounded-xl border border-line bg-surface p-4">
         <h2 className="text-sm font-medium">平台提示词</h2>

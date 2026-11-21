@@ -36,7 +36,7 @@ describe("fs confine setting", () => {
     const settings = settingsRepository(db);
     expect(settings.fsConfine()).toBe(true);
     settings.setFsConfine(true);
-    expect(settings.getJson("fs.confine")).toEqual({ enabled: true });
+    expect(settings.getJson("fs.confine")).toEqual({ enabled: true, allow: [], deny: [] });
     expect(settings.fsConfine()).toBe(true);
     settings.setFsConfine(false);
     expect(settings.fsConfine()).toBe(false);
@@ -44,6 +44,92 @@ describe("fs confine setting", () => {
     expect(settings.fsConfine()).toBe(true);
     settings.setJson("fs.confine", null);
     expect(settings.fsConfine()).toBe(true);
+    db.$client.close();
+  });
+
+  it("reads old and new records, and broken rows stay safely on with empty lists", () => {
+    const db = openDatabase(":memory:");
+    migrate(db, { migrationsFolder: fileURLToPath(new URL("../../drizzle", import.meta.url)) });
+    const settings = settingsRepository(db);
+    expect(settings.fsConfineConfig()).toEqual({ enabled: true, allow: [], deny: [] });
+
+    settings.setJson("fs.confine", { enabled: false });
+    expect(settings.fsConfineConfig()).toEqual({ enabled: false, allow: [], deny: [] });
+    expect(settings.fsConfine()).toBe(false);
+
+    settings.setJson("fs.confine", { enabled: true, allow: ["/work"], deny: ["/work/secret"] });
+    expect(settings.fsConfineConfig()).toEqual({ enabled: true, allow: ["/work"], deny: ["/work/secret"] });
+
+    for (const broken of [null, "broken", ["enabled"], { nope: true }, 1]) {
+      settings.setJson("fs.confine", broken);
+      expect(settings.fsConfineConfig()).toEqual({ enabled: true, allow: [], deny: [] });
+      expect(settings.fsConfine()).toBe(true);
+    }
+
+    settings.setJson("fs.confine", { enabled: false, allow: ["relative"], deny: ["/tmp"] });
+    expect(settings.fsConfineConfig()).toEqual({ enabled: false, allow: [], deny: ["/"] });
+    settings.setJson("fs.confine", { enabled: "yes", allow: "/work", deny: null });
+    expect(settings.fsConfineConfig()).toEqual({ enabled: true, allow: [], deny: ["/"] });
+    settings.setJson("fs.confine", { enabled: true, allow: ["/"], deny: ["relative", "/etc"] });
+    expect(settings.fsConfineConfig()).toEqual({ enabled: true, allow: ["/"], deny: ["/"] });
+    settings.setFsConfine(false);
+    expect(settings.getJson("fs.confine")).toEqual({ enabled: false, allow: ["/"], deny: ["/"] });
+    db.$client.close();
+  });
+
+  it("normalizes allow and deny, and refuses illegal paths without writing", () => {
+    const db = openDatabase(":memory:");
+    migrate(db, { migrationsFolder: fileURLToPath(new URL("../../drizzle", import.meta.url)) });
+    const settings = settingsRepository(db);
+
+    settings.setFsConfineConfig({
+      enabled: true,
+      allow: ["/work/", "", "  ", "/work", "/tmp/"],
+      deny: ["/work/secret/", "/work/secret"],
+    });
+    expect(settings.fsConfineConfig()).toEqual({
+      enabled: true,
+      allow: ["/work", "/tmp"],
+      deny: ["/work/secret"],
+    });
+    expect(settings.getJson("fs.confine")).toEqual({
+      enabled: true,
+      allow: ["/work", "/tmp"],
+      deny: ["/work/secret"],
+    });
+
+    settings.setFsConfine(false);
+    expect(settings.fsConfineConfig()).toEqual({
+      enabled: false,
+      allow: ["/work", "/tmp"],
+      deny: ["/work/secret"],
+    });
+
+    const before = settings.getJson("fs.confine");
+    expect(() => settings.setFsConfineConfig({ enabled: true, allow: ["relative"] })).toThrow(/绝对路径/);
+    expect(() => settings.setFsConfineConfig({ enabled: true, deny: ["/tmp/../etc"] })).toThrow(/\.\./);
+    expect(() => settings.setFsConfineConfig({ enabled: true, allow: ["/tmp/\0x"] })).toThrow(/空字符/);
+    expect(() => settings.setFsConfineConfig({ enabled: true, allow: Array.from({ length: 65 }, (_, index) => `/work/${index}`) })).toThrow(/64/);
+    expect(() => settings.setFsConfineConfig({ enabled: true, deny: [`/${"a".repeat(512)}`] })).toThrow(/512/);
+    expect(settings.getJson("fs.confine")).toEqual(before);
+
+    settings.setFsConfineConfig({ enabled: true, allow: [`/${"b".repeat(511)}`], deny: ["/"] });
+    expect(settings.fsConfineConfig()).toEqual({
+      enabled: true,
+      allow: [`/${"b".repeat(511)}`],
+      deny: ["/"],
+    });
+
+    settings.setFsConfineConfig({
+      enabled: true,
+      allow: ["/work/./projects//", "/work/projects"],
+      deny: ["/work/projects/./secret//"],
+    });
+    expect(settings.fsConfineConfig()).toEqual({
+      enabled: true,
+      allow: ["/work/projects"],
+      deny: ["/work/projects/secret"],
+    });
     db.$client.close();
   });
 });

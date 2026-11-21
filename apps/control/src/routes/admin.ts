@@ -21,7 +21,7 @@ import {
   type ProvisionDeps,
 } from "../admin/service.js";
 import { auditRepository } from "../db/audit.js";
-import { settingsRepository } from "../db/settings.js";
+import { ConfinePathError, settingsRepository } from "../db/settings.js";
 import { assertModelLimit, ModelLimitRejected, readModelLimits, saveModelLimit } from "../model-limits.js";
 import { ModelRateRejected, readModelRate, saveModelRate } from "../model-rate.js";
 import { readGlobalTaskTokenBudget, saveGlobalTaskTokenBudget, TaskBudgetRejected } from "../task-budget.js";
@@ -245,17 +245,36 @@ export function registerAdminRoutes(app: FastifyInstance, deps: ProvisionDeps & 
         botPerMin: deps.config.modelRateBotPerMin,
       }),
       fsConfine: settings.fsConfine(),
+      fsConfineConfig: settings.fsConfineConfig(),
     };
   });
 
   app.put("/api/admin/fs-confine", async (request, reply) => {
     const scope = actor(request);
     if (!scope) return reply.code(404).send({ error: "找不到" });
-    const enabled = record(request.body).enabled;
+    const body = record(request.body);
+    const enabled = body.enabled;
     if (typeof enabled !== "boolean") return reply.code(400).send({ error: "enabled 必须是布尔值" });
-    settingsRepository(deps.db).setFsConfine(enabled);
-    auditRepository(deps.db).write(scope, "fs.confine", "settings", { enabled });
-    return { fsConfine: enabled };
+    const hasAllow = Object.hasOwn(body, "allow");
+    const hasDeny = Object.hasOwn(body, "deny");
+    if (hasAllow && !isStringList(body.allow)) return reply.code(400).send({ error: "allow 必须是字符串数组" });
+    if (hasDeny && !isStringList(body.deny)) return reply.code(400).send({ error: "deny 必须是字符串数组" });
+    try {
+      const saved = settingsRepository(deps.db).setFsConfineConfig({
+        enabled,
+        ...(hasAllow ? { allow: body.allow as string[] } : {}),
+        ...(hasDeny ? { deny: body.deny as string[] } : {}),
+      });
+      auditRepository(deps.db).write(scope, "fs.confine", "settings", {
+        enabled: saved.enabled,
+        ...(hasAllow ? { allow: saved.allow } : {}),
+        ...(hasDeny ? { deny: saved.deny } : {}),
+      });
+      return { fsConfine: saved.enabled };
+    } catch (error) {
+      if (error instanceof ConfinePathError) return reply.code(400).send({ error: error.message });
+      return sendError(reply, error);
+    }
   });
 
   app.put("/api/admin/model-rate", async (request, reply) => {
@@ -404,6 +423,10 @@ function limitOf(raw: string | undefined): number {
 function record(body: unknown): Record<string, unknown> {
   if (body && typeof body === "object" && !Array.isArray(body)) return body as Record<string, unknown>;
   return {};
+}
+
+function isStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
 function sendError(reply: { code: (status: number) => { send: (body: unknown) => unknown } }, error: unknown) {

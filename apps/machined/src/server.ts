@@ -23,7 +23,7 @@ import { attachBrowser } from "./browser-route.js";
 import { registerDisplayRoutes } from "./display.js";
 import { createMcpHost, registerMcpRoutes } from "./mcp-host.js";
 import { createFsClient, type FsClient } from "./fs-client.js";
-import { resolveAccessible } from "./paths.js";
+import { parseConfinePolicy, resolveAccessible, type ConfinePolicy } from "./paths.js";
 
 export const MACHINED_VERSION = "0.0.0";
 const DEFAULT_TIMEOUT_SEC = 30;
@@ -99,7 +99,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     if (body.timeoutSec !== undefined && typeof body.timeoutSec !== "number") {
       return reply.code(400).send({ error: "timeoutSec 必须是数字" });
     }
-    const cwd = typeof body.cwd === "string" ? resolveAccessible(body.cwd, body.confine !== false) : "/home/bot";
+    const cwd = typeof body.cwd === "string" ? resolveAccessible(body.cwd, body.confine !== false, readPolicy(body)) : "/home/bot";
     const timeoutSec = clampTimeout(typeof body.timeoutSec === "number" ? body.timeoutSec : undefined);
     const id = randomUUID();
     await streamExec(reply, request, id, execJobs, launcher, body.cmd, cwd, timeoutSec, stringRecord(body.env));
@@ -113,7 +113,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     const requestedMax = typeof body.maxBytes === "number" ? body.maxBytes : MAX_READ_BYTES;
     const maxBytes = Math.min(requestedMax, MAX_READ_BYTES);
     const encoding = body.encoding === "base64" ? "base64" : "utf8";
-    const result = await filesystem().read(body.path, maxBytes, encoding, body.confine !== false);
+    const result = await filesystem().read(body.path, maxBytes, encoding, body.confine !== false, readPolicy(body));
     const response: FsReadResponse = result;
     return response;
   });
@@ -129,7 +129,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     const content = Buffer.from(body.content, "utf8");
     if (content.length > MAX_WRITE_BYTES) throw new Error("写入内容超过 8MB");
     const mode = typeof body.mode === "number" ? body.mode : 0o644;
-    const result = await filesystem().write(body.path, content, mode, body.confine !== false);
+    const result = await filesystem().write(body.path, content, mode, body.confine !== false, readPolicy(body));
     const response: FsWriteResponse = result;
     return response;
   });
@@ -139,7 +139,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     if (typeof body.path !== "string" || body.path.length === 0) {
       throw Object.assign(new Error("path 不能为空"), { name: "PathEscapeError" });
     }
-    const result = await filesystem().list(body.path, body.confine !== false);
+    const result = await filesystem().list(body.path, body.confine !== false, readPolicy(body));
     const response: FsListResponse = result;
     return response;
   });
@@ -150,7 +150,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
       throw Object.assign(new Error("path 和 pattern 不能为空"), { name: "PathEscapeError" });
     }
     const maxResults = typeof body.maxResults === "number" ? body.maxResults : 100;
-    const result = await filesystem().search(body.path, body.pattern, maxResults, body.confine !== false);
+    const result = await filesystem().search(body.path, body.pattern, maxResults, body.confine !== false, readPolicy(body));
     const response: FsSearchResponse = result;
     return response;
   });
@@ -160,7 +160,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     if (typeof body.path !== "string" || body.path.length === 0) {
       throw Object.assign(new Error("path 不能为空"), { name: "PathEscapeError" });
     }
-    return filesystem().delete(body.path, body.confine !== false);
+    return filesystem().delete(body.path, body.confine !== false, readPolicy(body));
   });
 
   app.post("/fs/pack", async (request, reply) => {
@@ -168,7 +168,7 @@ export function buildServer(options: MachinedOptions): FastifyInstance {
     if (typeof body.path !== "string" || body.path.length === 0) {
       throw Object.assign(new Error("path 不能为空"), { name: "PathEscapeError" });
     }
-    const archive = await filesystem().pack(body.path, body.confine !== false);
+    const archive = await filesystem().pack(body.path, body.confine !== false, readPolicy(body));
     return reply.type("application/x-tar").send(archive);
   });
 
@@ -272,6 +272,11 @@ function queryConfined(request: FastifyRequest): boolean {
   const query = request.query;
   if (!query || typeof query !== "object" || !("confine" in query)) return true;
   return query.confine !== "false";
+}
+
+function readPolicy(body: Record<string, unknown>): ConfinePolicy | undefined {
+  if (!Object.hasOwn(body, "confinePolicy") || body.confinePolicy === undefined) return undefined;
+  return parseConfinePolicy(body.confinePolicy);
 }
 
 function clampTimeout(value: number | undefined): number {

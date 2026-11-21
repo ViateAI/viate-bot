@@ -481,4 +481,153 @@ describe("fs confine switch", () => {
       await app.close();
     }
   });
+
+  it("applies confinePolicy to file routes and ignores it when confine is false or omitted", async () => {
+    const app = buildServer({ token: "test-token" });
+    const scratch = mkdtempSync(join(tmpdir(), "vb-fs-policy-"));
+    dirs.push(scratch);
+    const work = join(scratch, "work");
+    const secret = join(work, "secret");
+    const other = join(work, "secret-other");
+    const outside = join(scratch, "outside");
+    mkdirSync(secret, { recursive: true });
+    mkdirSync(other, { recursive: true });
+    mkdirSync(outside);
+    writeFileSync(join(secret, "a.txt"), "no");
+    writeFileSync(join(other, "a.txt"), "yes");
+    writeFileSync(join(outside, "a.txt"), "out");
+    writeFileSync(join(work, "note.txt"), "old");
+    symlinkSync(join(work, "note.txt"), join(work, "link"));
+    symlinkSync(secret, join(work, "alias"));
+    symlinkSync(outside, join(work, "leak"));
+    const headers = { authorization: "Bearer test-token" };
+    const policy = { allow: [work], deny: [secret] };
+    try {
+      const builtin = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: join(work, "note.txt") },
+      });
+      expect(builtin.statusCode).toBe(400);
+
+      const allowed = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: join(other, "a.txt"), confinePolicy: policy },
+      });
+      expect(allowed.statusCode).toBe(200);
+      expect(allowed.json()).toMatchObject({ content: "yes" });
+
+      const denied = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: join(secret, "a.txt"), confinePolicy: policy },
+      });
+      expect(denied.statusCode).toBe(400);
+      expect(denied.body).toContain("黑名单");
+
+      const aliased = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: join(work, "alias", "a.txt"), confinePolicy: policy },
+      });
+      expect(aliased.statusCode).toBe(400);
+      expect(aliased.body).toContain("黑名单");
+
+      const leaked = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: join(work, "leak", "a.txt"), confinePolicy: policy },
+      });
+      expect(leaked.statusCode).toBe(400);
+      expect(leaked.body).toContain("允许目录");
+
+      const boundary = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: "/tmp-evil/file", confinePolicy: { allow: ["/tmp"], deny: [] } },
+      });
+      expect(boundary.statusCode).toBe(400);
+      expect(boundary.body).toContain("允许目录");
+
+      const opened = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: join(outside, "a.txt"), confine: false, confinePolicy: policy },
+      });
+      expect(opened.statusCode).toBe(200);
+      expect(opened.json()).toMatchObject({ content: "out" });
+
+      const linkedWrite = await app.inject({
+        method: "POST",
+        url: "/fs/write",
+        headers,
+        payload: { path: join(work, "link"), content: "new", confinePolicy: { allow: [work], deny: [] } },
+      });
+      expect(linkedWrite.statusCode).toBe(400);
+      expect(linkedWrite.body).toContain("符号链接");
+      expect(readFileSync(join(work, "note.txt"), "utf8")).toBe("old");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects malformed policies and a real path around a missing deny entry", async () => {
+    const app = buildServer({ token: "test-token" });
+    const scratch = mkdtempSync(join(tmpdir(), "vb-fs-policy-anchor-"));
+    dirs.push(scratch);
+    const real = join(scratch, "real");
+    const link = join(scratch, "link");
+    mkdirSync(real);
+    symlinkSync(real, link);
+    writeFileSync(join(real, "note.txt"), "ok");
+    const headers = { authorization: "Bearer test-token" };
+    const policy = { allow: [real, link], deny: [join(link, "secret")] };
+    try {
+      const bypass = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: join(real, "secret", "a.txt"), confinePolicy: policy },
+      });
+      expect(bypass.statusCode).toBe(400);
+      expect(bypass.body).toContain("黑名单");
+
+      const sibling = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: join(real, "note.txt"), confinePolicy: policy },
+      });
+      expect(sibling.statusCode).toBe(200);
+
+      const malformed = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path: join(real, "note.txt"), confinePolicy: { allow: real, deny: [] } },
+      });
+      expect(malformed.statusCode).toBe(400);
+
+      const tmpFile = join("/tmp", `vb-server-tmp-${process.pid}`);
+      dirs.push(tmpFile);
+      const tmpWrite = await app.inject({
+        method: "POST",
+        url: "/fs/write",
+        headers,
+        payload: { path: tmpFile, content: "ok", confinePolicy: { allow: ["/tmp"], deny: [] } },
+      });
+      expect(tmpWrite.statusCode).toBe(200);
+      expect(readFileSync(tmpFile, "utf8")).toBe("ok");
+    } finally {
+      await app.close();
+    }
+  });
 });

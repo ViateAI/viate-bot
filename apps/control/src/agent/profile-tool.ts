@@ -30,6 +30,8 @@ export interface ProfileToolDeps {
   readFile: (path: string) => Promise<{ bytes: Buffer; truncated: boolean }>;
   /** 每次读头像再看。不传则仍只允许 /home/bot 和 /tmp。 */
   confineNow?: () => boolean;
+  /** 开关打开时的管理员名单。不传或名单都空时仍用内置根。 */
+  confinePolicyNow?: () => { allow: string[]; deny: string[] };
 }
 
 export function profileNeedsApproval(args: unknown): boolean {
@@ -116,8 +118,7 @@ export async function applyBotProfile(deps: ProfileToolDeps, params: {
   }
   if (params.avatarPath !== undefined) {
     const confine = deps.confineNow?.() ?? true;
-    const path = confine ? imagePath(params.avatarPath) : openImagePath(params.avatarPath);
-    if (!path) throw new Error(confine ? "头像路径只能在 /home/bot 或 /tmp" : "路径必须是绝对路径");
+    const path = resolveAvatarPath(params.avatarPath, confine, deps.confinePolicyNow?.());
     const file = await deps.readFile(path);
     if (file.truncated || file.bytes.length > AVATAR_MAX_BYTES) throw new Error("头像不能超过 1 MiB");
     const mime = sniffImage(file.bytes);
@@ -209,6 +210,42 @@ function imagePath(input: string): string | undefined {
   const path = `/${collapsed.join("/")}`;
   if (path !== "/tmp" && !path.startsWith("/tmp/")) return undefined;
   return path;
+}
+
+function resolveAvatarPath(input: string, confine: boolean, policy: { allow: string[]; deny: string[] } | undefined): string {
+  if (!confine) {
+    const path = openImagePath(input);
+    if (!path) throw new Error("路径必须是绝对路径");
+    return path;
+  }
+  const allow = policy?.allow ?? [];
+  const deny = policy?.deny ?? [];
+  if (allow.length === 0 && deny.length === 0) {
+    const path = imagePath(input);
+    if (!path) throw new Error("头像路径只能在 /home/bot 或 /tmp");
+    return path;
+  }
+  const path = lexicalAbsolute(input);
+  if (!path) throw new Error("路径必须是绝对路径");
+  if (deny.some((prefix) => boundary(prefix, path))) throw new Error(`路径被目录限制黑名单拒绝：${path}`);
+  const roots = allow.length > 0 ? allow : ["/home/bot", "/tmp"];
+  if (!roots.some((prefix) => boundary(prefix, path))) throw new Error(`路径不在允许目录范围内：${path}`);
+  return path;
+}
+
+function lexicalAbsolute(input: string): string | undefined {
+  if (!isAbsolute(input) || input.includes("\0") || input.includes("\\") || input.split("/").includes("..")) return undefined;
+  const collapsed: string[] = [];
+  for (const part of input.split("/")) {
+    if (part === "" || part === ".") continue;
+    collapsed.push(part);
+  }
+  return collapsed.length === 0 ? "/" : `/${collapsed.join("/")}`;
+}
+
+function boundary(prefix: string, target: string): boolean {
+  const root = prefix.length > 1 ? prefix.replace(/\/+$/, "") : prefix;
+  return root === "/" || target === root || target.startsWith(`${root}/`);
 }
 
 function openImagePath(input: string): string | undefined {

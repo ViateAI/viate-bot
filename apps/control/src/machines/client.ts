@@ -1,6 +1,7 @@
 import { request as httpRequest } from "node:http";
 import { Readable } from "node:stream";
 import type {
+  ConfinePolicy,
   DisplayEnsureResponse,
   DisplayInput,
   DisplayScreenshotResponse,
@@ -28,6 +29,8 @@ export interface ExecInput {
   signal?: AbortSignal;
   /** 缺省 true。模型工具传入当时的开关；内部调用不要传 false。 */
   confine?: boolean;
+  /** 用户工具传入管理员名单。内部调用不要传。 */
+  confinePolicy?: ConfinePolicy;
 }
 
 /**
@@ -70,6 +73,7 @@ export class MachinedClient {
       const response = await this.post("/exec", {
         cmd: input.cmd,
         confine: input.confine !== false,
+        ...(input.confinePolicy !== undefined ? { confinePolicy: input.confinePolicy } : {}),
         ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
         ...(input.timeoutSec !== undefined ? { timeoutSec: input.timeoutSec } : {}),
         ...(input.env !== undefined ? { env: input.env } : {}),
@@ -109,38 +113,38 @@ export class MachinedClient {
     }
   }
 
-  async read(path: string, maxBytes: number, signal?: AbortSignal, encoding?: "utf8" | "base64", confine = true): Promise<FsReadResponse> {
-    const response = await this.post("/fs/read", { path, maxBytes, confine, ...(encoding ? { encoding } : {}) }, signal);
+  async read(path: string, maxBytes: number, signal?: AbortSignal, encoding?: "utf8" | "base64", confine = true, policy?: ConfinePolicy): Promise<FsReadResponse> {
+    const response = await this.post("/fs/read", { path, maxBytes, confine, ...(encoding ? { encoding } : {}), ...policyField(policy) }, signal);
     if (!response.ok) throw new Error(await readError(response));
     return (await response.json()) as FsReadResponse;
   }
 
-  async write(path: string, content: string, signal?: AbortSignal, confine = true): Promise<FsWriteResponse> {
-    const response = await this.post("/fs/write", { path, content, confine }, signal);
+  async write(path: string, content: string, signal?: AbortSignal, confine = true, policy?: ConfinePolicy): Promise<FsWriteResponse> {
+    const response = await this.post("/fs/write", { path, content, confine, ...policyField(policy) }, signal);
     if (!response.ok) throw new Error(await readError(response));
     return (await response.json()) as FsWriteResponse;
   }
 
-  async list(path: string, signal?: AbortSignal, confine = true): Promise<FsListResponse> {
-    const response = await this.post("/fs/list", { path, confine }, signal);
+  async list(path: string, signal?: AbortSignal, confine = true, policy?: ConfinePolicy): Promise<FsListResponse> {
+    const response = await this.post("/fs/list", { path, confine, ...policyField(policy) }, signal);
     if (!response.ok) throw new Error(await readError(response));
     return (await response.json()) as FsListResponse;
   }
 
-  async search(path: string, pattern: string, maxResults: number, signal?: AbortSignal, confine = true): Promise<FsSearchResponse> {
-    const response = await this.post("/fs/search", { path, pattern, maxResults, confine }, signal);
+  async search(path: string, pattern: string, maxResults: number, signal?: AbortSignal, confine = true, policy?: ConfinePolicy): Promise<FsSearchResponse> {
+    const response = await this.post("/fs/search", { path, pattern, maxResults, confine, ...policyField(policy) }, signal);
     if (!response.ok) throw new Error(await readError(response));
     return (await response.json()) as FsSearchResponse;
   }
 
-  async removeFile(path: string, signal?: AbortSignal, confine = true): Promise<{ path: string }> {
-    const response = await this.post("/fs/delete", { path, confine }, signal);
+  async removeFile(path: string, signal?: AbortSignal, confine = true, policy?: ConfinePolicy): Promise<{ path: string }> {
+    const response = await this.post("/fs/delete", { path, confine, ...policyField(policy) }, signal);
     if (!response.ok) throw new Error(await readError(response));
     return (await response.json()) as { path: string };
   }
 
-  async pack(path: string, signal?: AbortSignal, confine = true): Promise<Buffer> {
-    const response = await this.post("/fs/pack", { path, confine }, signal);
+  async pack(path: string, signal?: AbortSignal, confine = true, policy?: ConfinePolicy): Promise<Buffer> {
+    const response = await this.post("/fs/pack", { path, confine, ...policyField(policy) }, signal);
     if (!response.ok) throw new Error(await readError(response));
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length > 200 * 1024 * 1024) throw new Error("应用包过大");
@@ -368,4 +372,8 @@ function sseData(part: string): string | undefined {
     .map((line) => line.slice(5).trim());
   if (lines.length === 0) return undefined;
   return lines.join("\n");
+}
+
+function policyField(policy: ConfinePolicy | undefined): { confinePolicy?: ConfinePolicy } {
+  return policy !== undefined ? { confinePolicy: policy } : {};
 }

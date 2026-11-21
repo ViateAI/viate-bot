@@ -1,5 +1,6 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { map, num, obj, opt, str } from "@earendil-works/pi-schema";
+import type { ConfinePolicy } from "@viate-bot/protocol";
 import { MachinedClient } from "../machines/client.js";
 import { capHeadTail, FS_READ_LIMIT } from "./text.js";
 
@@ -8,6 +9,8 @@ export interface MachineToolOptions {
   confined?: boolean;
   /** 每次执行时再读。缺省关闭。 */
   confineNow?: () => boolean;
+  /** 开关打开时附在用户文件工具和 shell 工作目录上。内部调用不走这里。 */
+  confinePolicyNow?: () => ConfinePolicy;
 }
 
 function pathLabel(label: string, confined: boolean): string {
@@ -23,6 +26,8 @@ function pathLabel(label: string, confined: boolean): string {
 export function machineTools(client: MachinedClient, options: MachineToolOptions = {}): AgentTool[] {
   const confined = options.confined === true;
   const confineNow = options.confineNow ?? (() => false);
+  const confinePolicyNow = options.confinePolicyNow ?? (() => ({ allow: [], deny: [] }));
+  const activePolicy = (): ConfinePolicy | undefined => (confineNow() ? confinePolicyNow() : undefined);
   const shellSchema = obj({
     cmd: str({ description: "要执行的命令" }),
     cwd: opt(str({ description: "工作目录，缺省是 /home/bot" })),
@@ -55,10 +60,12 @@ export function machineTools(client: MachinedClient, options: MachineToolOptions
       if (!Number.isInteger(timeoutSec) || timeoutSec < 1 || timeoutSec > 600) {
         throw new Error("timeoutSec 必须是 1 到 600 的整数");
       }
+      const policy = activePolicy();
       const result = await client.exec({
         cmd: params.cmd,
         timeoutSec,
         confine: confineNow(),
+        ...(policy !== undefined ? { confinePolicy: policy } : {}),
         ...(params.cwd !== undefined ? { cwd: params.cwd } : {}),
         ...(params.env !== undefined ? { env: params.env } : {}),
         ...(signal ? { signal } : {}),
@@ -83,7 +90,7 @@ export function machineTools(client: MachinedClient, options: MachineToolOptions
     execute: async (_toolCallId, params, signal) => {
       const requested = params.maxBytes ?? FS_READ_LIMIT;
       const maxBytes = Math.min(Math.max(1, Math.floor(requested)), FS_READ_LIMIT);
-      const result = await client.read(params.path, maxBytes, signal, undefined, confineNow());
+      const result = await client.read(params.path, maxBytes, signal, undefined, confineNow(), activePolicy());
       const raw = Buffer.from(result.content);
       const text = raw.length > maxBytes ? raw.subarray(0, maxBytes).toString("utf8") : result.content;
       const note = result.truncated || text !== result.content ? "\n…[内容已截断]…" : "";
@@ -98,7 +105,7 @@ export function machineTools(client: MachinedClient, options: MachineToolOptions
     parameters: writeSchema,
     execute: async (_toolCallId, params, signal) => {
       if (Buffer.byteLength(params.content) > 1024 * 1024) throw new Error("写入内容超过 1MB");
-      const result = await client.write(params.path, params.content, signal, confineNow());
+      const result = await client.write(params.path, params.content, signal, confineNow(), activePolicy());
       return { content: [{ type: "text", text: `已写入 ${result.path}（${result.bytes} 字节）` }], details: result };
     },
   };
@@ -109,7 +116,7 @@ export function machineTools(client: MachinedClient, options: MachineToolOptions
     description: "列出当前用户机器上的目录。",
     parameters: listSchema,
     execute: async (_toolCallId, params, signal) => {
-      const result = await client.list(params.path, signal, confineNow());
+      const result = await client.list(params.path, signal, confineNow(), activePolicy());
       const text = capHeadTail(result.entries.map((entry) => `${entry.type}\t${entry.size}\t${entry.name}`).join("\n"));
       return { content: [{ type: "text", text: text || "（空目录）" }], details: { path: result.path, count: result.entries.length } };
     },
@@ -122,7 +129,7 @@ export function machineTools(client: MachinedClient, options: MachineToolOptions
     parameters: searchSchema,
     execute: async (_toolCallId, params, signal) => {
       const maxResults = Math.min(params.maxResults ?? 50, 100);
-      const result = await client.search(params.path, params.pattern, maxResults, signal, confineNow());
+      const result = await client.search(params.path, params.pattern, maxResults, signal, confineNow(), activePolicy());
       const text = capHeadTail(result.hits.map((hit) => `${hit.path}:${hit.line}:${hit.text}`).join("\n"));
       const note = result.truncated ? "\n…[结果已截断]…" : "";
       return {

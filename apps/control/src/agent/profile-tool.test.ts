@@ -128,4 +128,30 @@ describe("update_bot_profile", () => {
     await expect(applyBotProfile({ ...deps, confineNow: () => false }, { avatarPath: "etc/passwd.png" })).rejects.toThrow(/绝对路径/);
     db.$client.close();
   });
+
+  it("accepts an avatar inside the admin allow list and rejects deny and outside paths", async () => {
+    const { dir, db } = dbFor();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01]);
+    const seen: string[] = [];
+    const deps = {
+      db,
+      dataDir: dir,
+      userId: "u",
+      botId: "bot",
+      taskId: "task",
+      allowModel: () => true,
+      confineNow: () => true,
+      confinePolicyNow: () => ({ allow: ["/work"], deny: ["/work/secret"] }),
+      readFile: async (path: string) => {
+        seen.push(path);
+        return { bytes: png, truncated: false };
+      },
+    };
+    await applyBotProfile(deps, { avatarPath: "/work/a.png" });
+    expect(seen).toEqual(["/work/a.png"]);
+    await expect(applyBotProfile(deps, { avatarPath: "/work/secret/a.png" })).rejects.toThrow(/黑名单/);
+    await expect(applyBotProfile(deps, { avatarPath: "/tmp/a.png" })).rejects.toThrow(/允许目录/);
+    await expect(applyBotProfile(deps, { avatarPath: "/work/secret-other/a.png" })).resolves.toEqual(["avatar"]);
+    db.$client.close();
+  });
 });

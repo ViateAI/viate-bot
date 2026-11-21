@@ -7,6 +7,76 @@ export const BOT_TEMPLATES_KEY = "bot_templates";
 export const DEFAULT_CHANNEL_KEY = "default_channel";
 export const FS_CONFINE_KEY = "fs.confine";
 
+export interface FsConfineConfig {
+  enabled: boolean;
+  allow: string[];
+  deny: string[];
+}
+
+export class ConfinePathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfinePathError";
+  }
+}
+
+const FS_CONFINE_LIST_LIMIT = 64;
+const FS_CONFINE_PATH_LIMIT = 512;
+
+/** 保存和读取共用。空行丢掉，末尾斜杠去掉（根目录 `/` 保留），再按规范化结果去重。 */
+export function normalizeConfinePaths(input: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  for (const raw of input) {
+    if (typeof raw !== "string") throw new ConfinePathError("目录必须是字符串");
+    if (raw.includes("\0")) throw new ConfinePathError("目录不能包含空字符");
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) continue;
+    if (trimmed.length > FS_CONFINE_PATH_LIMIT) throw new ConfinePathError("目录最长 512");
+    if (!trimmed.startsWith("/")) throw new ConfinePathError("目录必须是绝对路径");
+    const normalized = canonicalizeConfinePath(trimmed);
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    paths.push(normalized);
+  }
+  if (paths.length > FS_CONFINE_LIST_LIMIT) throw new ConfinePathError("目录名单最多 64 条");
+  return paths;
+}
+
+/** `.` 和重复斜杠收成词法路径。`..` 拒绝，避免黑名单写成绕过去的形式。 */
+function canonicalizeConfinePath(path: string): string {
+  const parts: string[] = [];
+  for (const segment of path.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") throw new ConfinePathError("目录不能包含 ..");
+    parts.push(segment);
+  }
+  return parts.length === 0 ? "/" : `/${parts.join("/")}`;
+}
+
+function readConfineList(value: unknown): { ok: true; paths: string[] } | { ok: false } {
+  if (value === undefined) return { ok: true, paths: [] };
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) return { ok: false };
+  try {
+    return { ok: true, paths: normalizeConfinePaths(value) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export function parseFsConfine(value: unknown): FsConfineConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !("enabled" in value)) {
+    return { enabled: true, allow: [], deny: [] };
+  }
+  const record = value as { enabled?: unknown; allow?: unknown; deny?: unknown };
+  const enabled = record.enabled !== false;
+  const allow = readConfineList(record.allow);
+  const deny = readConfineList(record.deny);
+  // 坏掉的名单不能丢成空数组，否则黑名单消失，或白名单退回默认根后范围变大。
+  if (!allow.ok || !deny.ok) return { enabled, allow: allow.ok ? allow.paths : [], deny: ["/"] };
+  return { enabled, allow: allow.paths, deny: deny.paths };
+}
+
 export interface BotTemplate {
   id: string;
   name: string;
@@ -113,12 +183,25 @@ export function settingsRepository(db: AppDatabase) {
     },
     /** 没有可用记录时开启。只有显式 enabled: false 才关闭。 */
     fsConfine(): boolean {
-      const current = this.getJson(FS_CONFINE_KEY);
-      if (!current || typeof current !== "object" || Array.isArray(current) || !("enabled" in current)) return true;
-      return current.enabled !== false;
+      return this.fsConfineConfig().enabled;
+    },
+    fsConfineConfig(): FsConfineConfig {
+      return parseFsConfine(this.getJson(FS_CONFINE_KEY));
     },
     setFsConfine(enabled: boolean): void {
-      this.setJson(FS_CONFINE_KEY, { enabled });
+      const current = this.fsConfineConfig();
+      this.setJson(FS_CONFINE_KEY, { enabled, allow: current.allow, deny: current.deny });
+    },
+    /** allow / deny 缺省时保留已有名单。两个名单都校验通过才写入。 */
+    setFsConfineConfig(input: { enabled: boolean; allow?: readonly string[]; deny?: readonly string[] }): FsConfineConfig {
+      const current = this.fsConfineConfig();
+      const next: FsConfineConfig = {
+        enabled: input.enabled,
+        allow: input.allow === undefined ? current.allow : normalizeConfinePaths(input.allow),
+        deny: input.deny === undefined ? current.deny : normalizeConfinePaths(input.deny),
+      };
+      this.setJson(FS_CONFINE_KEY, next);
+      return next;
     },
   };
 }

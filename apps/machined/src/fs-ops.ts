@@ -5,7 +5,7 @@ import { link, lstat, mkdir, open, readdir, stat, unlink } from "node:fs/promise
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import type { FsEntry, FsSearchHit } from "@viate-bot/protocol";
-import { PathEscapeError, resolveAccessible } from "./paths.js";
+import { PathEscapeError, resolveAccessible, type ConfinePolicy } from "./paths.js";
 
 const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
 const WRITE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW;
@@ -27,8 +27,8 @@ export interface FsWriteResult {
 }
 
 /** 调用方必须已经是 bot。路径检查是第一道拦截，打开文件时不再跟随最后一层符号链接。 */
-export async function readRaw(requested: string, confine = true): Promise<{ path: string; data: Buffer }> {
-  const path = resolveAccessible(requested, confine);
+export async function readRaw(requested: string, confine = true, policy?: ConfinePolicy): Promise<{ path: string; data: Buffer }> {
+  const path = resolveAccessible(requested, confine, policy);
   const file = await open(path, READ_FLAGS);
   try {
     const info = await file.stat();
@@ -41,8 +41,8 @@ export async function readRaw(requested: string, confine = true): Promise<{ path
   }
 }
 
-export async function readConfined(requested: string, maxBytes: number, encoding: "utf8" | "base64" = "utf8", confine = true): Promise<FsReadResult> {
-  const path = resolveAccessible(requested, confine);
+export async function readConfined(requested: string, maxBytes: number, encoding: "utf8" | "base64" = "utf8", confine = true, policy?: ConfinePolicy): Promise<FsReadResult> {
+  const path = resolveAccessible(requested, confine, policy);
   const file = await open(path, READ_FLAGS);
   try {
     const info = await file.stat();
@@ -56,8 +56,8 @@ export async function readConfined(requested: string, maxBytes: number, encoding
   }
 }
 
-export async function writeConfined(requested: string, content: Buffer, mode: number, confine = true): Promise<FsWriteResult> {
-  const path = resolveAccessible(requested, confine);
+export async function writeConfined(requested: string, content: Buffer, mode: number, confine = true, policy?: ConfinePolicy): Promise<FsWriteResult> {
+  const path = resolveAccessible(requested, confine, policy);
   // A lexical approval prefix must not write through an alias to a different directory.
   if (confine && path !== resolve(requested)) throw new PathEscapeError("写入路径不能包含符号链接");
   await mkdir(dirname(path), { recursive: true });
@@ -76,11 +76,12 @@ export async function streamUpload(
   maxBytes: number,
   deliveryId: string,
   confine = true,
+  policy?: ConfinePolicy,
 ): Promise<{ path: string; bytes: number; sha256: string }> {
   if (typeof deliveryId !== "string" || !DELIVERY_ID.test(deliveryId)) {
     throw Object.assign(new Error("投递标识无效"), { statusCode: 400 });
   }
-  const path = resolveAccessible(requested, confine);
+  const path = resolveAccessible(requested, confine, policy);
   if (confine && path !== resolve(requested)) throw new PathEscapeError("写入路径不能包含符号链接");
   const book = join(dirname(path), ".vb-deliveries");
   const receiptPath = join(book, deliveryId);
@@ -168,16 +169,16 @@ export async function streamUpload(
  * 只删普通文件。先看请求路径的最后一段，不让 resolveConfined 把符号链接解析成目标。
  * 父目录仍走限制检查；最后一段是符号链接或目录时什么都不删。
  */
-export async function deleteConfined(requested: string, confine = true): Promise<{ path: string }> {
-  return deleteAt(requested, confine);
+export async function deleteConfined(requested: string, confine = true, policy?: ConfinePolicy): Promise<{ path: string }> {
+  return deleteAt(requested, confine, policy);
 }
 
-async function deleteAt(requested: string, confine: boolean): Promise<{ path: string }> {
+async function deleteAt(requested: string, confine: boolean, policy?: ConfinePolicy): Promise<{ path: string }> {
   const name = basename(requested);
   if (name.length === 0 || name === "." || name === "..") {
     throw Object.assign(new Error("只能删除普通文件"), { statusCode: 400 });
   }
-  const path = join(resolveAccessible(dirname(requested), confine), name);
+  const path = join(resolveAccessible(dirname(requested), confine, policy), name);
   const info = await lstat(path);
   if (info.isSymbolicLink() || !info.isFile()) {
     throw Object.assign(new Error("只能删除普通文件"), { statusCode: 400 });
@@ -186,8 +187,8 @@ async function deleteAt(requested: string, confine: boolean): Promise<{ path: st
   return { path };
 }
 
-export async function listConfined(requested: string, confine = true): Promise<{ path: string; entries: FsEntry[] }> {
-  const path = resolveAccessible(requested, confine);
+export async function listConfined(requested: string, confine = true, policy?: ConfinePolicy): Promise<{ path: string; entries: FsEntry[] }> {
+  const path = resolveAccessible(requested, confine, policy);
   const dirents = await readdir(path, { withFileTypes: true });
   const entries = await Promise.all(
     dirents.map(async (entry) => {
@@ -211,8 +212,9 @@ export async function searchConfined(
   pattern: string,
   maxResults: number,
   confine = true,
+  policy?: ConfinePolicy,
 ): Promise<{ hits: FsSearchHit[]; truncated: boolean }> {
-  const path = resolveAccessible(requested, confine);
+  const path = resolveAccessible(requested, confine, policy);
   const hits = await ripgrep(path, pattern, maxResults);
   return { hits: hits.slice(0, maxResults), truncated: hits.length > maxResults };
 }
@@ -227,18 +229,18 @@ interface PackedFile {
 }
 
 /** 打包目录为 ustar。不跟随符号链接，跳过 fifo、socket 和设备文件，超限时在读文件内容前停下。 */
-export async function packConfined(requested: string, confine = true): Promise<Readable> {
-  return packAt(requested, confine);
+export async function packConfined(requested: string, confine = true, policy?: ConfinePolicy): Promise<Readable> {
+  return packAt(requested, confine, policy);
 }
 
-async function packAt(requested: string, confine: boolean): Promise<Readable> {
-  const root = resolveAccessible(requested, confine);
+async function packAt(requested: string, confine: boolean, policy?: ConfinePolicy): Promise<Readable> {
+  const root = resolveAccessible(requested, confine, policy);
   const info = await lstat(root);
   if (!info.isDirectory()) throw Object.assign(new Error("只能打包目录"), { statusCode: 400 });
   const files: PackedFile[] = [];
   const total = { bytes: 0 };
   await collectPack(root, root, files, total);
-  return Readable.from(renderTar(root, files, confine), { objectMode: false, highWaterMark: 64 * 1024 });
+  return Readable.from(renderTar(root, files, confine, policy), { objectMode: false, highWaterMark: 64 * 1024 });
 }
 
 async function collectPack(root: string, dir: string, files: PackedFile[], total: { bytes: number }): Promise<void> {
@@ -259,7 +261,7 @@ async function collectPack(root: string, dir: string, files: PackedFile[], total
   }
 }
 
-async function* renderTar(root: string, files: PackedFile[], confine: boolean): AsyncGenerator<Buffer> {
+async function* renderTar(root: string, files: PackedFile[], confine: boolean, policy?: ConfinePolicy): AsyncGenerator<Buffer> {
   const field = (header: Buffer, value: number, start: number, length: number) => {
     header.write(`${value.toString(8).padStart(length - 1, "0")}\0`, start, length, "ascii");
   };
@@ -289,7 +291,7 @@ async function* renderTar(root: string, files: PackedFile[], confine: boolean): 
     let sum = 0;
     for (const byte of header) sum += byte;
     field(header, sum, 148, 8);
-    const resolved = resolveAccessible(file.absolute, confine);
+    const resolved = resolveAccessible(file.absolute, confine, policy);
     if (resolved !== file.absolute || !resolved.startsWith(`${root}/`)) throw new PathEscapeError("打包路径已改变");
     const handle = await open(file.absolute, READ_FLAGS | constants.O_NONBLOCK);
     try {

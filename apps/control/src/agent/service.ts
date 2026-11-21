@@ -1106,8 +1106,17 @@ export function createChatService(deps: ChatServiceDeps) {
         ...machineTools(files, {
           confined: settingsRepository(deps.db).fsConfine(),
           confineNow: () => settingsRepository(deps.db).fsConfine(),
+          confinePolicyNow: () => {
+            const config = settingsRepository(deps.db).fsConfineConfig();
+            return { allow: config.allow, deny: config.deny };
+          },
         }),
-        ...approvalTools({ delete: (path, signal) => files.removeFile(path, signal, settingsRepository(deps.db).fsConfine()) }),
+        ...approvalTools({
+          delete: (path, signal) => {
+            const config = settingsRepository(deps.db).fsConfineConfig();
+            return files.removeFile(path, signal, config.enabled, config.enabled ? { allow: config.allow, deny: config.deny } : undefined);
+          },
+        }),
         ...routineTools({
           propose: (input) => routineService(deps.db).propose(live.userId, live.botId, input, now()),
         }),
@@ -1181,8 +1190,20 @@ export function createChatService(deps: ChatServiceDeps) {
           taskId: live.id,
           allowModel: (candidate) => deps.config.models.length === 0 || deps.config.models.includes(candidate),
           confineNow: () => settingsRepository(deps.db).fsConfine(),
+          confinePolicyNow: () => {
+            const config = settingsRepository(deps.db).fsConfineConfig();
+            return { allow: config.allow, deny: config.deny };
+          },
           readFile: async (path) => {
-            const file = await files.read(path, AVATAR_MAX_BYTES, undefined, "base64", settingsRepository(deps.db).fsConfine());
+            const config = settingsRepository(deps.db).fsConfineConfig();
+            const file = await files.read(
+              path,
+              AVATAR_MAX_BYTES,
+              undefined,
+              "base64",
+              config.enabled,
+              config.enabled ? { allow: config.allow, deny: config.deny } : undefined,
+            );
             return { bytes: Buffer.from(file.content, "base64"), truncated: file.truncated };
           },
         }),

@@ -387,4 +387,72 @@ describe("admin http", () => {
       db.$client.close();
     }
   });
+
+  it("returns fsConfineConfig, keeps lists when only the switch changes, and rejects illegal paths", async () => {
+    const { app, db, admin } = await boot();
+    try {
+      const initial = await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) });
+      expect(initial.statusCode).toBe(200);
+      expect(initial.json().fsConfine).toBe(true);
+      expect(initial.json().fsConfineConfig).toEqual({ enabled: true, allow: [], deny: [] });
+
+      const saved = await app.inject({
+        method: "PUT",
+        url: "/api/admin/fs-confine",
+        headers: headers(admin, true),
+        payload: { enabled: true, allow: ["/work/", "/work", ""], deny: ["/work/secret/"] },
+      });
+      expect(saved.statusCode).toBe(200);
+      expect(saved.json()).toEqual({ fsConfine: true });
+      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json().fsConfineConfig).toEqual({
+        enabled: true,
+        allow: ["/work"],
+        deny: ["/work/secret"],
+      });
+      const audit = auditRepository(db).list(adminScope("admin-1"), 20);
+      expect(audit.some((row) => row.action === "fs.confine" && JSON.stringify(row.attrs).includes('"/work"'))).toBe(true);
+
+      const toggled = await app.inject({
+        method: "PUT",
+        url: "/api/admin/fs-confine",
+        headers: headers(admin, true),
+        payload: { enabled: false },
+      });
+      expect(toggled.statusCode).toBe(200);
+      expect(toggled.json()).toEqual({ fsConfine: false });
+      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json()).toMatchObject({
+        fsConfine: false,
+        fsConfineConfig: { enabled: false, allow: ["/work"], deny: ["/work/secret"] },
+      });
+
+      const deniedOnly = await app.inject({
+        method: "PUT",
+        url: "/api/admin/fs-confine",
+        headers: headers(admin, true),
+        payload: { enabled: false, deny: ["/work/secret", "/work/other"] },
+      });
+      expect(deniedOnly.statusCode).toBe(200);
+      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json().fsConfineConfig).toEqual({
+        enabled: false,
+        allow: ["/work"],
+        deny: ["/work/secret", "/work/other"],
+      });
+
+      const rejected = await app.inject({
+        method: "PUT",
+        url: "/api/admin/fs-confine",
+        headers: headers(admin, true),
+        payload: { enabled: true, allow: ["relative", "/tmp/../etc"] },
+      });
+      expect(rejected.statusCode).toBe(400);
+      expect((await app.inject({ method: "GET", url: "/api/admin/settings", headers: headers(admin) })).json().fsConfineConfig).toEqual({
+        enabled: false,
+        allow: ["/work"],
+        deny: ["/work/secret", "/work/other"],
+      });
+    } finally {
+      await app.close();
+      db.$client.close();
+    }
+  });
 });

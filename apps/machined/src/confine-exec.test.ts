@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -79,6 +79,71 @@ describe("exec cwd confine", () => {
       });
       expect(home.statusCode).toBe(200);
       expect(spawns.at(-1)?.cwd).toBe("/home/bot");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("checks cwd against confinePolicy and ignores the lists when confine is false", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "vb-cwd-policy-"));
+    dirs.push(outside);
+    mkdirSync(join(outside, "secret"));
+    mkdirSync(join(outside, "secret-other"));
+    const app = buildServer({ token: "test-token", execSpawn: { command: process.execPath, baseArgs: ["run-as-bot.mjs"] } });
+    try {
+      const headers = { authorization: "Bearer test-token" };
+      const allowed = await app.inject({
+        method: "POST",
+        url: "/exec",
+        headers,
+        payload: { cmd: "true", cwd: outside, confinePolicy: { allow: [outside], deny: [] } },
+      });
+      expect(allowed.statusCode).toBe(200);
+      expect(spawns.at(-1)?.cwd).toBe(outside);
+
+      const replaced = await app.inject({
+        method: "POST",
+        url: "/exec",
+        headers,
+        payload: { cmd: "true", cwd: "/tmp", confinePolicy: { allow: [outside], deny: [] } },
+      });
+      expect(replaced.statusCode).toBe(400);
+      expect(replaced.body).toContain("允许目录");
+
+      const denied = await app.inject({
+        method: "POST",
+        url: "/exec",
+        headers,
+        payload: {
+          cmd: "true",
+          cwd: join(outside, "secret"),
+          confinePolicy: { allow: [outside], deny: [join(outside, "secret")] },
+        },
+      });
+      expect(denied.statusCode).toBe(400);
+      expect(denied.body).toContain("黑名单");
+
+      const beside = await app.inject({
+        method: "POST",
+        url: "/exec",
+        headers,
+        payload: {
+          cmd: "true",
+          cwd: join(outside, "secret-other"),
+          confinePolicy: { allow: [outside], deny: [join(outside, "secret")] },
+        },
+      });
+      expect(beside.statusCode).toBe(200);
+      expect(spawns.at(-1)?.cwd).toBe(join(outside, "secret-other"));
+
+      const opened = await app.inject({
+        method: "POST",
+        url: "/exec",
+        headers,
+        payload: { cmd: "true", cwd: outside, confine: false, confinePolicy: { allow: ["/home/bot"], deny: [outside] } },
+      });
+      expect(opened.statusCode).toBe(200);
+      expect(spawns.at(-1)?.cwd).toBe(outside);
     } finally {
       await app.close();
     }

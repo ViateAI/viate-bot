@@ -50,6 +50,15 @@ export interface ExecRequest {
   /** 超时秒数。缺省由 machined 取默认值。 */
   timeoutSec?: number;
   env?: Record<string, string>;
+  /** 缺省和 true 都限制目录。只有 false 放开。 */
+  confine?: boolean;
+  /** 仅在 confine 不是 false 时生效。缺省使用机器内置根。 */
+  confinePolicy?: ConfinePolicy;
+}
+
+export interface ConfinePolicy {
+  allow: string[];
+  deny: string[];
 }
 
 export type ExecEvent =
@@ -64,6 +73,8 @@ export interface FsReadRequest {
   maxBytes?: number;
   /** 缺省 utf8。头像等二进制文件用 base64，避免按文本解码损坏。 */
   encoding?: "utf8" | "base64";
+  confine?: boolean;
+  confinePolicy?: ConfinePolicy;
 }
 
 export interface FsReadResponse {
@@ -77,6 +88,8 @@ export interface FsWriteRequest {
   content: string;
   /** 缺省 0o644。 */
   mode?: number;
+  confine?: boolean;
+  confinePolicy?: ConfinePolicy;
 }
 
 export interface FsWriteResponse {
@@ -86,6 +99,8 @@ export interface FsWriteResponse {
 
 export interface FsListRequest {
   path: string;
+  confine?: boolean;
+  confinePolicy?: ConfinePolicy;
 }
 
 export interface FsEntry {
@@ -104,6 +119,8 @@ export interface FsSearchRequest {
   /** ripgrep 正则。 */
   pattern: string;
   maxResults?: number;
+  confine?: boolean;
+  confinePolicy?: ConfinePolicy;
 }
 
 export interface FsSearchHit {

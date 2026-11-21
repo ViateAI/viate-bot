@@ -15,6 +15,7 @@ import {
   type FsReadResult,
   type FsWriteResult,
 } from "./fs-ops.js";
+import type { ConfinePolicy } from "./paths.js";
 
 function workerBin(): string {
   return process.env.VB_FS_WORKER_BIN || "/opt/viate/fs-worker.mjs";
@@ -53,18 +54,19 @@ interface RpcRequest {
   data?: string;
   encoding?: "utf8" | "base64";
   confine?: boolean;
+  confinePolicy?: ConfinePolicy;
 }
 
 export interface FsClient {
-  read(path: string, maxBytes: number, encoding?: "utf8" | "base64", confine?: boolean): Promise<FsReadResult>;
-  write(path: string, content: Buffer, mode: number, confine?: boolean): Promise<FsWriteResult>;
-  list(path: string, confine?: boolean): Promise<{ path: string; entries: FsEntry[] }>;
-  search(path: string, pattern: string, maxResults: number, confine?: boolean): Promise<{ hits: FsSearchHit[]; truncated: boolean }>;
-  readFile(path: string, confine?: boolean): Promise<Buffer>;
-  writeFile(path: string, data: Buffer, confine?: boolean): Promise<FsWriteResult>;
-  upload(path: string, source: Readable, maxBytes: number, deliveryId: string, confine?: boolean): Promise<{ path: string; bytes: number; sha256: string }>;
-  delete(path: string, confine?: boolean): Promise<{ path: string }>;
-  pack(path: string, confine?: boolean): Promise<Readable>;
+  read(path: string, maxBytes: number, encoding?: "utf8" | "base64", confine?: boolean, policy?: ConfinePolicy): Promise<FsReadResult>;
+  write(path: string, content: Buffer, mode: number, confine?: boolean, policy?: ConfinePolicy): Promise<FsWriteResult>;
+  list(path: string, confine?: boolean, policy?: ConfinePolicy): Promise<{ path: string; entries: FsEntry[] }>;
+  search(path: string, pattern: string, maxResults: number, confine?: boolean, policy?: ConfinePolicy): Promise<{ hits: FsSearchHit[]; truncated: boolean }>;
+  readFile(path: string, confine?: boolean, policy?: ConfinePolicy): Promise<Buffer>;
+  writeFile(path: string, data: Buffer, confine?: boolean, policy?: ConfinePolicy): Promise<FsWriteResult>;
+  upload(path: string, source: Readable, maxBytes: number, deliveryId: string, confine?: boolean, policy?: ConfinePolicy): Promise<{ path: string; bytes: number; sha256: string }>;
+  delete(path: string, confine?: boolean, policy?: ConfinePolicy): Promise<{ path: string }>;
+  pack(path: string, confine?: boolean, policy?: ConfinePolicy): Promise<Readable>;
 }
 
 /** root 时把文件操作交给降权子进程；测试和非 root 进程就地执行。 */
@@ -79,33 +81,33 @@ export function createWorkerFsClient(): FsClient {
 }
 
 class LocalFs implements FsClient {
-  read(path: string, maxBytes: number, encoding?: "utf8" | "base64", confine = true): Promise<FsReadResult> {
-    return settle(readConfined(path, maxBytes, encoding, confine));
+  read(path: string, maxBytes: number, encoding?: "utf8" | "base64", confine = true, policy?: ConfinePolicy): Promise<FsReadResult> {
+    return settle(readConfined(path, maxBytes, encoding, confine, policy));
   }
-  write(path: string, content: Buffer, mode: number, confine = true): Promise<FsWriteResult> {
-    return settle(writeConfined(path, content, mode, confine));
+  write(path: string, content: Buffer, mode: number, confine = true, policy?: ConfinePolicy): Promise<FsWriteResult> {
+    return settle(writeConfined(path, content, mode, confine, policy));
   }
-  list(path: string, confine = true): Promise<{ path: string; entries: FsEntry[] }> {
-    return settle(listConfined(path, confine));
+  list(path: string, confine = true, policy?: ConfinePolicy): Promise<{ path: string; entries: FsEntry[] }> {
+    return settle(listConfined(path, confine, policy));
   }
-  search(path: string, pattern: string, maxResults: number, confine = true): Promise<{ hits: FsSearchHit[]; truncated: boolean }> {
-    return settle(searchConfined(path, pattern, maxResults, confine));
+  search(path: string, pattern: string, maxResults: number, confine = true, policy?: ConfinePolicy): Promise<{ hits: FsSearchHit[]; truncated: boolean }> {
+    return settle(searchConfined(path, pattern, maxResults, confine, policy));
   }
-  async readFile(path: string, confine = true): Promise<Buffer> {
-    const result = await settle(readRaw(path, confine));
+  async readFile(path: string, confine = true, policy?: ConfinePolicy): Promise<Buffer> {
+    const result = await settle(readRaw(path, confine, policy));
     return result.data;
   }
-  writeFile(path: string, data: Buffer, confine = true): Promise<FsWriteResult> {
-    return settle(writeConfined(path, data, 0o644, confine));
+  writeFile(path: string, data: Buffer, confine = true, policy?: ConfinePolicy): Promise<FsWriteResult> {
+    return settle(writeConfined(path, data, 0o644, confine, policy));
   }
-  upload(path: string, source: Readable, maxBytes: number, deliveryId: string, confine = true): Promise<{ path: string; bytes: number; sha256: string }> {
-    return settle(streamUpload(path, source, maxBytes, deliveryId, confine));
+  upload(path: string, source: Readable, maxBytes: number, deliveryId: string, confine = true, policy?: ConfinePolicy): Promise<{ path: string; bytes: number; sha256: string }> {
+    return settle(streamUpload(path, source, maxBytes, deliveryId, confine, policy));
   }
-  delete(path: string, confine = true): Promise<{ path: string }> {
-    return settle(deleteConfined(path, confine));
+  delete(path: string, confine = true, policy?: ConfinePolicy): Promise<{ path: string }> {
+    return settle(deleteConfined(path, confine, policy));
   }
-  pack(path: string, confine = true): Promise<Readable> {
-    return settle(packConfined(path, confine));
+  pack(path: string, confine = true, policy?: ConfinePolicy): Promise<Readable> {
+    return settle(packConfined(path, confine, policy));
   }
 }
 
@@ -137,51 +139,51 @@ class WorkerFs implements FsClient {
     this.child.on("exit", (code) => this.failAll(new Error(`fs worker 退出 ${code ?? "null"}`)));
   }
 
-  read(path: string, maxBytes: number, encoding?: "utf8" | "base64", confine = true): Promise<FsReadResult> {
-    return this.call({ op: "read", path, maxBytes, confine, ...(encoding ? { encoding } : {}) }).then((response) => {
+  read(path: string, maxBytes: number, encoding?: "utf8" | "base64", confine = true, policy?: ConfinePolicy): Promise<FsReadResult> {
+    return this.call({ op: "read", path, maxBytes, confine, ...(encoding ? { encoding } : {}), ...(policy ? { confinePolicy: policy } : {}) }).then((response) => {
       if (!response.read) throw new Error("fs worker 没有返回读取结果");
       return response.read;
     });
   }
 
-  write(path: string, content: Buffer, mode: number, confine = true): Promise<FsWriteResult> {
-    return this.call({ op: "write", path, content: content.toString("base64"), mode, confine }).then((response) => {
+  write(path: string, content: Buffer, mode: number, confine = true, policy?: ConfinePolicy): Promise<FsWriteResult> {
+    return this.call({ op: "write", path, content: content.toString("base64"), mode, confine, ...(policy ? { confinePolicy: policy } : {}) }).then((response) => {
       if (!response.write) throw new Error("fs worker 没有返回写入结果");
       return response.write;
     });
   }
 
-  list(path: string, confine = true): Promise<{ path: string; entries: FsEntry[] }> {
-    return this.call({ op: "list", path, confine }).then((response) => {
+  list(path: string, confine = true, policy?: ConfinePolicy): Promise<{ path: string; entries: FsEntry[] }> {
+    return this.call({ op: "list", path, confine, ...(policy ? { confinePolicy: policy } : {}) }).then((response) => {
       if (!response.list) throw new Error("fs worker 没有返回目录");
       return response.list;
     });
   }
 
-  search(path: string, pattern: string, maxResults: number, confine = true): Promise<{ hits: FsSearchHit[]; truncated: boolean }> {
-    return this.call({ op: "search", path, pattern, maxResults, confine }).then((response) => {
+  search(path: string, pattern: string, maxResults: number, confine = true, policy?: ConfinePolicy): Promise<{ hits: FsSearchHit[]; truncated: boolean }> {
+    return this.call({ op: "search", path, pattern, maxResults, confine, ...(policy ? { confinePolicy: policy } : {}) }).then((response) => {
       if (!response.search) throw new Error("fs worker 没有返回搜索结果");
       return response.search;
     });
   }
 
-  readFile(path: string, confine = true): Promise<Buffer> {
-    return this.call({ op: "readFile", path, confine }).then((response) => {
+  readFile(path: string, confine = true, policy?: ConfinePolicy): Promise<Buffer> {
+    return this.call({ op: "readFile", path, confine, ...(policy ? { confinePolicy: policy } : {}) }).then((response) => {
       if (response.file === undefined) throw new Error("fs worker 没有返回文件");
       return Buffer.from(response.file, "base64");
     });
   }
 
-  writeFile(path: string, data: Buffer, confine = true): Promise<FsWriteResult> {
-    return this.call({ op: "writeFile", path, data: data.toString("base64"), confine }).then((response) => {
+  writeFile(path: string, data: Buffer, confine = true, policy?: ConfinePolicy): Promise<FsWriteResult> {
+    return this.call({ op: "writeFile", path, data: data.toString("base64"), confine, ...(policy ? { confinePolicy: policy } : {}) }).then((response) => {
       if (!response.write) throw new Error("fs worker 没有返回写入结果");
       return response.write;
     });
   }
 
-  upload(path: string, source: Readable, maxBytes: number, deliveryId: string, confine = true): Promise<{ path: string; bytes: number; sha256: string }> {
+  upload(path: string, source: Readable, maxBytes: number, deliveryId: string, confine = true, policy?: ConfinePolicy): Promise<{ path: string; bytes: number; sha256: string }> {
     return new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [workerBin(), "--upload", path, String(maxBytes), deliveryId, confine ? "true" : "false"], {
+      const child = spawn(process.execPath, [workerBin(), "--upload", path, String(maxBytes), deliveryId, confine ? "true" : "false", policy ? JSON.stringify(policy) : ""], {
         stdio: ["pipe", "pipe", "inherit"],
         env: {
           PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
@@ -228,16 +230,16 @@ class WorkerFs implements FsClient {
     });
   }
 
-  delete(path: string, confine = true): Promise<{ path: string }> {
-    return this.call({ op: "delete", path, confine }).then((response) => {
+  delete(path: string, confine = true, policy?: ConfinePolicy): Promise<{ path: string }> {
+    return this.call({ op: "delete", path, confine, ...(policy ? { confinePolicy: policy } : {}) }).then((response) => {
       if (!response.delete) throw new Error("fs worker 没有返回删除结果");
       return response.delete;
     });
   }
 
-  pack(path: string, confine = true): Promise<Readable> {
+  pack(path: string, confine = true, policy?: ConfinePolicy): Promise<Readable> {
     return new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [workerBin(), "--pack", path, confine ? "true" : "false"], {
+      const child = spawn(process.execPath, [workerBin(), "--pack", path, confine ? "true" : "false", policy ? JSON.stringify(policy) : ""], {
         stdio: ["ignore", "pipe", "pipe"],
         env: {
           PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
