@@ -41,10 +41,10 @@ export function AdminMetrics() {
   const punctual = data?.routinePunctuality7d;
   const punctualRate = punctual?.onTimeRate == null ? "—" : `${(punctual.onTimeRate * 100).toFixed(1)}%`;
   return (
-    <section className="grid gap-6">
+    <section className="grid gap-6 px-4 py-6 sm:px-6">
       <h2 className="text-lg">运维总览</h2>
-      {overview.isPending ? <p className="text-neutral-400">正在加载…</p> : null}
-      {overview.isError ? <p role="alert" className="rounded-md bg-red-100 px-3 py-2 text-sm text-red-900">看板加载失败</p> : null}
+      {overview.isPending ? <p className="text-muted">正在加载…</p> : null}
+      {overview.isError ? <p role="alert" className="ui-alert">看板加载失败</p> : null}
       {data ? (
         <>
           <dl className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
@@ -57,7 +57,7 @@ export function AdminMetrics() {
           </dl>
           {punctual ? (
             <div data-testid="routine-punctuality">
-              <h3 className="mb-2 text-sm text-neutral-400">定时任务按时率（近 7 天）</h3>
+              <h3 className="mb-2 text-sm text-muted">定时任务按时率（近 7 天）</h3>
               <dl className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
                 <Stat label="按时率" value={punctualRate} />
                 <Stat label="计划次数" value={String(punctual.planned)} />
@@ -66,13 +66,13 @@ export function AdminMetrics() {
                 <Stat label="错过" value={String(punctual.missed)} />
                 <Stat label="跳过" value={String(punctual.skipped)} />
               </dl>
-              <p className="mt-2 text-xs text-neutral-500">计划时刻后 2 分钟内开始算按时。跳过不计入按时率。控制面停机错过的次数记在「错过」。</p>
+              <p className="mt-2 text-xs text-muted">计划时刻后 2 分钟内开始算按时。跳过不计入按时率。控制面停机错过的次数记在「错过」。</p>
             </div>
           ) : null}
           <div>
-            <h3 className="mb-2 text-sm text-neutral-400">资源异常</h3>
+            <h3 className="mb-2 text-sm text-muted">资源异常</h3>
             <ul className="grid gap-1 text-sm">
-              {data.anomalies.length === 0 ? <li className="text-neutral-500">没有</li> : null}
+              {data.anomalies.length === 0 ? <li className="text-muted">没有</li> : null}
               {data.anomalies.map((item) => (
                 <li key={`${item.machineId}-${item.kind}`}>
                   <ScanRow tone="dark" subject={item.machineId} status={item.kind} />
@@ -81,9 +81,9 @@ export function AdminMetrics() {
             </ul>
           </div>
           <div>
-            <h3 className="mb-2 text-sm text-neutral-400">失败类别</h3>
+            <h3 className="mb-2 text-sm text-muted">失败类别</h3>
             <ul className="grid gap-1 text-sm">
-              {data.failureClasses.length === 0 ? <li className="text-neutral-500">没有</li> : null}
+              {data.failureClasses.length === 0 ? <li className="text-muted">没有</li> : null}
               {data.failureClasses.map((item) => (
                 <li key={item.errorClass}>
                   <ScanRow tone="dark" subject={item.errorClass} status={String(item.count)} />
@@ -92,7 +92,7 @@ export function AdminMetrics() {
             </ul>
           </div>
           <div>
-            <h3 className="mb-2 text-sm text-neutral-400">活跃趋势</h3>
+            <h3 className="mb-2 text-sm text-muted">活跃趋势</h3>
             <ul className="grid gap-1 text-sm">
               {data.activeTrend.map((item) => (
                 <li key={item.day}>
@@ -102,9 +102,9 @@ export function AdminMetrics() {
             </ul>
           </div>
           <div>
-            <h3 className="mb-2 text-sm text-neutral-400">站内告警</h3>
+            <h3 className="mb-2 text-sm text-muted">站内告警</h3>
             <ul className="grid gap-1 text-sm">
-              {data.alerts.length === 0 ? <li className="text-neutral-500">没有</li> : null}
+              {data.alerts.length === 0 ? <li className="text-muted">没有</li> : null}
               {data.alerts.map((item) => (
                 <li key={`${item.kind}-${item.target}`}>
                   <ScanRow tone="dark" subject={item.target} status={item.kind} />
@@ -124,11 +124,11 @@ export function AdminAudit() {
     queryFn: () => api<{ audit: AuditRow[] }>("/api/admin/audit"),
   });
   return (
-    <section className="grid gap-3">
+    <section className="grid gap-3 px-4 py-6 sm:px-6">
       <h2 className="text-lg">审计</h2>
-      {audit.isPending ? <p className="text-sm text-neutral-400">正在加载…</p> : null}
-      {audit.isError ? <p role="alert" className="rounded-md bg-red-100 px-3 py-2 text-sm text-red-900">{audit.error.message}</p> : null}
-      {audit.data && audit.data.audit.length === 0 ? <p className="text-sm text-neutral-500">没有审计记录</p> : null}
+      {audit.isPending ? <p className="text-sm text-muted">正在加载…</p> : null}
+      {audit.isError ? <p role="alert" className="ui-alert">{audit.error.message}</p> : null}
+      {audit.data && audit.data.audit.length === 0 ? <p className="text-sm text-muted">没有审计记录</p> : null}
       <ul className="text-sm">
         {(audit.data?.audit ?? []).map((row) => (
           <li key={row.id}>
@@ -142,8 +142,8 @@ export function AdminAudit() {
 
 function Stat(props: { label: string; value: string }) {
   return (
-    <div className="rounded border border-neutral-800 px-3 py-2">
-      <dt className="text-neutral-500">{props.label}</dt>
+    <div className="rounded-xl border border-line bg-surface px-3 py-2">
+      <dt className="text-muted">{props.label}</dt>
       <dd>{props.value}</dd>
     </div>
   );

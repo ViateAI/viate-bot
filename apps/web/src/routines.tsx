@@ -6,10 +6,10 @@ import { ScanRow } from "./scan-row.js";
 type Routine = { id: string; cron: string; timezone: string; prompt: string; state: string; enabled: number; nextRunAt: string | null };
 type Run = { id: string; scheduledAt: string; state: string; error: string | null; taskId: string | null };
 
-const primaryButton = "rounded-full bg-neutral-900 px-3 py-1.5 text-sm text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 disabled:cursor-not-allowed disabled:opacity-50";
-const secondaryButton = "rounded-full border border-neutral-300 bg-white px-3 py-1.5 text-sm text-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 disabled:cursor-not-allowed disabled:opacity-50";
-const dangerButton = "rounded-full px-3 py-1.5 text-sm text-red-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 disabled:cursor-not-allowed disabled:opacity-50";
-const alertClass = "rounded-md bg-red-100 px-3 py-2 text-sm text-red-900";
+const primaryButton = "ui-btn disabled:cursor-not-allowed";
+const secondaryButton = "ui-btn-ghost disabled:cursor-not-allowed";
+const dangerButton = "ui-btn-danger disabled:cursor-not-allowed";
+const alertClass = "ui-alert";
 
 function statusText(routine: Routine): string {
   if (routine.state === "draft") return "待确认";
@@ -17,8 +17,8 @@ function statusText(routine: Routine): string {
 }
 
 function statusClass(routine: Routine): string {
-  if (routine.state === "draft") return "font-medium text-amber-800";
-  return routine.enabled ? "font-medium text-emerald-800" : "text-neutral-500";
+  if (routine.state === "draft") return "font-medium text-amber-fg";
+  return routine.enabled ? "font-medium text-ok" : "text-muted";
 }
 
 export function Routines({ botId }: { botId: string }) {
@@ -31,13 +31,13 @@ export function Routines({ botId }: { botId: string }) {
     onSuccess: async () => { await client.invalidateQueries({ queryKey: ["routines", botId] }); await client.invalidateQueries({ queryKey: ["routine-runs"] }); },
   });
   return <section className="grid min-w-0 gap-3">
-    <h2 className="px-1 text-xs font-normal text-neutral-500">定时任务</h2>
-    {routines.isLoading && <p className="text-sm text-neutral-500">加载中…</p>}
+    <h2 className="px-1 text-xs font-normal text-muted">定时任务</h2>
+    {routines.isLoading && <p className="text-sm text-muted">加载中…</p>}
     {routines.error && <p role="alert" className={alertClass}>{routines.error.message}</p>}
     {change.error && <p role="alert" className={alertClass}>{change.error.message}</p>}
-    {routines.data?.routines.length === 0 && <p className="text-sm text-neutral-500">暂无定时任务</p>}
+    {routines.data?.routines.length === 0 && <p className="text-sm text-muted">暂无定时任务</p>}
     <ul>
-      {routines.data?.routines.map((routine) => <li key={routine.id} className="min-w-0">
+      {routines.data?.routines.map((routine) => <li key={routine.id} className={`min-w-0 ${routine.state === "draft" ? "routine-draft" : "routine-live"}`}>
         <ScanRow
           subject={routine.prompt}
           meta={<>{routine.cron} · {routine.timezone}{routine.nextRunAt ? <span className="mt-0.5 block">下次运行：{new Date(routine.nextRunAt).toLocaleString()}</span> : null}</>}
@@ -51,7 +51,7 @@ export function Routines({ botId }: { botId: string }) {
             <button type="button" className={dangerButton} disabled={change.isPending} onClick={() => change.mutate({ id: routine.id, action: "delete" })}>删除</button>
           </>}
         />
-        {history === routine.id ? <div className="pb-3 text-sm text-neutral-500">{runs.isLoading ? "加载中…" : runs.error ? runs.error.message : runs.data && runs.data.runs.length === 0 ? "没有运行记录" : <ul>{runs.data?.runs.map((run) => <li key={run.id} className="[overflow-wrap:anywhere]">{new Date(run.scheduledAt).toLocaleString()} · {run.state}{run.error ? ` · ${run.error}` : ""}</li>)}</ul>}</div> : null}
+        {history === routine.id ? <div className="pb-3 text-sm text-muted">{runs.isLoading ? "加载中…" : runs.error ? runs.error.message : runs.data && runs.data.runs.length === 0 ? "没有运行记录" : <ul>{runs.data?.runs.map((run) => <li key={run.id} className="[overflow-wrap:anywhere]">{new Date(run.scheduledAt).toLocaleString()} · {run.state}{run.error ? ` · ${run.error}` : ""}</li>)}</ul>}</div> : null}
       </li>)}
     </ul>
   </section>;

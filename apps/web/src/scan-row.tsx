@@ -21,8 +21,9 @@ export function ScanRow({
   rule?: boolean;
   pad?: boolean;
 }) {
-  const line = rule ? (tone === "dark" ? "border-b border-neutral-800" : "border-b border-neutral-200") : "";
-  const metaTone = tone === "dark" ? "text-neutral-400" : "text-neutral-500";
+  const line = rule ? "border-b border-line" : "";
+  const metaTone = "text-muted";
+  void tone;
   const grid = status && actions
     ? "grid-cols-[minmax(0,1fr)_5.5rem] @min-[40rem]:grid-cols-[minmax(0,1fr)_5.5rem_minmax(0,18rem)]"
     : status

@@ -53,7 +53,7 @@ interface DirectoryUser {
 
 export function AdminApps() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<Me>("/api/me") });
-  if (me.isPending) return <p className="px-6 py-10 text-neutral-400">正在确认登录…</p>;
+  if (me.isPending) return <p className="px-6 py-10 text-muted">正在确认登录…</p>;
   if (!me.data?.isAdmin) return <p data-testid="not-found" className="px-6 py-10">404 页面不存在</p>;
   return <AdminAppsBody csrf={me.data.csrf} />;
 }
@@ -172,7 +172,7 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
     <section className="mx-auto grid max-w-6xl gap-6 px-4 py-6 sm:px-6" data-testid="admin-apps">
       <div>
         <h1 className="text-2xl font-semibold">应用管理</h1>
-        <p className="mt-1 text-sm text-neutral-400">上传后默认不公开。推送进度按用户刷新。</p>
+        <p className="mt-1 text-sm text-muted">上传后默认不公开。推送进度按用户刷新。</p>
       </div>
       <div role="group" aria-label="管理分区" className="flex flex-wrap gap-2">
         {([
@@ -203,15 +203,15 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
         </div>
       ) : null}
       {view === "library" ? (
-        apps.isPending ? <p className="text-sm text-neutral-400">正在加载应用…</p> : apps.isError ? (
+        apps.isPending ? <p className="text-sm text-muted">正在加载应用…</p> : apps.isError ? (
           <div className="grid gap-3">
-            <p role="alert" className="text-sm text-red-300">出错：{appErrorMessage(apps.error)}</p>
+            <p role="alert" className="text-sm text-danger">出错：{appErrorMessage(apps.error)}</p>
             <button className={appGhostClass} type="button" onClick={() => void queryClient.invalidateQueries({ queryKey: ["admin-apps"] })}>重试</button>
           </div>
         ) : (
           <div className="grid gap-4">
             {publishNote ? (
-              <div className="rounded border border-neutral-800 p-3 text-sm">
+              <div className="rounded-xl border border-line bg-surface p-3 text-sm">
                 <p>已上传 {publishNote.name} {publishNote.version}。新应用保持未公开，直到你保存可见范围。</p>
                 <WarningList warnings={publishNote.warnings} />
                 <button className={`${appGhostClass} mt-3`} type="button" onClick={() => setPublishNote(null)}>知道了</button>
@@ -226,7 +226,7 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
             <div className="lg:grid lg:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)] lg:items-start lg:gap-6">
               <div className={selected ? "max-lg:hidden" : ""}>
                 {listed.length === 0 ? (
-                  <div className="rounded border border-neutral-800 px-4 py-8 text-sm text-neutral-300">
+                  <div className="rounded-xl border border-line bg-surface px-4 py-8 text-sm text-secondary">
                     <p>{(apps.data?.apps.length ?? 0) === 0 ? "还没有应用。先上传插件包。" : "没有匹配的应用。"}</p>
                     {(apps.data?.apps.length ?? 0) === 0 ? (
                       <button className={`${appButtonClass} mt-4`} type="button" onClick={() => requestView("upload")}>上传</button>
@@ -239,7 +239,7 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
                     {listed.map((app) => (
                       <li key={app.id}>
                         <button
-                          className={`min-h-11 w-full rounded border px-3 py-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200 ${selectedId === app.id ? "border-neutral-200" : "border-neutral-800"}`}
+                          className={`min-h-11 w-full rounded-xl border px-3 py-2 text-left ${selectedId === app.id ? "border-primary bg-active" : "border-line bg-surface hover:bg-hover"}`}
                           type="button"
                           data-testid="admin-app-row"
                           data-admin-app-id={app.id}
@@ -277,7 +277,7 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
                     onForget={forgetPush}
                   />
                 ) : (
-                  <p className="hidden text-sm text-neutral-400 lg:block">请选择一个应用。</p>
+                  <p className="hidden text-sm text-muted lg:block">请选择一个应用。</p>
                 )}
               </div>
             </div>
@@ -455,13 +455,13 @@ function AppEditor({
       <div>
         <button className={`${appGhostClass} mb-3 lg:hidden`} type="button" onClick={onClose}>返回</button>
         <h2 ref={headingRef} tabIndex={-1} className="break-all text-xl font-semibold outline-none">{app.name}</h2>
-        <p className="mt-1 text-sm text-neutral-400" data-testid={app.source === "user" ? "admin-user-source" : undefined}>{app.source === "user" ? `用户来源 · 所有者 ${app.ownerName ?? "未知"}` : `${visibilityText(app.visibility)}${dirty ? " · 未保存" : ""}`}</p>
+        <p className="mt-1 text-sm text-muted" data-testid={app.source === "user" ? "admin-user-source" : undefined}>{app.source === "user" ? `用户来源 · 所有者 ${app.ownerName ?? "未知"}` : `${visibilityText(app.visibility)}${dirty ? " · 未保存" : ""}`}</p>
       </div>
       <section className="grid gap-3" aria-label="版本">
         <h3 className="font-medium">版本</h3>
-        {app.versions.length === 0 ? <p className="text-sm text-neutral-400">没有版本。</p> : null}
+        {app.versions.length === 0 ? <p className="text-sm text-muted">没有版本。</p> : null}
         {app.versions.map((version) => (
-          <div key={version.id} className="rounded border border-neutral-800 p-3 text-sm">
+          <div key={version.id} className="rounded-xl border border-line bg-surface p-3 text-sm">
             <ScanRow
               tone="dark"
               rule={false}
@@ -528,7 +528,7 @@ function AppEditor({
             </button>
           ))}
         </div>
-        <p className="text-sm text-neutral-400">仅推送的应用不出现在用户目录里，只能由推送安装。未公开是还没有保存过范围。</p>
+        <p className="text-sm text-muted">仅推送的应用不出现在用户目录里，只能由推送安装。未公开是还没有保存过范围。</p>
         {scope === "user" ? (
           <UserChecks
             users={users}
@@ -538,14 +538,14 @@ function AppEditor({
             label="谁可以在目录里看到"
           />
         ) : null}
-        {usersError ? <p role="alert" className="text-sm text-red-300">出错：{usersError}</p> : null}
+        {usersError ? <p role="alert" className="text-sm text-danger">出错：{usersError}</p> : null}
         <button className={appButtonClass} data-testid="admin-visibility-save" type="button" disabled={pending !== null || scope === "" || !visibilityDirty} onClick={() => void saveVisibility()}>
           {pending === "visibility" ? "正在保存…" : "保存可见范围"}
         </button>
       </section>}
       {app.source === "user" ? null : <section className="grid gap-3" aria-label="推送">
         <h3 className="font-medium">推送到机器</h3>
-        {active.length === 0 ? <p className="text-sm text-neutral-400">没有可推送的版本。</p> : (
+        {active.length === 0 ? <p className="text-sm text-muted">没有可推送的版本。</p> : (
           <label className="grid gap-1 text-sm">
             版本
             <select className={appFieldClass} value={versionId} onChange={(event) => setVersionId(event.target.value)}>
@@ -556,7 +556,7 @@ function AppEditor({
           </label>
         )}
         <UserChecks users={users.filter((user) => user.provisioned)} selected={targets} provisionedOnly onChange={setTargets} label="推送给谁" />
-        <p className="text-sm text-neutral-400">只列出已开通的用户，最多 200 人。强制安装后用户不能卸载。</p>
+        <p className="text-sm text-muted">只列出已开通的用户，最多 200 人。强制安装后用户不能卸载。</p>
         <label className="flex min-h-11 items-center gap-2 text-sm">
           <input type="checkbox" checked={forced} onChange={(event) => setForced(event.target.checked)} />
           强制安装（用户不能卸载）
@@ -569,8 +569,8 @@ function AppEditor({
           {pending === "push" ? "正在提交…" : "开始推送"}
         </button>
       </section>}
-      {error ? <p role="alert" className="break-words text-sm text-red-300">出错：{error}</p> : null}
-      {message ? <p role="status" className="text-sm text-emerald-300">{message}</p> : null}
+      {error ? <p role="alert" className="break-words text-sm text-danger">出错：{error}</p> : null}
+      {message ? <p role="status" className="text-sm text-ok">{message}</p> : null}
       <PushProgressList pushes={pushes} users={users} apps={[app]} onForget={onForget} />
       {retire ? (
         <AppConfirmDialog
@@ -616,7 +616,7 @@ function UserChecks({
         搜索用户
         <input className={appFieldClass} value={query} spellCheck={false} onChange={(event) => setQuery(event.target.value)} />
       </label>
-      <p className="text-sm text-neutral-400">已选 {selected.length} 人。搜索只改变显示，不会取消已勾选。</p>
+      <p className="text-sm text-muted">已选 {selected.length} 人。搜索只改变显示，不会取消已勾选。</p>
       <div className="flex flex-wrap gap-2">
         <button
           className={appGhostClass}
@@ -627,13 +627,13 @@ function UserChecks({
         </button>
         <button className={appGhostClass} type="button" onClick={() => onChange([])}>清除</button>
       </div>
-      <div className="max-h-60 overflow-auto rounded border border-neutral-800 p-2">
-        {shown.length === 0 ? <p className="px-2 py-3 text-sm text-neutral-400">没有匹配的用户。</p> : null}
+      <div className="max-h-60 overflow-auto rounded-xl border border-line bg-surface p-2">
+        {shown.length === 0 ? <p className="px-2 py-3 text-sm text-muted">没有匹配的用户。</p> : null}
         {shown.map((user) => (
           <label key={user.id} className="flex min-h-11 items-center gap-2 px-2 text-sm">
             <input type="checkbox" checked={selected.includes(user.id)} onChange={() => toggle(user.id)} />
             <span className="break-all">{user.email || user.name}</span>
-            {!user.provisioned ? <span className="text-neutral-400">未开通</span> : null}
+            {!user.provisioned ? <span className="text-muted">未开通</span> : null}
           </label>
         ))}
       </div>
@@ -652,7 +652,7 @@ function PushProgressList({
   apps: AdminCatalogEntry[];
   onForget: (id: string) => void;
 }) {
-  if (pushes.length === 0) return <p className="text-sm text-neutral-400">还没有推送记录。</p>;
+  if (pushes.length === 0) return <p className="text-sm text-muted">还没有推送记录。</p>;
   return (
     <div className="grid gap-3">
       <h3 className="font-medium">推送进度</h3>
@@ -682,7 +682,7 @@ function PushCard({
   const percent = push.targets.length === 0 ? 0 : Math.round((done / push.targets.length) * 100);
   const rows = expanded ? [...problems, ...push.targets.filter((target) => target.state === "installed")] : problems;
   return (
-    <article className="grid gap-2 rounded border border-neutral-800 p-3 text-sm">
+    <article className="grid gap-2 rounded-xl border border-line bg-surface p-3 text-sm">
       <ScanRow
         tone="dark"
         rule={false}
@@ -691,15 +691,15 @@ function PushCard({
         status={pushStateText(push.state)}
         meta={`${push.forced ? "强制安装" : "可卸载"}${push.wake ? " · 会唤醒机器" : ""}`}
       />
-      <div className="h-2 overflow-hidden rounded bg-neutral-800" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-label="推送进度">
-        <div className="h-full bg-neutral-200" style={{ width: `${percent}%` }} />
+      <div className="h-2 overflow-hidden rounded-full bg-hover" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-label="推送进度">
+        <div className="h-full bg-primary" style={{ width: `${percent}%` }} />
       </div>
       <p>{done}/{push.targets.length} 已结束 · {installed} 个已安装</p>
       <ul className="grid gap-2">
         {rows.map((target) => (
           <li key={target.userId} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3">
             <span className="min-w-0 [overflow-wrap:anywhere]">{userLabel(users, target.userId)}</span>
-            <span className="text-right">{pushTargetText(target.state)}{appErrorText(target.error) ? <span className="text-red-300"> · {appErrorText(target.error)}</span> : null}</span>
+            <span className="text-right">{pushTargetText(target.state)}{appErrorText(target.error) ? <span className="text-danger"> · {appErrorText(target.error)}</span> : null}</span>
           </li>
         ))}
       </ul>
@@ -823,9 +823,9 @@ export function UploadPanel({ csrf, onPublished }: { csrf: string; onPublished: 
   }
 
   return (
-    <section className="grid gap-3 rounded border border-neutral-800 p-4" aria-label="上传应用">
+    <section className="grid gap-3 rounded-xl border border-line bg-surface p-4" aria-label="上传应用">
       <h2 className="text-lg font-semibold">上传应用</h2>
-      <p className="text-sm text-neutral-400">新应用会保持未公开。确认可见范围后再出现在用户目录。控制面会拒绝内网、本机和元数据地址。</p>
+      <p className="text-sm text-muted">新应用会保持未公开。确认可见范围后再出现在用户目录。控制面会拒绝内网、本机和元数据地址。</p>
       <div role="group" aria-label="上传方式" className="flex flex-wrap gap-2">
         {([
           ["file", "上传包"],
@@ -854,7 +854,7 @@ export function UploadPanel({ csrf, onPublished }: { csrf: string; onPublished: 
             分发标签或版本
             <input className={appFieldClass} value={npmVersion} spellCheck={false} onChange={(event) => setNpmVersion(event.target.value)} />
           </label>
-          <p className="text-sm text-neutral-400">压缩包只从 registry.npmjs.org 获取。</p>
+          <p className="text-sm text-muted">压缩包只从 registry.npmjs.org 获取。</p>
         </div>
       ) : null}
       <label className="grid gap-1 text-sm">
@@ -863,13 +863,13 @@ export function UploadPanel({ csrf, onPublished }: { csrf: string; onPublished: 
       </label>
       {percent !== null ? (
         <div>
-          <div className="h-2 overflow-hidden rounded bg-neutral-800" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-label="上传进度">
-            <div className="h-full bg-neutral-200" style={{ width: `${percent}%` }} />
+          <div className="h-2 overflow-hidden rounded-full bg-hover" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-label="上传进度">
+            <div className="h-full bg-primary" style={{ width: `${percent}%` }} />
           </div>
-          <p className="mt-1 text-sm text-neutral-400">已上传 {percent}%</p>
+          <p className="mt-1 text-sm text-muted">已上传 {percent}%</p>
         </div>
       ) : null}
-      {error ? <p role="alert" className="break-words text-sm text-red-300">出错：{error}</p> : null}
+      {error ? <p role="alert" className="break-words text-sm text-danger">出错：{error}</p> : null}
       <div className="flex flex-wrap gap-2">
         <button
           className={appButtonClass}
@@ -894,14 +894,14 @@ export function UploadPanel({ csrf, onPublished }: { csrf: string; onPublished: 
 function WarningList({ warnings }: { warnings: string[] }) {
   if (warnings.length === 0) return null;
   return (
-    <ul className="mt-2 grid gap-1 text-sm text-amber-100">
+    <ul className="mt-2 grid gap-1 text-sm text-amber-fg">
       {warnings.map((warning, index) => <li key={`${index}-${warning}`}>包检查：{warning}</li>)}
     </ul>
   );
 }
 
 function choiceClass(on: boolean): string {
-  return `min-h-11 rounded-full border px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200 ${on ? "border-neutral-200 text-neutral-50" : "border-neutral-700 text-neutral-300"}`;
+  return `min-h-11 rounded-full border px-3 py-2 text-sm ${on ? "border-primary bg-active font-medium text-primary" : "border-line-strong text-secondary hover:bg-hover hover:text-fg"}`;
 }
 
 function sameSet(left: readonly string[], right: readonly string[]): boolean {

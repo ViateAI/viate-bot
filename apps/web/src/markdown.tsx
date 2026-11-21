@@ -47,11 +47,11 @@ function CodeBlock({ children }: { children?: ReactNode | undefined }) {
   const ref = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
   return (
-    <div className="my-2 max-w-full overflow-hidden rounded-xl bg-white text-neutral-900 ring-1 ring-black/10 dark:bg-neutral-950 dark:text-neutral-100">
-      <div className="flex justify-end border-b border-black/5 px-2 py-1 dark:border-white/10">
+    <div className="code-block my-2">
+      <div className="flex justify-end border-b border-line px-2 py-1">
         <button
           type="button"
-          className="text-xs text-neutral-500 dark:text-neutral-300"
+          className="text-xs text-muted"
           onClick={() => {
             const text = ref.current?.innerText ?? "";
             void navigator.clipboard?.writeText(text).then(() => {
@@ -80,16 +80,16 @@ const components: Components = {
   p: ({ children }) => <p className="whitespace-pre-wrap break-words">{children}</p>,
   ul: ({ children }) => <ul className="list-disc pl-5">{children}</ul>,
   ol: ({ children }) => <ol className="list-decimal pl-5">{children}</ol>,
-  blockquote: ({ children }) => <blockquote className="border-l-2 border-neutral-400 pl-3 text-neutral-700 dark:border-neutral-500 dark:text-neutral-200">{children}</blockquote>,
-  hr: () => <hr className="my-3 border-neutral-300 dark:border-neutral-600" />,
+  blockquote: ({ children }) => <blockquote className="border-l-2 border-line-strong pl-3 text-secondary">{children}</blockquote>,
+  hr: () => <hr className="my-3 border-line" />,
   table: ({ children }) => (
-    <div className="my-2 max-w-full overflow-x-auto">
+    <div className="table-wrap my-2">
       <table className="w-full border-collapse text-left text-sm">{children}</table>
     </div>
   ),
-  th: ({ children }) => <th className="border-b border-neutral-300 px-2 py-1 font-medium dark:border-neutral-600">{children}</th>,
-  td: ({ children }) => <td className="border-b border-neutral-200 px-2 py-1 dark:border-neutral-700">{children}</td>,
-  code: ({ children }) => <code className="rounded bg-black/10 px-1 font-mono text-[0.92em] dark:bg-white/10">{children}</code>,
+  th: ({ children }) => <th className="border-b border-line px-2 py-1 font-medium">{children}</th>,
+  td: ({ children }) => <td className="border-b border-line px-2 py-1">{children}</td>,
+  code: ({ children }) => <code className="rounded bg-code px-1 font-mono text-[0.92em]">{children}</code>,
 };
 
 export function MarkdownView({ text }: { text: string }) {

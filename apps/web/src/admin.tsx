@@ -53,37 +53,37 @@ interface AuditRow {
   target: string;
 }
 
-const field = "rounded border border-neutral-700 bg-neutral-900 px-3 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
-const button = "rounded bg-white px-3 py-2 text-sm font-medium text-neutral-950 disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
-const alertClass = "rounded-md bg-red-100 px-3 py-2 text-sm text-red-900";
-const machineButton = "rounded border border-neutral-600 px-3 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
+const field = "ui-field";
+const button = "ui-btn";
+const alertClass = "ui-alert";
+const machineButton = "ui-btn-ghost";
 
 export function AdminLayout() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<Me>("/api/me") });
-  if (me.isPending) return <p className="px-6 py-10 text-neutral-400">正在确认登录…</p>;
+  if (me.isPending) return <p className="px-6 py-10 text-muted">正在确认登录…</p>;
   if (!me.data?.isAdmin) return <p data-testid="not-found" className="px-6 py-10">404 页面不存在</p>;
-  return <AdminShell />;
+  return <Outlet />;
 }
 
-function AdminShell() {
+export function AdminNav() {
   const reviews = useQuery({ queryKey: ["admin-app-reviews"], queryFn: () => api<{ pendingCount: number }>("/api/admin/app-reviews") });
   const pending = reviews.data?.pendingCount ?? 0;
   return (
-    <section>
-      <nav className="flex flex-wrap gap-1 border-b border-neutral-800 px-4 text-sm" aria-label="管理">
-        <AdminTab to="/admin" testId="admin-users-link">用户</AdminTab>
-        <AdminTab to="/admin/machines" testId="admin-machines-link">机器</AdminTab>
-        <AdminTab to="/admin/templates" testId="admin-templates-link">模板</AdminTab>
-        <AdminTab to="/admin/settings" testId="admin-settings-link">设置</AdminTab>
-        <AdminTab to="/admin/metrics" testId="admin-metrics-link">看板</AdminTab>
-        <AdminTab to="/admin/audit" testId="admin-audit-link">审计</AdminTab>
-        <AdminTab to="/admin/apps" testId="admin-apps-link">应用</AdminTab>
-        <AdminTab to="/admin/app-reviews" testId="admin-reviews-link">
-          应用审批{pending > 0 ? <span data-testid="publish-review-badge"> {pending}</span> : null}
-        </AdminTab>
-      </nav>
-      <Outlet />
-    </section>
+    <nav className="anav" aria-label="管理">
+      <div className="anav-head">
+        <h2 className="text-sm font-medium">管理</h2>
+      </div>
+      <AdminTab to="/admin" testId="admin-users-link">分诊 / 用户</AdminTab>
+      <AdminTab to="/admin/machines" testId="admin-machines-link">机器</AdminTab>
+      <AdminTab to="/admin/templates" testId="admin-templates-link">模板</AdminTab>
+      <AdminTab to="/admin/settings" testId="admin-settings-link">设置</AdminTab>
+      <AdminTab to="/admin/metrics" testId="admin-metrics-link">看板</AdminTab>
+      <AdminTab to="/admin/audit" testId="admin-audit-link">审计</AdminTab>
+      <AdminTab to="/admin/apps" testId="admin-apps-link">应用</AdminTab>
+      <AdminTab to="/admin/app-reviews" testId="admin-reviews-link">
+        应用审批{pending > 0 ? <span data-testid="publish-review-badge"> {pending}</span> : null}
+      </AdminTab>
+    </nav>
   );
 }
 
@@ -92,10 +92,10 @@ function AdminTab({ to, testId, children }: { to: "/admin" | "/admin/machines" |
     <Link
       to={to}
       data-testid={testId}
-      className="-mb-px border-b-2 px-3 py-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200"
+      className="anav-link"
       activeOptions={{ exact: true, includeSearch: false }}
-      activeProps={{ className: "border-white font-medium text-white" }}
-      inactiveProps={{ className: "border-transparent text-neutral-400" }}
+      activeProps={{ className: "anav-link is-active" }}
+      inactiveProps={{ className: "anav-link" }}
     >
       {children}
     </Link>
@@ -105,6 +105,8 @@ function AdminTab({ to, testId, children }: { to: "/admin" | "/admin/machines" |
 export function AdminUsers() {
   const queryClient = useQueryClient();
   const users = useQuery({ queryKey: ["admin-users"], queryFn: () => api<{ users: AdminUser[] }>("/api/admin/users") });
+  const reviews = useQuery({ queryKey: ["admin-app-reviews"], queryFn: () => api<{ pendingCount: number }>("/api/admin/app-reviews") });
+  const machines = useQuery({ queryKey: ["admin-machines"], queryFn: () => api<{ machines: Array<{ state: string }> }>("/api/admin/machines") });
   const templates = useQuery({ queryKey: ["admin-templates"], queryFn: () => api<{ templates: Template[] }>("/api/admin/templates") });
   const settings = useQuery({
     queryKey: ["admin-settings"],
@@ -222,10 +224,16 @@ export function AdminUsers() {
   });
 
   return (
-    <div className="mx-auto grid w-full min-w-0 max-w-5xl gap-6 px-6 py-8">
+    <div className="mx-auto grid w-full min-w-0 max-w-5xl gap-6 px-4 py-6 sm:px-6 sm:py-8">
       <h1 className="text-2xl font-semibold">用户</h1>
+      <div className="triage" data-testid="admin-triage">
+        <Link to="/admin/app-reviews">待审发布 <strong>{reviews.data ? reviews.data.pendingCount : "…"}</strong></Link>
+        <Link to="/admin/machines">异常机器 <strong>{machines.data ? machines.data.machines.filter((item) => item.state === "error").length : "…"}</strong></Link>
+        <a href="#provision">已登录未开通 <strong>{users.data ? users.data.users.filter((user) => !user.provisioned).length : "…"}</strong></a>
+      </div>
       <form
-        className="grid min-w-0 gap-3 rounded border border-neutral-800 p-4 md:grid-cols-4"
+        id="provision"
+        className="grid min-w-0 gap-3 rounded-xl border border-line bg-surface p-4 md:grid-cols-4"
         onSubmit={(event) => {
           event.preventDefault();
           provision.mutate();
@@ -271,37 +279,37 @@ export function AdminUsers() {
           ) : (
             <input data-testid="provision-model" className={field} value={modelValue} onChange={(event) => setModel(event.target.value)} />
           )}
-          {fieldErrors.model ? <span className="text-red-300">{fieldErrors.model}</span> : null}
+          {fieldErrors.model ? <span className="text-danger">{fieldErrors.model}</span> : null}
         </label>
         <label className="grid gap-1 text-sm">
           bot 数
           <input data-testid="provision-bots" className={field} value={botsValue} onChange={(event) => setMaxBots(event.target.value)} />
-          {fieldErrors.maxBots ? <span className="text-red-300">{fieldErrors.maxBots}</span> : null}
+          {fieldErrors.maxBots ? <span className="text-danger">{fieldErrors.maxBots}</span> : null}
         </label>
         <label className="grid gap-1 text-sm">
           并发任务
           <input data-testid="provision-tasks" className={field} value={tasksValue} onChange={(event) => setMaxConcurrentTasks(event.target.value)} />
-          {fieldErrors.maxConcurrentTasks ? <span className="text-red-300">{fieldErrors.maxConcurrentTasks}</span> : null}
+          {fieldErrors.maxConcurrentTasks ? <span className="text-danger">{fieldErrors.maxConcurrentTasks}</span> : null}
         </label>
         <label className="grid gap-1 text-sm">
           定时任务
           <input data-testid="provision-routines" className={field} value={routinesValue} onChange={(event) => setMaxRoutines(event.target.value)} />
-          {fieldErrors.maxRoutines ? <span className="text-red-300">{fieldErrors.maxRoutines}</span> : null}
+          {fieldErrors.maxRoutines ? <span className="text-danger">{fieldErrors.maxRoutines}</span> : null}
         </label>
         <label className="grid gap-1 text-sm">
           单任务 token 预算（留空用全局值）
           <input data-testid="provision-budget" className={field} value={taskTokenBudget} placeholder="沿用全局" onChange={(event) => setTaskTokenBudget(event.target.value)} />
-          {fieldErrors.taskTokenBudget ? <span className="text-red-300">{fieldErrors.taskTokenBudget}</span> : null}
+          {fieldErrors.taskTokenBudget ? <span className="text-danger">{fieldErrors.taskTokenBudget}</span> : null}
         </label>
         <label className="grid gap-1 text-sm">
           单任务步数上限（留空用全局值，0 表示不限制）
           <input data-testid="provision-steps" className={field} value={taskMaxSteps} placeholder="沿用全局" onChange={(event) => setTaskMaxSteps(event.target.value)} />
-          {fieldErrors.taskMaxSteps ? <span className="text-red-300">{fieldErrors.taskMaxSteps}</span> : null}
+          {fieldErrors.taskMaxSteps ? <span className="text-danger">{fieldErrors.taskMaxSteps}</span> : null}
         </label>
         <label className="grid gap-1 text-sm">
           单任务时长上限秒（留空用全局值，0 表示不限制）
           <input data-testid="provision-duration" className={field} value={taskMaxDurationSec} placeholder="沿用全局" onChange={(event) => setTaskMaxDurationSec(event.target.value)} />
-          {fieldErrors.taskMaxDurationSec ? <span className="text-red-300">{fieldErrors.taskMaxDurationSec}</span> : null}
+          {fieldErrors.taskMaxDurationSec ? <span className="text-danger">{fieldErrors.taskMaxDurationSec}</span> : null}
         </label>
         {(["cpu", "memMb", "diskGb"] as const).map((key) => (
           <label key={key} className="grid gap-1 text-sm">
@@ -314,16 +322,16 @@ export function AdminUsers() {
             开通
           </button>
         </div>
-        {message ? <p data-testid="provision-result" className="self-end text-sm text-emerald-300">{message}</p> : null}
-        {error ? <p className="self-end text-sm text-red-300">{error}</p> : null}
+        {message ? <p data-testid="provision-result" className="self-end text-sm text-ok">{message}</p> : null}
+        {error ? <p className="self-end text-sm text-danger">{error}</p> : null}
       </form>
-      {users.isPending ? <p className="text-sm text-neutral-400">正在加载用户…</p> : null}
+      {users.isPending ? <p className="text-sm text-muted">正在加载用户…</p> : null}
       {users.isError ? <p role="alert" className={alertClass}>{users.error.message}</p> : null}
-      {users.data && users.data.users.length === 0 ? <p className="text-sm text-neutral-400">没有用户</p> : null}
-      <div className="@container relative min-w-0">
+      {users.data && users.data.users.length === 0 ? <p className="text-sm text-muted">没有用户</p> : null}
+      <div className="@container relative min-w-0 overflow-x-auto">
         <style>{".vb-user-label{display:block;font-size:.75rem;line-height:1.25rem}.vb-user-table{display:block;width:100%}.vb-user-table thead{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.vb-user-table tbody{display:block}.vb-user-table tbody tr{display:grid;grid-template-columns:minmax(0,1fr) 5.5rem;column-gap:.75rem;row-gap:.25rem;padding:.75rem 0}.vb-user-table td:nth-child(1){grid-column:1;grid-row:1;min-width:0;overflow-wrap:anywhere}.vb-user-table td:nth-child(3){grid-column:2;grid-row:1;text-align:right}.vb-user-table td:nth-child(n+2):not(:nth-child(3)){grid-column:1 / -1;min-width:0;overflow-wrap:anywhere}@container (min-width: 52rem){.vb-user-label{display:none}.vb-user-table{display:table;width:100%;max-width:100%;table-layout:fixed}.vb-user-table thead{position:static;display:table-header-group;width:auto;height:auto;margin:0;overflow:visible;clip:auto;white-space:normal}.vb-user-table tbody{display:table-row-group}.vb-user-table thead tr,.vb-user-table tbody tr{display:table-row;padding:0}.vb-user-table th,.vb-user-table td{display:table-cell;text-align:left;vertical-align:top;padding:.5rem .75rem .5rem 0;overflow-wrap:anywhere}.vb-user-table th:nth-child(n+2),.vb-user-table td:nth-child(n+2){padding-left:.75rem}.vb-user-table th:nth-child(2),.vb-user-table td:nth-child(2){width:4.5rem}.vb-user-table th:nth-child(3),.vb-user-table td:nth-child(3){width:5.75rem}.vb-user-table th:nth-child(4),.vb-user-table td:nth-child(4){width:5rem}.vb-user-table th:nth-child(5),.vb-user-table td:nth-child(5){width:6rem;white-space:nowrap}.vb-user-table th:nth-child(6),.vb-user-table td:nth-child(6){width:3.5rem}.vb-user-table th:nth-child(7),.vb-user-table td:nth-child(7){width:8.25rem;white-space:nowrap}.vb-user-table th:nth-child(8),.vb-user-table td:nth-child(8){width:19rem}}"}</style>
         <table className="vb-user-table text-left text-sm">
-          <thead className="text-neutral-400">
+          <thead className="text-muted">
             <tr>
               <th id="vb-user-email" scope="col" className="py-2">邮箱</th>
               <th id="vb-user-name" scope="col">名字</th>
@@ -337,18 +345,18 @@ export function AdminUsers() {
           </thead>
           <tbody>
             {(users.data?.users ?? []).map((user) => (
-              <tr key={user.id ?? user.subject ?? user.email} data-testid="user-row" className="border-t border-neutral-800">
+              <tr key={user.id ?? user.subject ?? user.email} data-testid="user-row" className="border-t border-line">
                 <UserCell id="vb-user-email">{user.email}</UserCell>
-                <UserCell id="vb-user-name" label="名字" className="text-neutral-400">{user.name}</UserCell>
+                <UserCell id="vb-user-name" label="名字" className="text-muted">{user.name}</UserCell>
                 <UserCell id="vb-user-status" label="状态">{user.status}</UserCell>
-                <UserCell id="vb-user-provision" label="开通" className="text-neutral-400">{user.provisioned ? "已开通" : "未开通"}</UserCell>
-                <UserCell id="vb-user-machine" label="机器" className="text-neutral-400">{user.machineState ?? "无"}</UserCell>
-                <UserCell id="vb-user-bots" label="bot" className="text-neutral-400">{user.botCount}</UserCell>
-                <UserCell id="vb-user-tasks" label="近 7 天任务" className="text-neutral-400">{user.tasks7d}</UserCell>
+                <UserCell id="vb-user-provision" label="开通" className="text-muted">{user.provisioned ? "已开通" : "未开通"}</UserCell>
+                <UserCell id="vb-user-machine" label="机器" className="text-muted">{user.machineState ?? "无"}</UserCell>
+                <UserCell id="vb-user-bots" label="bot" className="text-muted">{user.botCount}</UserCell>
+                <UserCell id="vb-user-tasks" label="近 7 天任务" className="text-muted">{user.tasks7d}</UserCell>
                 <td headers="vb-user-quota">
                   {user.id && user.provisioned ? (
                     <>
-                      <span className="vb-user-label text-neutral-400">配额</span>
+                      <span className="vb-user-label text-muted">配额</span>
                       <QuotaEditor
                         user={user}
                         onSave={(values) => quota.mutate({ id: user.id ?? "", ...values })}
@@ -367,7 +375,7 @@ export function AdminUsers() {
 }
 
 function UserCell({ id, label, className, children }: { id: string; label?: string; className?: string; children: ReactNode }) {
-  return <td headers={id} className={className}>{label ? <span className="vb-user-label text-neutral-400">{label} </span> : null}{children}</td>;
+  return <td headers={id} className={className}>{label ? <span className="vb-user-label text-muted">{label} </span> : null}{children}</td>;
 }
 
 function QuotaEditor({
@@ -390,7 +398,7 @@ function QuotaEditor({
     <div className="grid gap-2">
     <form
       data-testid="quota-editor"
-      className="flex min-w-0 max-w-full flex-wrap gap-2"
+      className="quota-grid"
       onSubmit={(event) => {
         event.preventDefault();
         try {
@@ -409,16 +417,16 @@ function QuotaEditor({
         }
       }}
     >
-      <label className="text-xs text-neutral-400">bot <input data-testid="quota-bots" className={`${field} w-16`} value={maxBots} onChange={(event) => setMaxBots(event.target.value)} /></label>
-      <label className="text-xs text-neutral-400">并发 <input data-testid="quota-tasks" className={`${field} w-16`} value={maxConcurrentTasks} onChange={(event) => setMaxConcurrentTasks(event.target.value)} /></label>
-      <label className="text-xs text-neutral-400">定时 <input data-testid="quota-routines" className={`${field} w-16`} value={maxRoutines} onChange={(event) => setMaxRoutines(event.target.value)} /></label>
-      <label className="text-xs text-neutral-400">预算 <input data-testid="quota-budget" className={`${field} w-24`} placeholder="沿用全局" value={taskTokenBudget} onChange={(event) => setTaskTokenBudget(event.target.value)} /></label>
-      <label className="text-xs text-neutral-400">步数 <input data-testid="quota-steps" className={`${field} w-20`} placeholder="沿用全局" value={taskMaxSteps} onChange={(event) => setTaskMaxSteps(event.target.value)} /></label>
-      <label className="text-xs text-neutral-400">时长秒 <input data-testid="quota-duration" className={`${field} w-24`} placeholder="沿用全局" value={taskMaxDurationSec} onChange={(event) => setTaskMaxDurationSec(event.target.value)} /></label>
-      <button className="text-sm text-neutral-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200" type="submit">保存</button>
-      {quotaError ? <p role="alert" className="text-xs text-red-400">{quotaError}</p> : null}
+      <label className="text-xs text-muted">bot <input data-testid="quota-bots" className={`${field} w-16`} value={maxBots} onChange={(event) => setMaxBots(event.target.value)} /></label>
+      <label className="text-xs text-muted">并发 <input data-testid="quota-tasks" className={`${field} w-16`} value={maxConcurrentTasks} onChange={(event) => setMaxConcurrentTasks(event.target.value)} /></label>
+      <label className="text-xs text-muted">定时 <input data-testid="quota-routines" className={`${field} w-16`} value={maxRoutines} onChange={(event) => setMaxRoutines(event.target.value)} /></label>
+      <label className="text-xs text-muted">预算 <input data-testid="quota-budget" className={`${field} w-24`} placeholder="沿用全局" value={taskTokenBudget} onChange={(event) => setTaskTokenBudget(event.target.value)} /></label>
+      <label className="text-xs text-muted">步数 <input data-testid="quota-steps" className={`${field} w-20`} placeholder="沿用全局" value={taskMaxSteps} onChange={(event) => setTaskMaxSteps(event.target.value)} /></label>
+      <label className="text-xs text-muted">时长秒 <input data-testid="quota-duration" className={`${field} w-24`} placeholder="沿用全局" value={taskMaxDurationSec} onChange={(event) => setTaskMaxDurationSec(event.target.value)} /></label>
+      <button className="ui-btn-ghost text-sm" type="submit">保存</button>
+      {quotaError ? <p role="alert" className="text-xs text-danger">{quotaError}</p> : null}
     </form>
-    <label className="flex items-center gap-2 text-xs text-neutral-300">
+    <label className="flex items-center gap-2 text-xs text-secondary">
       <input data-testid="process-detail" type="checkbox" checked={user.showProcess} onChange={(event) => onProcess(event.target.checked)} />
       显示详细过程
     </label>
@@ -458,11 +466,11 @@ export function AdminMachines() {
   }
 
   return (
-    <div className="mx-auto grid max-w-5xl gap-6 px-6 py-8">
+    <div className="mx-auto grid max-w-5xl gap-6 px-4 py-6 sm:px-6 sm:py-8">
       <h1 className="text-2xl font-semibold">机器</h1>
-      {machines.isPending ? <p className="text-sm text-neutral-400">正在加载机器…</p> : null}
+      {machines.isPending ? <p className="text-sm text-muted">正在加载机器…</p> : null}
       {machines.isError ? <p role="alert" className={alertClass}>{machines.error.message}</p> : null}
-      {machines.data && machines.data.machines.length === 0 ? <p className="text-sm text-neutral-400">没有机器</p> : null}
+      {machines.data && machines.data.machines.length === 0 ? <p className="text-sm text-muted">没有机器</p> : null}
       <ul>
         {(machines.data?.machines ?? []).map((machine) => (
           <li key={machine.id} data-testid="machine-row" className="text-sm">
@@ -470,7 +478,7 @@ export function AdminMachines() {
               tone="dark"
               subject={machine.email}
               status={machine.state}
-              meta={<span>{machine.spec.cpu} CPU / {machine.spec.memMb} MB · {machine.image} · {machine.createdAt} · 健康检查 {machine.lastHeartbeatAt ?? "无"}{machine.statusDetail ? <span data-testid="machine-status-detail" className="text-red-300"> · {machine.statusDetail}</span> : null}</span>}
+              meta={<span>{machine.spec.cpu} CPU / {machine.spec.memMb} MB · {machine.image} · {machine.createdAt} · 健康检查 {machine.lastHeartbeatAt ?? "无"}{machine.statusDetail ? <span data-testid="machine-status-detail" className="text-danger"> · {machine.statusDetail}</span> : null}</span>}
               actions={<>
                 <button data-testid="machine-stop" className={machineButton} type="button" onClick={() => run.mutate({ id: machine.id, action: "stop" })}>停止</button>
                 <button data-testid="machine-start" className={machineButton} type="button" onClick={() => run.mutate({ id: machine.id, action: "start" })}>启动</button>
@@ -501,10 +509,10 @@ export function AdminMachines() {
         </label>
         <button data-testid="machine-delete-submit" className={button} type="submit">确认删除</button>
       </form>
-      {error ? <p data-testid="machine-delete-error" className="text-sm text-red-300">{error}</p> : null}
+      {error ? <p data-testid="machine-delete-error" className="text-sm text-danger">{error}</p> : null}
       {stats ? <p data-testid="machine-stats">{stats}</p> : null}
       <h2 className="text-lg font-medium">审计</h2>
-      {audit.isPending ? <p className="text-sm text-neutral-400">正在加载审计…</p> : null}
+      {audit.isPending ? <p className="text-sm text-muted">正在加载审计…</p> : null}
       {audit.isError ? <p role="alert" className={alertClass}>{audit.error.message}</p> : null}
       <ul data-testid="audit-log" className="text-sm">
         {(audit.data?.audit ?? []).map((row) => (
@@ -550,11 +558,11 @@ export function AdminTemplates() {
   });
 
   return (
-    <div className="mx-auto grid max-w-3xl gap-6 px-6 py-8">
+    <div className="mx-auto grid max-w-3xl gap-6 px-4 py-6 sm:px-6 sm:py-8">
       <h1 className="text-2xl font-semibold">模板</h1>
-      {templates.isPending ? <p className="text-sm text-neutral-400">正在加载模板…</p> : null}
+      {templates.isPending ? <p className="text-sm text-muted">正在加载模板…</p> : null}
       {templates.isError ? <p role="alert" className={alertClass}>{templates.error.message}</p> : null}
-      {templates.data && templates.data.templates.length === 0 ? <p className="text-sm text-neutral-400">没有模板</p> : null}
+      {templates.data && templates.data.templates.length === 0 ? <p className="text-sm text-muted">没有模板</p> : null}
       <ul>
         {(templates.data?.templates ?? []).map((template) => (
           <li key={template.id} className="text-sm">
@@ -562,7 +570,7 @@ export function AdminTemplates() {
               tone="dark"
               subject={template.name}
               meta={template.description}
-              actions={<button className="rounded border border-red-400/70 px-3 py-1 text-red-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200" type="button" onClick={() => remove.mutate(template.id)}>删除</button>}
+              actions={<button className="ui-btn-danger" type="button" onClick={() => remove.mutate(template.id)}>删除</button>}
             />
           </li>
         ))}
@@ -630,7 +638,7 @@ export function AdminSettings() {
   return (
     <>
     <form
-      className="mx-auto grid max-w-3xl gap-4 px-6 py-8"
+      className="mx-auto grid max-w-3xl gap-4 px-4 py-6 sm:px-6 sm:py-8"
       onSubmit={(event) => {
         event.preventDefault();
         update.mutate();
@@ -643,7 +651,7 @@ export function AdminSettings() {
           <input data-testid="default-channel" className={field} value={channel} placeholder={settings.data.defaultChannel ?? ""} onChange={(event) => setChannel(event.target.value)} />
         </label>
       ) : (
-        <p className="text-sm text-neutral-400">当前未接 viate，没有默认渠道。</p>
+        <p className="text-sm text-muted">当前未接 viate，没有默认渠道。</p>
       )}
       <label className="flex items-start gap-2 text-sm">
         <input
@@ -664,7 +672,7 @@ export function AdminSettings() {
         <textarea data-testid="platform-prompt" className={`${field} min-h-40`} value={prompt} placeholder={settings.data?.platformPrompt.text ?? ""} onChange={(event) => setPrompt(event.target.value)} />
       </label>
       <button className={button} type="submit">保存</button>
-      {saved ? <p className="text-sm text-emerald-300">{saved}</p> : null}
+      {saved ? <p className="text-sm text-ok">{saved}</p> : null}
     </form>
     <ModelLimits settings={settings.data} />
     </>
@@ -704,9 +712,9 @@ function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { c
   });
   const defaults = settings?.modelDefaults;
   return (
-    <section data-testid="model-settings" className="mx-auto grid max-w-3xl gap-3 px-6 pb-10">
+    <section data-testid="model-settings" className="mx-auto grid max-w-3xl gap-3 px-4 pb-10 sm:px-6">
       <h2 className="text-xl font-semibold">模型设置</h2>
-      <p className="text-sm text-neutral-400">未单独设置的模型使用环境默认值：上下文 {defaults?.contextTokens ?? ""}，单次输出 {defaults?.maxTokens ?? ""}。只影响之后开始的任务。输出上限不能超过上下文窗口。</p>
+      <p className="text-sm text-muted">未单独设置的模型使用环境默认值：上下文 {defaults?.contextTokens ?? ""}，单次输出 {defaults?.maxTokens ?? ""}。只影响之后开始的任务。输出上限不能超过上下文窗口。</p>
       <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => {
         event.preventDefault();
         if (!budgetReady) {
@@ -782,7 +790,7 @@ function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { c
         {Object.entries(settings?.modelLimits ?? {}).map(([name, limit]) => (
           <li key={name}>{name}：上下文 {limit.contextTokens}，输出 {limit.maxTokens}</li>
         ))}
-        {Object.keys(settings?.modelLimits ?? {}).length === 0 ? <li className="text-neutral-500">还没有单独设置</li> : null}
+        {Object.keys(settings?.modelLimits ?? {}).length === 0 ? <li className="text-muted">还没有单独设置</li> : null}
       </ul>
       <form className="grid gap-2 md:grid-cols-4" onSubmit={(event) => { event.preventDefault(); save.mutate(false); }}>
         <input data-testid="model-limit-name" list="known-models" className={field} placeholder="模型 ID" value={model} onChange={(event) => setModel(event.target.value)} required />
@@ -791,7 +799,7 @@ function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { c
         <input data-testid="model-output" className={field} placeholder="单次输出上限" value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} required />
         <button className={button} type="submit">保存</button>
       </form>
-      {error ? <p className="text-sm text-red-300">{error}</p> : null}
+      {error ? <p className="text-sm text-danger">{error}</p> : null}
     </section>
   );
 }

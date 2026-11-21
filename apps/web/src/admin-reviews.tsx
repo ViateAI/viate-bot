@@ -38,8 +38,8 @@ interface ReviewFile {
   truncated?: boolean;
 }
 
-const button = "rounded bg-white px-3 py-2 text-sm font-medium text-neutral-950 disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
-const field = "rounded border border-neutral-700 bg-neutral-900 px-3 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
+const button = "ui-btn";
+const field = "ui-field";
 
 export function AdminReviews() {
   const client = useQueryClient();
@@ -50,17 +50,17 @@ export function AdminReviews() {
   const [selected, setSelected] = useState<string | null>(null);
   const current = selected ?? reviews.data?.requests[0]?.id ?? null;
   return (
-    <section className="mx-auto grid max-w-6xl gap-6 px-4 py-6 sm:px-6" data-testid="admin-review-list">
+    <section className="mx-auto grid min-w-0 max-w-6xl gap-6 px-4 py-6 sm:px-6" data-testid="admin-review-list">
       <h1 className="text-xl font-semibold">应用审批</h1>
-      {reviews.isError ? <p role="alert" className="rounded-md bg-red-100 px-3 py-2 text-sm text-red-900">无法加载审批</p> : null}
-      {reviews.isPending ? <p className="text-sm text-neutral-400">正在加载…</p> : null}
-      {reviews.data && reviews.data.requests.length === 0 ? <p className="text-sm text-neutral-400">没有发布申请</p> : null}
-      <div className="grid gap-6 lg:grid-cols-[20rem_minmax(0,1fr)]">
+      {reviews.isError ? <p role="alert" className="ui-alert">无法加载审批</p> : null}
+      {reviews.isPending ? <p className="text-sm text-muted">正在加载…</p> : null}
+      {reviews.data && reviews.data.requests.length === 0 ? <p className="text-sm text-muted">没有发布申请</p> : null}
+      <div className="review-split">
         <ul className="grid gap-2">
           {(reviews.data?.requests ?? []).map((item) => (
             <li key={item.id}>
               <button
-                className="w-full rounded border border-neutral-800 px-3 py-2 text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200"
+                className={`w-full rounded-xl border px-3 py-2 text-left text-sm ${current === item.id ? "border-primary bg-active" : "border-line bg-surface hover:bg-hover"}`}
                 type="button"
                 data-testid={`admin-review-${item.id}`}
                 onClick={() => setSelected(item.id)}
@@ -110,10 +110,10 @@ function ReviewDetail({ id, onDecided }: { id: string; onDecided: () => void }) 
     queryFn: () => api<ReviewFile>(`/api/admin/app-reviews/${encodeURIComponent(id)}/files?path=${encodeURIComponent(path ?? "")}`),
   });
   const card = detail.data;
-  if (detail.isPending) return <p className="text-sm text-neutral-400">正在加载详情…</p>;
-  if (!card) return <p role="alert" className="rounded-md bg-red-100 px-3 py-2 text-sm text-red-900">无法加载详情</p>;
+  if (detail.isPending) return <p className="text-sm text-muted">正在加载详情…</p>;
+  if (!card) return <p role="alert" className="ui-alert">无法加载详情</p>;
   return (
-    <article className="grid min-w-0 gap-4" data-testid="admin-review-detail">
+    <article className="grid min-w-0 gap-4 overflow-auto" data-testid="admin-review-detail">
       <h2 className="text-lg font-medium [overflow-wrap:anywhere]">{card.name} {card.version}</h2>
       <p className="break-all text-sm">SHA-256 {card.sha256}</p>
       <p className="whitespace-pre-wrap break-all text-sm">说明：{card.note}</p>
@@ -206,12 +206,12 @@ function stateText(state: string): string {
 function stateClass(state: string): string {
   switch (state) {
     case "pending":
-      return "font-medium text-amber-300";
+      return "font-medium text-amber-fg";
     case "approved":
-      return "font-medium text-emerald-300";
+      return "font-medium text-ok";
     case "rejected":
-      return "font-medium text-red-300";
+      return "font-medium text-danger";
     default:
-      return "text-neutral-400";
+      return "text-muted";
   }
 }

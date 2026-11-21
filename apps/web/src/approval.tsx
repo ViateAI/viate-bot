@@ -35,12 +35,12 @@ interface PublishCard {
   warning: string;
 }
 
-const primaryButton = "rounded-full bg-neutral-900 px-3 py-1.5 text-sm text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 disabled:cursor-not-allowed disabled:opacity-50";
-const secondaryButton = "rounded-full border border-neutral-300 bg-white px-3 py-1.5 text-sm text-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 disabled:cursor-not-allowed disabled:opacity-50";
-const quietButton = "rounded-full px-3 py-1.5 text-sm text-neutral-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 disabled:cursor-not-allowed disabled:opacity-50";
-const alertClass = "rounded-md bg-red-100 px-3 py-2 text-sm text-red-900";
+const primaryButton = "ui-btn disabled:cursor-not-allowed";
+const secondaryButton = "ui-btn-ghost disabled:cursor-not-allowed";
+const quietButton = "ui-btn-ghost border-0 disabled:cursor-not-allowed";
+const alertClass = "ui-alert";
 const detailClass = "grid min-w-0 gap-1 [overflow-wrap:anywhere]";
-const preClass = "max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-neutral-50 p-2 text-xs";
+const preClass = "pre-scroll max-h-40 whitespace-pre-wrap break-all p-2 text-xs";
 
 export function ApprovalList({ taskId }: { taskId?: string }) {
   const client = useQueryClient();
@@ -56,8 +56,8 @@ export function ApprovalList({ taskId }: { taskId?: string }) {
   return <>
     {approvals.isError ? <p role="alert" className={alertClass}>无法加载审批</p> : null}
     {decide.isError ? <p role="alert" className={alertClass}>{decide.error.message}</p> : null}
-    {approvals.isPending ? <p className="text-sm text-neutral-500">正在加载待批准操作…</p> : null}
-    {approvals.data && items.length === 0 ? <p className="text-sm text-neutral-500">{taskId ? "这条任务没有待批准操作" : "没有待批准操作"}</p> : null}
+    {approvals.isPending ? <p className="text-sm text-muted">正在加载待批准操作…</p> : null}
+    {approvals.data && items.length === 0 ? <p className="text-sm text-muted">{taskId ? "这条任务没有待批准操作" : "没有待批准操作"}</p> : null}
     <div className="grid gap-3">
       {items.map((item) => (
         <ApprovalCard
@@ -81,11 +81,11 @@ export function ApprovalCard({ item, pending, onDecide }: { item: Approval; pend
     ? "col-span-2 col-start-1 row-start-4 flex min-w-0 flex-wrap items-center gap-2 @min-[40rem]:col-span-1 @min-[40rem]:col-start-3 @min-[40rem]:row-start-3 @min-[40rem]:justify-end"
     : "col-span-2 col-start-1 row-start-3 flex min-w-0 flex-wrap items-center gap-2 @min-[40rem]:col-span-1 @min-[40rem]:col-start-3 @min-[40rem]:row-start-2 @min-[40rem]:justify-end";
   return (
-    <article data-testid="approval-item" className="@container min-w-0 rounded-md border border-neutral-300 bg-white p-3 text-sm text-neutral-900">
+    <article data-testid="approval-item" className={`decide ${approvalTone(item)} @container min-w-0 p-3 text-sm`}>
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_5.5rem] items-start gap-x-3 gap-y-2 @min-[40rem]:grid-cols-[minmax(0,1fr)_5.5rem_minmax(0,18rem)]">
         <h3 className="col-start-1 row-start-1 min-w-0 font-medium [overflow-wrap:anywhere]" data-testid={item.tool === "install_mcp" && installCard(item.summary) ? "install-title" : undefined}>{view.title}</h3>
-        <p className="col-start-2 row-start-1 text-right font-medium text-amber-800">待批准</p>
-        {view.details ? <div className="col-span-2 col-start-1 row-start-2 min-w-0 text-neutral-700 @min-[40rem]:col-span-1">{view.details}</div> : null}
+        <p className="col-start-2 row-start-1 text-right font-medium text-amber-fg">待批准</p>
+        {view.details ? <div className="col-span-2 col-start-1 row-start-2 min-w-0 text-secondary @min-[40rem]:col-span-1">{view.details}</div> : null}
         <div className={grantClass} data-testid="approval-grant">{view.grant}</div>
         <div className={actionClass}>
           <button type="button" className={primaryButton} disabled={allowDisabled} data-testid={`allow-approval-${item.id}`} onClick={() => onDecide("allow")}>允许</button>
@@ -273,6 +273,15 @@ function canRemember(tool: string): boolean {
   return tool === "shell_exec" || tool === "fs_write" || tool.startsWith("browser_");
 }
 
+function approvalTone(item: Approval): string {
+  if (item.tool === "request_app_publish") return "decide-info";
+  if (item.tool === "install_mcp") {
+    const card = installCard(item.summary);
+    if (card && (card.runsInstallScript || card.riskyTools.length > 0)) return "decide-danger";
+  }
+  return "decide-amber";
+}
+
 function RememberRule({ id }: { id: string }) {
   const client = useQueryClient();
   const [done, setDone] = useState(false);
@@ -325,13 +334,13 @@ export function ApprovalRules({ botId }: { botId: string }) {
   });
   return (
     <section data-testid="approval-rules" className="mt-6">
-      <h3 className="text-xs text-neutral-500">自动审批</h3>
+      <h3 className="text-xs text-muted">自动审批</h3>
       <label className="mt-3 flex items-center gap-2 text-sm">
-        <input data-testid="approve-none" className="size-4 accent-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900" type="checkbox" checked={settings.data?.approveNone === true} onChange={(event) => toggle.mutate(event.target.checked)} />
+        <input data-testid="approve-none" className="size-4 accent-primary" type="checkbox" checked={settings.data?.approveNone === true} onChange={(event) => toggle.mutate(event.target.checked)} />
         全部免审批
       </label>
-      <p data-testid="approve-none-risk" className="mt-2 text-sm text-amber-800">网页中的提示注入可能让 bot 在无人确认的情况下安装 MCP 或永久改写自己的提示词。</p>
-      {rules.isPending ? <p className="mt-2 text-sm text-neutral-500">正在加载规则…</p> : null}
+      <p data-testid="approve-none-risk" className="mt-2 text-sm text-amber-fg">网页中的提示注入可能让 bot 在无人确认的情况下安装 MCP 或永久改写自己的提示词。</p>
+      {rules.isPending ? <p className="mt-2 text-sm text-muted">正在加载规则…</p> : null}
       {rules.isError ? <p role="alert" className={`mt-2 ${alertClass}`}>{rules.error.message}</p> : null}
       <ul className="mt-2">
         {(rules.data?.rules ?? []).map((rule) => (
@@ -344,18 +353,18 @@ export function ApprovalRules({ botId }: { botId: string }) {
             />
           </li>
         ))}
-        {rules.data && rules.data.rules.length === 0 ? <li className="py-2 text-sm text-neutral-400">还没有规则</li> : null}
+        {rules.data && rules.data.rules.length === 0 ? <li className="py-2 text-sm text-muted">还没有规则</li> : null}
       </ul>
       <form className="mt-3 grid gap-2" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
-        <select className="rounded-xl border border-neutral-200 px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900" value={category} onChange={(event) => setCategory(event.target.value)}>
+        <select className="ui-field text-sm" value={category} onChange={(event) => setCategory(event.target.value)}>
           <option value="shell">命令前缀</option>
           <option value="browser">网页地址</option>
           <option value="fs_write">写入路径</option>
           <option value="mcp">应用工具</option>
         </select>
-        <input className="rounded-xl border border-neutral-200 px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900" value={value} placeholder={category === "mcp" ? "应用名 工具名（工具名可空）" : "匹配内容"} onChange={(event) => setValue(event.target.value)} />
-        <label className="grid gap-1 text-xs text-neutral-500">过期时间（可选，留空则永久）
-          <input data-testid="rule-expires" className="rounded-xl border border-neutral-200 px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900" type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} />
+        <input className="ui-field text-sm" value={value} placeholder={category === "mcp" ? "应用名 工具名（工具名可空）" : "匹配内容"} onChange={(event) => setValue(event.target.value)} />
+        <label className="grid gap-1 text-xs text-muted">过期时间（可选，留空则永久）
+          <input data-testid="rule-expires" className="ui-field text-sm" type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} />
         </label>
         <button className={primaryButton} type="submit">添加规则</button>
       </form>

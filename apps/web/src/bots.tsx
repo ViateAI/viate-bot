@@ -3,7 +3,7 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { api, type Bot, type Me } from "./api.js";
 import { botAvatarUrl } from "./avatar-url.js";
-import { BotMark, initials } from "./presence.js";
+import { BotMark } from "./presence.js";
 
 /** Suggestions when the server publishes no whitelist. Creation still accepts any name. */
 const suggestedModels = ["grok-4.7", "grok-4", "grok-4-fast", "grok-3"];
@@ -29,9 +29,9 @@ function preview(bot: Bot): string {
   return line.length > 36 ? `${line.slice(0, 36)}…` : line;
 }
 
-const field = "w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-neutral-900 outline-none focus-visible:border-neutral-400";
+const field = "ui-field";
 
-export function BotSidebar({ activeId, onLogout }: { activeId?: string | undefined; onLogout: () => void }) {
+export function BotSidebar({ activeId }: { activeId?: string | undefined }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<Me>("/api/me") });
@@ -78,16 +78,15 @@ export function BotSidebar({ activeId, onLogout }: { activeId?: string | undefin
     if (!needle) return true;
     return bot.name.toLowerCase().includes(needle) || bot.model.toLowerCase().includes(needle);
   });
-  const userName = me.data?.name ?? "";
 
   return (
-    <aside className={`${activeId ? "hidden md:flex" : "flex"} h-full w-full shrink-0 flex-col border-r border-black/5 bg-[#f7f7f7] md:w-[280px]`}>
+    <aside className="flex h-full min-h-0 w-full flex-col bg-roster">
       <div className="flex items-center gap-2 px-3 py-3">
-        <label className="flex min-w-0 flex-1 items-center gap-2 rounded-full bg-white px-3 py-2 text-sm ring-1 ring-black/10">
+        <label className="flex min-w-0 flex-1 items-center gap-2 rounded-full bg-elevated px-3 py-2 text-sm ring-1 ring-line">
           <SearchIcon />
           <input
             aria-label="搜索 bot"
-            className="w-full bg-transparent text-neutral-900 outline-none placeholder:text-neutral-400"
+            className="w-full bg-transparent text-fg outline-none placeholder:text-muted"
             placeholder="搜索"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -95,7 +94,7 @@ export function BotSidebar({ activeId, onLogout }: { activeId?: string | undefin
         </label>
         <button
           type="button"
-          className="grid size-11 shrink-0 place-items-center rounded-full bg-white text-neutral-800 ring-1 ring-black/10 hover:bg-neutral-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900"
+          className="grid size-11 shrink-0 place-items-center rounded-full bg-elevated text-fg ring-1 ring-line hover:bg-hover"
           aria-expanded={creating}
           aria-label={creating ? "关闭新建" : "新建 bot"}
           onClick={() => setCreating((open) => !open)}
@@ -104,16 +103,16 @@ export function BotSidebar({ activeId, onLogout }: { activeId?: string | undefin
         </button>
       </div>
       {me.data && !me.data.provisioned ? (
-        <p data-testid="not-provisioned" className="mx-3 rounded-2xl bg-white px-4 py-6 text-sm text-neutral-600 ring-1 ring-black/5">
+        <p data-testid="not-provisioned" className="mx-3 rounded-2xl bg-elevated px-4 py-6 text-sm text-secondary ring-1 ring-line">
           尚未开通，请联系管理员
         </p>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           {creating ? (
-            <form className="grid gap-3 rounded-2xl bg-white p-3 ring-1 ring-black/5" onSubmit={onSubmit}>
+            <form className="grid gap-3 rounded-2xl bg-elevated p-3 ring-1 ring-line" onSubmit={onSubmit}>
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-medium">新建 bot</h2>
-                <button type="button" className="text-sm text-neutral-500" onClick={() => setCreating(false)}>
+                <button type="button" className="text-sm text-muted" onClick={() => setCreating(false)}>
                   取消
                 </button>
               </div>
@@ -137,7 +136,7 @@ export function BotSidebar({ activeId, onLogout }: { activeId?: string | undefin
                     <option key={item} value={item} />
                   ))}
                 </datalist>
-                {models.data?.unrestricted ? <span className="text-xs text-neutral-500">可从建议里选，也可以输入其他模型名。</span> : null}
+                {models.data?.unrestricted ? <span className="text-xs text-muted">可从建议里选，也可以输入其他模型名。</span> : null}
               </label>
               <label className="grid gap-1 text-sm">
                 指令
@@ -148,22 +147,17 @@ export function BotSidebar({ activeId, onLogout }: { activeId?: string | undefin
                   onChange={(event) => setInstructions(event.target.value)}
                 />
               </label>
-              {error ? <p className="text-sm text-red-700">{error}</p> : null}
-              <button
-                data-testid="create-bot"
-                className="rounded-full bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
-                type="submit"
-                disabled={create.isPending}
-              >
+              {error ? <p className="text-sm text-danger">{error}</p> : null}
+              <button data-testid="create-bot" className="ui-btn" type="submit" disabled={create.isPending}>
                 创建 bot
               </button>
             </form>
           ) : (
             <>
-              {bots.isPending ? <p className="px-2 py-3 text-sm text-neutral-500">正在加载…</p> : null}
-              {bots.isError ? <p role="alert" className="px-2 py-3 text-sm text-red-700">{bots.error.message}</p> : null}
+              {bots.isPending ? <p className="px-2 py-3 text-sm text-muted">正在加载…</p> : null}
+              {bots.isError ? <p role="alert" className="px-2 py-3 text-sm text-danger">{bots.error.message}</p> : null}
               {bots.data && listed.length === 0 ? (
-                <p className="px-2 py-6 text-sm text-neutral-500">{query.trim() ? "没有匹配的 bot" : "还没有 bot。点右上角加号创建一个。"}</p>
+                <p className="px-2 py-6 text-sm text-muted">{query.trim() ? "没有匹配的 bot" : "还没有 bot。点右上角加号创建一个。"}</p>
               ) : null}
               <ul className="grid gap-1">
                 {listed.map((bot) => {
@@ -174,16 +168,16 @@ export function BotSidebar({ activeId, onLogout }: { activeId?: string | undefin
                         to="/b/$botId"
                         params={{ botId: bot.id }}
                         aria-current={selected ? "page" : undefined}
-                        className={`flex items-center gap-3 rounded-2xl px-2 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 ${selected ? "bg-white shadow-sm ring-1 ring-black/5" : "hover:bg-black/[0.04]"}`}
+                        className={`flex items-center gap-3 rounded-2xl px-2 py-2 ${selected ? "bg-active shadow-[inset_2px_0_0_var(--primary)]" : "hover:bg-hover"}`}
                       >
-                        <BotMark name={bot.name} avatarUrl={botAvatarUrl(bot.id, bot.avatar, bot.updatedAt)} className="size-12 rounded-full text-sm" />
+                        <BotMark name={bot.name} avatarUrl={botAvatarUrl(bot.id, bot.avatar, bot.updatedAt)} presence={bot.busy ? "live" : "idle"} className="size-12 text-sm" />
                         <span className="min-w-0">
                           <span className="flex min-w-0 items-center gap-2">
-                            <span className="truncate text-[15px] font-medium text-neutral-900">{bot.name}</span>
-                            {bot.primary ? <span data-testid="primary-bot" className="shrink-0 rounded bg-neutral-200 px-1.5 py-0.5 text-[10px] font-medium text-neutral-700">主 bot</span> : null}
-                            {bot.busy ? <span data-testid="bot-busy" aria-label="进行中" className="size-1.5 shrink-0 rounded-full bg-neutral-800 motion-safe:animate-pulse" /> : null}
+                            <span className="truncate text-[15px] font-medium text-fg">{bot.name}</span>
+                            {bot.primary ? <span data-testid="primary-bot" className="shrink-0 rounded bg-active px-1.5 py-0.5 text-[10px] font-medium text-primary">主 bot</span> : null}
+                            {bot.busy ? <span data-testid="bot-busy" aria-label="进行中" className="size-1.5 shrink-0 rounded-full bg-primary motion-safe:animate-pulse" /> : null}
                           </span>
-                          <span className="block truncate text-sm text-neutral-500">{preview(bot)}</span>
+                          <span className="block truncate text-sm text-muted">{preview(bot)}</span>
                         </span>
                       </Link>
                     </li>
@@ -194,37 +188,13 @@ export function BotSidebar({ activeId, onLogout }: { activeId?: string | undefin
           )}
         </div>
       )}
-      <div className="mt-auto border-t border-black/5 px-3 py-3">
-        <div className="flex items-center gap-3">
-          <span className="grid size-9 shrink-0 place-items-center rounded-full bg-neutral-200 text-xs font-medium text-neutral-700" aria-hidden>
-            {initials(userName)}
-          </span>
-          <span className="min-w-0 flex-1 truncate text-sm font-medium">{userName}</span>
-        </div>
-        <nav className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-neutral-500" aria-label="账户">
-          <Link to="/approvals" className="rounded px-1 py-1 hover:text-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-neutral-900">
-            批准
-          </Link>
-          <Link to="/apps" className="rounded px-1 py-1 hover:text-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-neutral-900">
-            应用
-          </Link>
-          {me.data?.isAdmin ? (
-            <Link to="/admin" data-testid="admin-link" className="rounded px-1 py-1 hover:text-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-neutral-900">
-              管理
-            </Link>
-          ) : null}
-          <button type="button" className="rounded px-1 py-1 hover:text-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-neutral-900" onClick={onLogout}>
-            退出
-          </button>
-        </nav>
-      </div>
     </aside>
   );
 }
 
 function SearchIcon() {
   return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden className="shrink-0 text-neutral-400">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden className="shrink-0 text-muted">
       <circle cx="7" cy="7" r="4.25" stroke="currentColor" strokeWidth="1.5" />
       <path d="M10.5 10.5 13.5 13.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>

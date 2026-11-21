@@ -61,7 +61,7 @@ export function ComposerSend({ blocked, children }: { blocked: boolean; children
     <button
       data-testid="send-message"
       aria-label="发送"
-      className="mb-0.5 grid size-10 shrink-0 place-items-center rounded-full bg-neutral-900 text-white disabled:opacity-30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900"
+      className="send-btn mb-0.5 disabled:opacity-30"
       type="submit"
       disabled={blocked}
     >
@@ -126,19 +126,19 @@ export function PendingAttachments({
   return (
     <ul data-testid="pending-attachments" className="mx-auto mb-2 flex w-full max-w-3xl gap-2 overflow-x-auto px-4">
       {items.map((item) => (
-        <li key={item.id} data-testid="pending-attachment" className="flex items-center gap-2 rounded-2xl bg-white px-2 py-2 text-sm ring-1 ring-black/10">
+        <li key={item.id} data-testid="pending-attachment" className="flex items-center gap-2 rounded-2xl bg-elevated px-2 py-2 text-sm ring-1 ring-line">
           {item.kind === "image" && item.preview ? (
             <img src={item.preview} alt={item.name} className="size-12 rounded-lg object-cover" />
           ) : (
             <span className="max-w-40 truncate">{item.name}</span>
           )}
-          <span className="text-neutral-500">{formatBytes(item.size)}</span>
+          <span className="text-muted">{formatBytes(item.size)}</span>
           {item.failed && onRetry ? (
-            <button type="button" data-testid={`retry-attachment-${item.id}`} className="px-1 text-neutral-700" onClick={() => onRetry(item.id)}>
+            <button type="button" data-testid={`retry-attachment-${item.id}`} className="px-1 font-medium text-primary hover:underline" onClick={() => onRetry(item.id)}>
               重试
             </button>
           ) : null}
-          <button type="button" data-testid={`remove-attachment-${item.id}`} className="px-1 text-neutral-500" onClick={() => onRemove(item.id)}>
+          <button type="button" data-testid={`remove-attachment-${item.id}`} className="px-1 text-muted hover:text-fg" onClick={() => onRemove(item.id)}>
             移除
           </button>
         </li>
@@ -158,10 +158,10 @@ export function AttachmentCards({ items }: { items: AttachmentView[] }) {
               <img data-testid="message-image" src={`/api/uploads/${item.id}`} alt={item.name} className="max-h-40 rounded-lg" />
             </a>
           ) : (
-            <a data-testid="message-file" href={`/api/uploads/${item.id}`} className="flex items-center gap-2 rounded-xl bg-neutral-100 px-3 py-2 text-sm text-neutral-800">
+            <a data-testid="message-file" href={`/api/uploads/${item.id}`} className="flex items-center gap-2 rounded-xl bg-surface px-3 py-2 text-sm text-fg">
               <span className="truncate">{item.name}</span>
-              <span className="text-neutral-500">{formatBytes(item.size)}</span>
-              <span className="text-neutral-500">{item.mime}</span>
+              <span className="text-muted">{formatBytes(item.size)}</span>
+              <span className="text-muted">{item.mime}</span>
             </a>
           )}
         </li>

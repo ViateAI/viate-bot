@@ -12,14 +12,10 @@ export const APP_NAME_RE = /^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$/;
 export const APP_VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 export const CONFIG_KEY_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
 
-export const appFieldClass =
-  "min-h-11 w-full rounded border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
-export const appButtonClass =
-  "min-h-11 rounded bg-white px-3 py-2 text-sm font-medium text-neutral-950 disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
-export const appGhostClass =
-  "min-h-11 rounded border border-neutral-600 px-3 py-2 text-sm disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
-export const appDangerClass =
-  "min-h-11 rounded border border-red-400/70 px-3 py-2 text-sm text-red-100 disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200";
+export const appFieldClass = "ui-field min-h-11 text-sm";
+export const appButtonClass = "ui-btn min-h-11";
+export const appGhostClass = "ui-btn-ghost min-h-11";
+export const appDangerClass = "ui-btn-danger min-h-11";
 
 /** 与 catalog.ts registerCatalogRoutes 的路径和请求体一致。 */
 export const appApi = {
@@ -565,13 +561,13 @@ export function AppConfirmDialog({
       ref={dialogRef}
       aria-labelledby={titleId}
       aria-describedby={bodyId}
-      className="m-auto w-[min(24rem,calc(100%-2rem))] max-h-[calc(100dvh-2rem)] overflow-auto rounded-lg border border-neutral-700 bg-neutral-950 p-5 text-neutral-100 backdrop:bg-black/70"
+      className="m-auto w-[min(24rem,calc(100%-2rem))] max-h-[calc(100dvh-2rem)] overflow-auto rounded-xl border border-line-strong bg-elevated p-5 text-fg shadow-xl backdrop:bg-black/60"
       onClick={(event) => {
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
       <h2 id={titleId} className="text-lg font-semibold">{title}</h2>
-      <p id={bodyId} className="mt-2 text-sm text-neutral-300">{body}</p>
+      <p id={bodyId} className="mt-2 text-sm text-secondary">{body}</p>
       <div className="mt-5 flex justify-end gap-2">
         <button className={appGhostClass} type="button" onClick={onClose} disabled={busy}>取消</button>
         <button className={tone === "default" ? appButtonClass : appDangerClass} type="button" onClick={onConfirm} disabled={busy}>{confirmLabel}</button>
@@ -611,7 +607,7 @@ export function ArchivePicker({
   }
   return (
     <div
-      className={`rounded border border-dashed px-4 py-4 ${dragOver ? "border-neutral-200" : "border-neutral-700"}`}
+      className={`rounded-xl border border-dashed px-4 py-4 ${dragOver ? "border-primary bg-active" : "border-line-strong bg-surface"}`}
       onDragEnter={(event) => {
         event.preventDefault();
         if (!disabled) setDragOver(true);
@@ -627,10 +623,10 @@ export function ArchivePicker({
         if (!disabled) take(event.dataTransfer.files);
       }}
     >
-      <p className="text-sm text-neutral-300">将一个包拖到这里，或</p>
+      <p className="text-sm text-secondary">将一个包拖到这里，或</p>
       <label
         htmlFor={inputId}
-        className="mt-3 inline-flex min-h-11 cursor-pointer items-center rounded bg-white px-3 py-2 text-sm font-medium text-neutral-950 focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-neutral-200"
+        className="ui-btn mt-3 inline-flex min-h-11 cursor-pointer"
       >
         选择文件
         <input
@@ -644,12 +640,12 @@ export function ArchivePicker({
           onChange={(event) => take(event.target.files)}
         />
       </label>
-      <p className="mt-3 text-sm text-neutral-400">支持 .tar.zst、.tzst、.mcpb、.zip、.tgz、.tar.gz，最大 200MB。一次一个文件。</p>
+      <p className="mt-3 text-sm text-muted">支持 .tar.zst、.tzst、.mcpb、.zip、.tgz、.tar.gz，最大 200MB。一次一个文件。</p>
       {file ? (
         <p className="mt-3 flex flex-wrap items-center gap-3 text-sm">
           <span className="break-all">{file.name} · {formatAppBytes(file.size)}</span>
           <button
-            className="min-h-11 text-neutral-300 underline-offset-2 hover:underline"
+            className="min-h-11 text-secondary underline-offset-2 hover:text-fg hover:underline"
             type="button"
             disabled={disabled}
             onClick={() => {
@@ -666,15 +662,15 @@ export function ArchivePicker({
 }
 
 function ErrorText({ children }: { children: string }) {
-  return <p role="alert" className="break-words text-sm text-red-300">出错：{children}</p>;
+  return <p role="alert" className="break-words text-sm text-danger">出错：{children}</p>;
 }
 
 function StatusText({ children }: { children: string }) {
-  return <p role="status" className="text-sm text-emerald-300">{children}</p>;
+  return <p role="status" className="text-sm text-ok">{children}</p>;
 }
 
 function chipClass(on: boolean): string {
-  return `min-h-11 rounded-full border px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200 ${on ? "border-neutral-200 text-neutral-50" : "border-neutral-700 text-neutral-300"}`;
+  return `min-h-11 rounded-full border px-3 py-2 text-sm ${on ? "border-primary bg-active font-medium text-primary" : "border-line-strong text-secondary hover:bg-hover hover:text-fg"}`;
 }
 
 export function AppsPage() {
@@ -723,7 +719,7 @@ export function AppsPage() {
     });
   }
 
-  if (catalog.isPending || installs.isPending) return <p className="px-6 py-10 text-neutral-400">正在加载应用…</p>;
+  if (catalog.isPending || installs.isPending) return <p className="px-6 py-10 text-muted">正在加载应用…</p>;
   if (catalog.isError || installs.isError) {
     return (
       <section className="mx-auto grid max-w-3xl gap-3 px-6 py-10">
@@ -739,7 +735,7 @@ export function AppsPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold">应用</h1>
-          <p className="mt-1 text-sm text-neutral-400">安装到你自己的机器。私有应用只有你能看见。</p>
+          <p className="mt-1 text-sm text-muted">安装到你自己的机器。私有应用只有你能看见。</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button className={appGhostClass} data-testid="app-private-open" type="button" aria-expanded={privateOpen} onClick={() => setPrivateOpen((open) => !open)}>
@@ -749,7 +745,7 @@ export function AppsPage() {
         </div>
       </div>
       {me.data && !me.data.provisioned ? (
-        <p data-testid="not-provisioned" className="rounded border border-neutral-800 px-4 py-3 text-sm text-neutral-300">尚未开通，请联系管理员。开通前不能安装。</p>
+        <p data-testid="not-provisioned" className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-secondary">尚未开通，请联系管理员。开通前不能安装。</p>
       ) : null}
       {privateOpen ? (
         <PrivatePanel
@@ -790,13 +786,13 @@ export function AppsPage() {
           {query ? (
             <button className={appGhostClass} type="button" onClick={() => setQuery("")}>清除搜索</button>
           ) : null}
-          <p className="text-sm text-neutral-400">共 {visible.length} 个</p>
+          <p className="text-sm text-muted">共 {visible.length} 个</p>
         </div>
       </form>
       <div className="lg:grid lg:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)] lg:items-start lg:gap-6">
         <div className={selected ? "max-lg:hidden" : ""}>
           {visible.length === 0 ? (
-            <div className="rounded border border-neutral-800 px-4 py-8 text-sm text-neutral-300">
+            <div className="rounded-xl border border-line bg-surface px-4 py-8 text-sm text-secondary">
               <p>{rows.length === 0 ? "目录还是空的。" : "没有匹配的应用。"}</p>
               {rows.length === 0 ? (
                 <button className={`${appButtonClass} mt-4`} type="button" onClick={() => setPrivateOpen(true)}>添加私有应用</button>
@@ -809,7 +805,7 @@ export function AppsPage() {
               {visible.map((row) => (
                 <li key={row.id}>
                   <button
-                    className={`min-h-11 w-full rounded border px-4 py-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-200 ${selectedId === row.id ? "border-neutral-200" : "border-neutral-800"}`}
+                    className={`min-h-11 w-full rounded-xl border px-4 py-3 text-left ${selectedId === row.id ? "border-primary bg-active" : "border-line bg-surface hover:bg-hover"}`}
                     type="button"
                     data-testid="app-card"
                     data-app-id={row.id}
@@ -817,7 +813,7 @@ export function AppsPage() {
                     onClick={() => setSelectedId(row.id)}
                   >
                     <span className="block break-all font-medium">{row.name}</span>
-                    <span className="mt-1 block text-sm text-neutral-400">{cardSubtitle(row)}</span>
+                    <span className="mt-1 block text-sm text-muted">{cardSubtitle(row)}</span>
                   </button>
                 </li>
               ))}
@@ -834,9 +830,9 @@ export function AppsPage() {
               onChanged={reload}
             />
           ) : selectedId ? (
-            <p className="text-sm text-neutral-400">正在刷新…</p>
+            <p className="text-sm text-muted">正在刷新…</p>
           ) : (
-            <p className="hidden text-sm text-neutral-400 lg:block">请选择一个应用。</p>
+            <p className="hidden text-sm text-muted lg:block">请选择一个应用。</p>
           )}
         </div>
       </div>
@@ -1020,9 +1016,9 @@ export function PrivatePanel({ csrf, onCreated }: { csrf: string; onCreated: (ap
 
   const uploading = percent !== null || mcpBusy;
   return (
-    <section aria-label="添加私有应用" className="grid gap-3 rounded border border-neutral-800 p-4">
+    <section aria-label="添加私有应用" className="grid gap-3 rounded-xl border border-line bg-surface p-4">
       <h2 className="text-lg font-semibold">添加私有应用</h2>
-      <p className="text-sm text-neutral-400">只有你能在目录里看到。包会交给控制面校验，不会在这个页面里执行。</p>
+      <p className="text-sm text-muted">只有你能在目录里看到。包会交给控制面校验，不会在这个页面里执行。</p>
       <div role="group" aria-label="添加方式" className="flex flex-wrap gap-2">
         <button className={chipClass(mode === "file")} type="button" aria-pressed={mode === "file"} onClick={() => setMode("file")}>上传包</button>
         <button className={chipClass(mode === "mcp")} type="button" aria-pressed={mode === "mcp"} onClick={() => setMode("mcp")}>MCP 地址</button>
@@ -1049,7 +1045,7 @@ export function PrivatePanel({ csrf, onCreated }: { csrf: string; onCreated: (ap
             MCP 地址
             <input data-testid="app-private-url" className={appFieldClass} type="url" inputMode="url" spellCheck={false} value={mcpUrl} onChange={(event) => setMcpUrl(event.target.value)} />
           </label>
-          <p className="text-sm text-neutral-400">地址只提交给控制面，由你的机器拨号。这个页面不会直接请求它。</p>
+          <p className="text-sm text-muted">地址只提交给控制面，由你的机器拨号。这个页面不会直接请求它。</p>
         </div>
       )}
       {uploading ? <Progress percent={percent ?? 0} /> : null}
@@ -1082,10 +1078,10 @@ export function PrivatePanel({ csrf, onCreated }: { csrf: string; onCreated: (ap
 function Progress({ percent }: { percent: number }) {
   return (
     <div>
-      <div className="h-2 overflow-hidden rounded bg-neutral-800" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-label="上传进度">
-        <div className="h-full bg-neutral-200" style={{ width: `${percent}%` }} />
+      <div className="h-2 overflow-hidden rounded-full bg-hover" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-label="上传进度">
+        <div className="h-full bg-primary" style={{ width: `${percent}%` }} />
       </div>
-      <p className="mt-1 text-sm text-neutral-400">已上传 {percent}%</p>
+      <p className="mt-1 text-sm text-muted">已上传 {percent}%</p>
     </div>
   );
 }
@@ -1093,7 +1089,7 @@ function Progress({ percent }: { percent: number }) {
 function WarningList({ warnings }: { warnings: string[] }) {
   if (warnings.length === 0) return null;
   return (
-    <ul className="grid gap-1 text-sm text-amber-100">
+    <ul className="grid gap-1 text-sm text-amber-fg">
       {warnings.map((warning, index) => (
         <li key={`${index}-${warning}`}>包检查：{warning}</li>
       ))}
@@ -1265,17 +1261,17 @@ function AppDetail({
       <div>
         <button className={`${appGhostClass} mb-3 lg:hidden`} type="button" onClick={onClose}>返回</button>
         <h2 ref={headingRef} tabIndex={-1} className="break-all text-xl font-semibold outline-none">{row.name}</h2>
-        <p className="mt-1 text-sm text-neutral-400">{cardSubtitle(row)}</p>
+        <p className="mt-1 text-sm text-muted">{cardSubtitle(row)}</p>
       </div>
       {!row.inCatalog ? (
-        <p className="text-sm text-neutral-300">这个应用不在你的目录里，通常是管理员推送，或版本已经下架。</p>
+        <p className="text-sm text-secondary">这个应用不在你的目录里，通常是管理员推送，或版本已经下架。</p>
       ) : null}
       {install ? (
-        <div className="rounded border border-neutral-800 p-3 text-sm">
+        <div className="rounded-xl border border-line bg-surface p-3 text-sm">
           <p>{installStateText(install)} · 版本 {install.version}</p>
           {install.installedByBot ? <p data-testid="installed-by-bot">由 bot〈{install.installedByBot}〉安装</p> : null}
-          {install.forced ? <p id="forced-install-note" className="mt-1 text-neutral-300">管理员强制安装，不能卸载。</p> : null}
-          {appErrorText(install.error) ? <p className="mt-1 text-red-300">失败原因：{appErrorText(install.error)}</p> : null}
+          {install.forced ? <p id="forced-install-note" className="mt-1 text-secondary">管理员强制安装，不能卸载。</p> : null}
+          {appErrorText(install.error) ? <p className="mt-1 text-danger">失败原因：{appErrorText(install.error)}</p> : null}
         </div>
       ) : null}
       {row.privateVersions.length > 0 ? <PublishStatus name={row.name} versions={row.privateVersions} onChanged={onChanged} /> : null}
@@ -1290,11 +1286,11 @@ function AppDetail({
             aria-describedby="app-version-hint"
             onChange={(event) => setVersionText(event.target.value)}
           />
-          <span id="app-version-hint" className="text-neutral-400">{forced ? "管理员推送的应用不能更换版本。" : versionHint}</span>
+          <span id="app-version-hint" className="text-muted">{forced ? "管理员推送的应用不能更换版本。" : versionHint}</span>
         </label>
       ) : null}
       <ConfigEditor drafts={drafts} disabled={pending !== null} onChange={updateDraft} onAdd={() => { setDirty(true); setDrafts((current) => [...current, { id: draftId(), key: "", secret: false, value: "", existingSecret: false }]); }} onRemove={(id) => { setDirty(true); setDrafts((current) => current.filter((item) => item.id !== id)); }} />
-      {installReason ? <p id="install-block-reason" className="text-sm text-neutral-400">{installReason}</p> : null}
+      {installReason ? <p id="install-block-reason" className="text-sm text-muted">{installReason}</p> : null}
       {error ? <ErrorText>{error}</ErrorText> : null}
       {message ? <StatusText>{message}</StatusText> : null}
       <div className="flex flex-wrap gap-2">
@@ -1363,12 +1359,12 @@ function ConfigEditor({
   return (
     <fieldset className="grid gap-3" disabled={disabled}>
       <legend className="text-sm font-medium">配置</legend>
-      <p className="text-sm text-neutral-400">明文留空表示删除该项。已有密钥留空表示保持不变，不会回显。保存会按当前列表覆盖整份配置。</p>
-      {drafts.length === 0 ? <p className="text-sm text-neutral-400">还没有配置项。</p> : null}
+      <p className="text-sm text-muted">明文留空表示删除该项。已有密钥留空表示保持不变，不会回显。保存会按当前列表覆盖整份配置。</p>
+      {drafts.length === 0 ? <p className="text-sm text-muted">还没有配置项。</p> : null}
       {drafts.map((draft) => {
         const hintId = `config-hint-${draft.id}`;
         return (
-          <div key={draft.id} className="grid gap-2 rounded border border-neutral-800 p-3">
+          <div key={draft.id} className="grid gap-2 rounded-xl border border-line bg-surface p-3">
             <label className="grid gap-1 text-sm">
               配置名
               <input className={appFieldClass} value={draft.key} spellCheck={false} autoCapitalize="characters" onChange={(event) => onChange(draft.id, { key: event.target.value.toUpperCase() })} />
@@ -1389,7 +1385,7 @@ function ConfigEditor({
                 onChange={(event) => onChange(draft.id, { value: event.target.value })}
               />
             </label>
-            <p id={hintId} className="text-sm text-neutral-400">{draft.secret ? "密钥只在这次提交时发送，页面不会保存或回显。" : "明文会保存在应用配置里。"}</p>
+            <p id={hintId} className="text-sm text-muted">{draft.secret ? "密钥只在这次提交时发送，页面不会保存或回显。" : "明文会保存在应用配置里。"}</p>
             <button className={appGhostClass} type="button" onClick={() => onRemove(draft.id)}>移除这一项</button>
           </div>
         );

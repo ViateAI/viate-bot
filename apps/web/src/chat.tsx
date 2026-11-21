@@ -8,7 +8,7 @@ import { activityLine } from "./activity.js";
 import { usesMarkdown } from "./markdown-policy.js";
 import { ApprovalList, ApprovalRules } from "./approval.js";
 import { Computer } from "./computer.js";
-import { BotMark } from "./presence.js";
+import { BotMark, presenceFromTask } from "./presence.js";
 import { botAvatarUrl } from "./avatar-url.js";
 import { transcriptNearBottom } from "./transcript.js";
 import { Routines } from "./routines.js";
@@ -34,6 +34,7 @@ export function ChatPage({ botId }: { botId: string }) {
   const [machine, setMachine] = useState<"starting" | "ready" | "idle">("idle");
   const [error, setError] = useState("");
   const [sheet, setSheet] = useState(false);
+  const [screen, setScreen] = useState(false);
   const memories = useQuery({
     queryKey: ["memories", botId],
     queryFn: () => api<{ memories: MemoryItem[] }>(`/api/bots/${botId}/memories`),
@@ -99,6 +100,10 @@ export function ChatPage({ botId }: { botId: string }) {
 
   useEffect(() => {
     setSheet(false);
+  }, [botId]);
+
+  useEffect(() => {
+    setScreen(false);
   }, [botId]);
 
   useEffect(() => {
@@ -325,34 +330,59 @@ export function ChatPage({ botId }: { botId: string }) {
 
   const items = messages.data?.messages ?? [];
   const canContinue = showContinueButton((tasks.data?.tasks ?? []).map((item) => ({ state: item.state, error: item.error })));
+  const presence = presenceFromTask(task?.state);
+  const avatar = botAvatarUrl(botId, bot.data?.bot.avatar, bot.data?.bot.updatedAt);
+  const pillClass = task?.state === "failed"
+    ? "pill pill-bad"
+    : task?.state === "succeeded"
+      ? "pill pill-ok"
+      : task?.state === "waiting_approval" || task?.state === "waiting_input" || task?.state === "waiting_takeover" || task?.error === "remote_unconfirmed"
+        ? "pill pill-wait"
+        : "pill";
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1">
-      <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#f5f5f5]">
-        <header className="flex shrink-0 items-center gap-3 px-4 py-3 lg:hidden">
-          <Link to="/" className="rounded-full px-2 py-1 text-sm text-neutral-500 hover:bg-black/5 md:hidden">
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-canvas">
+        <header className="stage-bar">
+          <Link to="/" className="shrink-0 text-sm text-muted min-[800px]:hidden">
             返回
           </Link>
-          <h1 className="min-w-0 truncate text-[15px] font-medium lg:sr-only">{name}</h1>
-          <p data-testid="task-status" className="ml-auto truncate text-xs text-neutral-500">
-            {status}
-          </p>
+          <BotMark name={name} avatarUrl={avatar} presence={presence} className="size-8 text-xs" />
+          <h1>{name}</h1>
+          <p data-testid="task-status" className={pillClass}>{status}</p>
+          {screen ? (
+            <button
+              type="button"
+              data-testid="close-computer"
+              className="ui-btn-ghost shrink-0 px-2 py-1"
+              onClick={() => setScreen(false)}
+            >
+              返回对话
+            </button>
+          ) : null}
           <button
             type="button"
-            className="rounded-full px-2 py-1 text-sm text-neutral-600 hover:bg-black/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-neutral-900 lg:hidden"
+            className="stage-more ui-btn-ghost shrink-0 px-2 py-1"
             onClick={() => setSheet(true)}
           >
             资料
           </button>
         </header>
-        <div ref={scroller} data-testid="transcript" className="min-h-0 flex-1 overflow-y-auto px-4 pt-4 pb-4 lg:pt-8">
-          <ol data-testid="message-list" className="mx-auto grid w-full max-w-3xl gap-3">
+        {screen ? (
+          <div className="flex min-h-0 flex-1 flex-col p-3">
+            <Computer botId={botId} />
+          </div>
+        ) : (
+        <>
+        <div ref={scroller} data-testid="transcript" className="thread px-3 py-3 md:px-4">
+          <ol data-testid="message-list" className="thread-inner grid gap-3">
             {items.map((message, index) => (
-              <MessageItem key={message.id} message={message} previous={items[index - 1]} />
+              <MessageItem key={message.id} message={message} previous={items[index - 1]} botName={name} avatarUrl={avatar} presence={presence} />
             ))}
             {stream ? (
-              <li className="flex justify-start">
-                <div className="min-w-0 max-w-[75%] rounded-[1.25rem] bg-[#e9e9e9] px-4 py-2.5 text-[15px] leading-6 text-neutral-800">
+              <li className="msg-bot">
+                <BotMark name={name} avatarUrl={avatar} presence="live" className="size-8 text-xs" />
+                <div className="prose-msg min-w-0">
                   <Suspense fallback={<p className="whitespace-pre-wrap break-words">{stream}</p>}>
                     <MarkdownView text={stream} />
                   </Suspense>
@@ -360,12 +390,12 @@ export function ChatPage({ botId }: { botId: string }) {
               </li>
             ) : null}
             {line ? (
-              <li data-testid="activity-status" className="flex items-center gap-2 px-1 text-sm text-neutral-500">
-                <span aria-hidden className="size-1.5 rounded-full bg-neutral-400 motion-safe:animate-pulse" />
+              <li data-testid="activity-status" className="flex items-center gap-2 px-1 text-sm text-muted">
+                <span aria-hidden className="size-1.5 rounded-full bg-primary motion-safe:animate-pulse" />
                 {line}
               </li>
             ) : null}
-            {items.length === 0 && !stream && !line ? <li className="py-16 text-center text-sm text-neutral-400">发一条消息，开始和 {name} 对话</li> : null}
+            {items.length === 0 && !stream && !line ? <li className="py-16 text-center text-sm text-muted">发一条消息，开始和 {name} 对话</li> : null}
           </ol>
         </div>
         {secret && task ? (
@@ -375,20 +405,21 @@ export function ChatPage({ botId }: { botId: string }) {
         ) : null}
         {task?.state === "waiting_approval" ? (
           <div className="mx-auto w-full max-w-3xl px-4">
-            <section data-testid="task-approval" className="mb-3 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-neutral-900">
-              <h2 className="mb-2 text-sm font-medium text-amber-950">待批准</h2>
+            <section data-testid="task-approval" className="decide decide-amber mb-3 p-4">
+              <h2 className="mb-2 text-sm font-medium text-amber-fg">待批准</h2>
               <ApprovalList taskId={task.id} />
             </section>
           </div>
         ) : null}
         {task?.error === "remote_unconfirmed" ? (
-          <div className="mx-auto mb-3 w-full max-w-3xl rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 px-4" data-testid="remote-unconfirmed">
-            <p>停止只结束了本地等待。远端可能仍在执行。继续写操作或接管可能并发或重复。这不是远端已停止。</p>
+          <div className="hatch-banner" data-testid="remote-unconfirmed">
+            <p><strong>本地已停等。</strong>停止只结束了本地等待。</p>
+            <p><strong>远端未确认。</strong>远端可能仍在执行。继续写操作或接管可能并发或重复。这不是远端已停止。</p>
             {task.remoteUncertain ? (
               <button
                 type="button"
                 data-testid="accept-remote-risk"
-                className="mt-2 rounded-full border border-red-400 px-3 py-2"
+                className="ui-btn-danger mt-2"
                 disabled={acceptRemote.isPending}
                 onClick={() => acceptRemote.mutate()}
               >
@@ -398,12 +429,12 @@ export function ChatPage({ botId }: { botId: string }) {
           </div>
         ) : task?.error ? (
           <div className="mx-auto mb-3 w-full max-w-3xl px-4">
-            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">{task.error}</pre>
+            <pre className="ui-alert max-h-48 overflow-auto whitespace-pre-wrap break-all">{task.error}</pre>
             {canContinue ? (
               <button
                 type="button"
                 data-testid="continue-task"
-                className="mt-2 rounded-full bg-neutral-900 px-4 py-2 text-sm text-white disabled:opacity-40"
+                className="ui-btn mt-2"
                 disabled={send.isPending}
                 onClick={() => send.mutate("继续")}
               >
@@ -412,15 +443,16 @@ export function ChatPage({ botId }: { botId: string }) {
             ) : null}
           </div>
         ) : null}
-        {error ? <p className="mx-auto mb-3 w-full max-w-3xl px-4 text-sm text-red-700">{error}</p> : null}
+        {error ? <p className="mx-auto mb-3 w-full max-w-3xl px-4 text-sm text-danger">{error}</p> : null}
         <PendingAttachments items={pending} onRemove={removePending} onRetry={(id) => void retryPending(id)} />
         <form
-          className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
+          className="composer-dock"
           onSubmit={onSubmit}
           onDragOver={(event) => event.preventDefault()}
           onDrop={onDrop}
         >
-          <div className="flex items-end gap-2 rounded-full bg-white py-1.5 pr-1.5 pl-3 shadow-sm ring-1 ring-black/10">
+          <div className="composer">
+          <div className="composer-bar">
             <input
               ref={fileRef}
               data-testid="attach-input"
@@ -437,7 +469,7 @@ export function ChatPage({ botId }: { botId: string }) {
               type="button"
               data-testid="attach-file"
               aria-label="添加附件"
-              className="mb-1 grid size-9 shrink-0 place-items-center rounded-full text-neutral-600 hover:bg-black/5"
+              className="grid size-9 shrink-0 place-items-center rounded-full text-secondary hover:bg-hover"
               onClick={() => fileRef.current?.click()}
             >
               附件
@@ -445,7 +477,7 @@ export function ChatPage({ botId }: { botId: string }) {
             <select
               data-testid="send-mode"
               aria-label="发送方式"
-              className="mb-1 h-9 max-w-[5.5rem] shrink-0 rounded-full bg-transparent text-sm text-neutral-600 outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-neutral-900"
+              className="h-9 max-w-[5.5rem] shrink-0 bg-transparent text-sm text-secondary"
               value={mode}
               onChange={(event) => setMode(event.target.value === "steer" ? "steer" : "queue")}
             >
@@ -457,7 +489,7 @@ export function ChatPage({ botId }: { botId: string }) {
               data-testid="message-input"
               rows={1}
               aria-label={`给 ${name} 发消息`}
-              className="max-h-32 min-h-10 w-full min-w-0 flex-1 resize-none bg-transparent py-2 text-[15px] leading-6 text-neutral-900 outline-none placeholder:text-neutral-400"
+              className="max-h-32 min-h-10 w-full min-w-0 flex-1 resize-none bg-transparent py-2 text-[15px] leading-6 text-fg outline-none placeholder:text-muted"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={onKeyDown}
@@ -467,7 +499,7 @@ export function ChatPage({ botId }: { botId: string }) {
             {stoppable ? (
               <button
                 data-testid="stop-task"
-                className="mb-1 shrink-0 rounded-full border border-neutral-300 px-3 py-2 text-sm text-neutral-700 disabled:opacity-40"
+                className="ui-btn-ghost shrink-0"
                 type="button"
                 disabled={stop.isPending}
                 onClick={() => stop.mutate()}
@@ -490,7 +522,10 @@ export function ChatPage({ botId }: { botId: string }) {
               <ArrowUp />
             </ComposerSend>
           </div>
+          </div>
         </form>
+        </>
+        )}
       </section>
       {sheet ? (
         <button type="button" className="fixed inset-0 z-20 bg-black/30 lg:hidden" aria-label="关闭资料" onClick={() => setSheet(false)} />
@@ -508,6 +543,14 @@ export function ChatPage({ botId }: { botId: string }) {
         machine={machine}
         sheet={sheet}
         onClose={() => setSheet(false)}
+        screen={screen}
+        onToggleScreen={() => {
+          setScreen((open) => {
+            const next = !open;
+            if (next) setSheet(false);
+            return next;
+          });
+        }}
         status={status}
         memories={memories.data?.memories ?? []}
         memoryReady={Boolean(memories.data)}
@@ -531,6 +574,8 @@ function ProfilePanel({
   machine,
   sheet,
   onClose,
+  screen,
+  onToggleScreen,
   status,
   memories,
   memoryReady,
@@ -549,6 +594,8 @@ function ProfilePanel({
   machine: "starting" | "ready" | "idle";
   sheet: boolean;
   onClose: () => void;
+  screen: boolean;
+  onToggleScreen: () => void;
   status: string;
   memories: MemoryItem[];
   memoryReady: boolean;
@@ -557,7 +604,6 @@ function ProfilePanel({
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const [tab, setTab] = useState<"activity" | "library">("activity");
-  const [screen, setScreen] = useState(false);
   useEffect(() => {
     if (!sheet) return;
     closeRef.current?.focus();
@@ -570,40 +616,40 @@ function ProfilePanel({
 
   return (
     <aside
-      className={`${sheet ? "fixed inset-y-0 right-0 z-30 flex w-[min(100%,24rem)] shadow-2xl" : "hidden"} min-h-0 flex-col border-l border-black/5 bg-white lg:static lg:flex lg:w-[320px] lg:shrink-0 lg:shadow-none`}
+      className={`${sheet ? "fixed inset-y-0 right-0 z-30 flex w-[min(100%,24rem)] shadow-2xl" : "hidden"} min-h-0 flex-col border-l border-line bg-canvas lg:static lg:flex lg:w-[320px] lg:shrink-0 lg:shadow-none`}
     >
       <div className="flex justify-end px-3 pt-3 lg:hidden">
         <button
           ref={closeRef}
           type="button"
-          className="rounded-full px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-neutral-900"
+          className="ui-btn-ghost"
           onClick={onClose}
         >
           关闭
         </button>
       </div>
       <div className="flex flex-col items-center px-6 pt-4 pb-2">
-        <BotMark name={name} avatarUrl={avatarUrl} className="size-20 rounded-[1.6rem] text-2xl" />
+        <BotMark name={name} avatarUrl={avatarUrl} presence={screen ? "hold" : "idle"} className="size-16 text-xl" />
         <h2 className="mt-4 text-center text-xl font-semibold">{name}</h2>
-        {bio ? <p className="mt-2 text-center text-sm text-neutral-500">{bio}</p> : null}
-        {model ? <p className="mt-1 text-sm text-neutral-500">{model}</p> : null}
-        <p className="mt-1 text-sm text-neutral-500">{status}</p>
-        {primary ? <p data-testid="primary-bot" className="mt-2 text-xs font-medium text-neutral-700">主 bot</p> : null}
+        {bio ? <p className="mt-2 text-center text-sm text-muted">{bio}</p> : null}
+        {model ? <p className="mt-1 text-sm text-muted">{model}</p> : null}
+        <p className="mt-1 text-sm text-muted">{status}</p>
+        {primary ? <p data-testid="primary-bot" className="mt-2 text-xs font-medium text-primary">主 bot</p> : null}
         <button
           data-testid="delete-bot"
-          className="mt-3 rounded-full border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 disabled:cursor-not-allowed disabled:opacity-40"
+          className="ui-btn-danger mt-3 disabled:cursor-not-allowed"
           type="button"
           disabled={primary || deleting}
           onClick={onDelete}
         >
           删除 bot
         </button>
-        {primary ? <p data-testid="delete-bot-reason" className="mt-1 text-center text-xs text-neutral-500">主 bot 不能删除</p> : null}
+        {primary ? <p data-testid="delete-bot-reason" className="mt-1 text-center text-xs text-muted">主 bot 不能删除</p> : null}
       </div>
       <div className="flex justify-center gap-6 px-6 pt-2 text-sm">
         <button
           type="button"
-          className={`border-b-2 px-1 py-2 ${tab === "activity" ? "border-neutral-900 font-medium text-neutral-900" : "border-transparent text-neutral-400"}`}
+          className={`border-b-2 px-1 py-2 ${tab === "activity" ? "border-primary font-medium text-primary" : "border-transparent text-muted"}`}
           aria-pressed={tab === "activity"}
           onClick={() => setTab("activity")}
         >
@@ -611,7 +657,7 @@ function ProfilePanel({
         </button>
         <button
           type="button"
-          className={`border-b-2 px-1 py-2 ${tab === "library" ? "border-neutral-900 font-medium text-neutral-900" : "border-transparent text-neutral-400"}`}
+          className={`border-b-2 px-1 py-2 ${tab === "library" ? "border-primary font-medium text-primary" : "border-transparent text-muted"}`}
           aria-pressed={tab === "library"}
           onClick={() => setTab("library")}
         >
@@ -622,40 +668,35 @@ function ProfilePanel({
         <div className="grid gap-6">
           <Routines botId={botId} />
           <section>
-            <h3 className="px-1 text-xs text-neutral-500">电脑</h3>
+            <h3 className="px-1 text-xs text-muted">电脑</h3>
             <button
               type="button"
-              className="mt-2 flex w-full items-center gap-3 rounded-2xl bg-[#f6f6f6] px-3 py-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-neutral-900"
+              className="mt-2 flex w-full items-center gap-3 rounded-2xl bg-surface px-3 py-3 text-left"
               aria-expanded={screen}
-              onClick={() => setScreen((open) => !open)}
+              onClick={onToggleScreen}
             >
-              <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-neutral-200 text-xs text-neutral-600">屏</span>
+              <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-hover text-xs text-secondary">屏</span>
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-medium">Bot 的电脑</span>
-                <span className="block text-xs text-neutral-500">{machineCaption(machine)}</span>
+                <span className="block text-xs text-muted">{screen ? "已在主舞台打开" : machineCaption(machine)}</span>
               </span>
             </button>
-            {screen ? (
-              <div className="mt-3">
-                <Computer botId={botId} />
-              </div>
-            ) : null}
           </section>
           <section>
-            <h3 className="px-1 text-xs text-neutral-500">步骤</h3>
+            <h3 className="px-1 text-xs text-muted">步骤</h3>
             <ol data-testid="step-list" className="mt-2 grid gap-2">
               {steps.map((step) => (
                 <li key={step.id}>
-                  <details className="rounded-2xl bg-[#f6f6f6] px-3 py-2 text-sm">
-                    <summary className={`cursor-pointer break-all ${step.kind === "compact" ? "text-neutral-500" : ""}`}>
+                  <details className="rounded-2xl bg-surface px-3 py-2 text-sm">
+                    <summary className={`cursor-pointer break-all ${step.kind === "compact" ? "text-muted" : ""}`}>
                       {stepTitle(step)}
                       {step.kind === "compact" ? "" : ` · ${step.status}`}
                     </summary>
-                    <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs text-neutral-600">{stepBody(step)}</pre>
+                    <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs text-secondary">{stepBody(step)}</pre>
                   </details>
                 </li>
               ))}
-              {steps.length === 0 ? <li className="px-1 text-sm text-neutral-400">还没有步骤</li> : null}
+              {steps.length === 0 ? <li className="px-1 text-sm text-muted">还没有步骤</li> : null}
             </ol>
           </section>
         </div>
@@ -663,20 +704,20 @@ function ProfilePanel({
       <div className={`min-h-0 flex-1 overflow-y-auto px-4 py-4 ${tab === "library" ? "" : "hidden"}`}>
         {instructions ? (
           <section className="mb-6">
-            <h3 className="text-xs text-neutral-500">指令</h3>
+            <h3 className="text-xs text-muted">指令</h3>
             <p className="mt-2 text-sm leading-6 whitespace-pre-wrap">{instructions}</p>
           </section>
         ) : null}
         <ApprovalRules botId={botId} />
         <div data-testid="memory-list">
-          <h3 className="text-xs text-neutral-500">记忆</h3>
+          <h3 className="text-xs text-muted">记忆</h3>
           <ul className="mt-2 grid gap-2">
             {memories.map((item) => (
-              <li key={item.id} data-testid="memory-item" className="flex items-start justify-between gap-3 rounded-2xl bg-[#f6f6f6] px-3 py-2 text-sm">
+              <li key={item.id} data-testid="memory-item" className="flex items-start justify-between gap-3 rounded-2xl bg-surface px-3 py-2 text-sm">
                 <span className="whitespace-pre-wrap">{item.content}</span>
                 <button
                   data-testid={`delete-memory-${item.id}`}
-                  className="shrink-0 rounded px-1 text-neutral-500 hover:text-neutral-900"
+                  className="shrink-0 rounded px-1 text-muted hover:text-fg"
                   type="button"
                   onClick={() => onDeleteMemory(item.id)}
                 >
@@ -684,7 +725,7 @@ function ProfilePanel({
                 </button>
               </li>
             ))}
-            {memoryReady && memories.length === 0 ? <li className="text-sm text-neutral-400">还没有记忆</li> : null}
+            {memoryReady && memories.length === 0 ? <li className="text-sm text-muted">还没有记忆</li> : null}
           </ul>
         </div>
       </div>
@@ -692,40 +733,42 @@ function ProfilePanel({
   );
 }
 
-function MessageItem({ message, previous }: { message: ChatMessage; previous?: ChatMessage | undefined }) {
+function MessageItem({ message, previous, botName, avatarUrl, presence }: { message: ChatMessage; previous?: ChatMessage | undefined; botName: string; avatarUrl: string | undefined; presence: "idle" | "live" | "wait" | "hold" }) {
   const text = messageText(message);
   const stamp = showStamp(message.createdAt, previous?.createdAt) ? formatStamp(message.createdAt) : null;
   return (
     <>
-      {stamp ? <li className="py-1 text-center text-xs text-neutral-400">{stamp}</li> : null}
+      {stamp ? <li className="py-1 text-center text-xs text-muted">{stamp}</li> : null}
       {message.role === "toolResult" ? (
-        <li className="max-w-[85%] justify-self-start rounded-2xl bg-white px-3 py-2 text-xs text-neutral-500 ring-1 ring-black/5">
+        <li className="tool-card justify-self-start">
           <p>工具结果{message.toolName ? ` · ${message.toolName}` : ""}{message.isError ? " · 失败" : ""}</p>
           <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all">{text}</pre>
         </li>
       ) : message.notice ? (
-        <li data-testid="system-notice" className="max-w-[85%] justify-self-start rounded-2xl bg-amber-50 px-4 py-2.5 text-[15px] leading-6 text-neutral-800 ring-1 ring-amber-200">
-          <p className="mb-1 text-xs font-medium text-amber-950">系统通知</p>
+        <li data-testid="system-notice" className="notice-card justify-self-start">
+          <p className="mb-1 text-xs font-medium">系统通知</p>
           <p className="whitespace-pre-wrap break-words">{text}</p>
         </li>
       ) : message.role === "user" ? (
         <li className="flex justify-end">
-          <div className="max-w-[75%] rounded-[1.25rem] bg-white px-4 py-2.5 text-[15px] leading-6 text-neutral-900 shadow-sm ring-1 ring-black/5">
+          <div className="bubble">
             {text ? <p className="whitespace-pre-wrap break-words">{text}</p> : null}
             <AttachmentCards items={message.attachments ?? []} />
           </div>
         </li>
       ) : usesMarkdown(message.role, message.isError) ? (
-        <li className="flex justify-start">
-          <div className="min-w-0 max-w-[75%] rounded-[1.25rem] bg-[#e9e9e9] px-4 py-2.5 text-[15px] leading-6 text-neutral-900">
+        <li className="msg-bot">
+          <BotMark name={botName} avatarUrl={avatarUrl} presence={presence} className="size-8 text-xs" />
+          <div className="prose-msg">
             <Suspense fallback={<p className="whitespace-pre-wrap break-words">{text}</p>}>
               <MarkdownView text={text} />
             </Suspense>
           </div>
         </li>
       ) : (
-        <li className="flex justify-start">
-          <div className="max-w-[75%] rounded-[1.25rem] bg-[#e9e9e9] px-4 py-2.5 text-[15px] leading-6 text-neutral-900">
+        <li className="msg-bot">
+          <BotMark name={botName} avatarUrl={avatarUrl} presence={presence} className="size-8 text-xs" />
+          <div className="prose-msg">
             <p className="whitespace-pre-wrap break-words">{text}</p>
           </div>
         </li>
@@ -798,17 +841,18 @@ function SecretForm({ taskId, request, onDone }: { taskId: string; request: Secr
   return (
     <form
       data-testid="secret-form"
-      className="mb-3 grid gap-2 rounded-2xl border border-amber-300 bg-amber-50 p-3 text-neutral-900"
+      className="decide decide-primary mb-3 grid gap-2 p-3"
       onSubmit={(event) => {
         event.preventDefault();
         submit.mutate("provide");
       }}
     >
       <p className="text-sm font-medium">{request.label}</p>
-      <p className="text-sm text-neutral-600">{request.reason}</p>
+      <p className="text-sm text-secondary">{request.reason}</p>
+      <p className="text-xs text-muted">{request.kind === "otp" ? "验证码不保存" : "密码不回显，可选保存"}</p>
       <input
         data-testid="secret-value"
-        className="rounded-xl border border-neutral-300 bg-white px-3 py-2"
+        className="ui-field"
         type={request.kind === "text" ? "text" : "password"}
         autoComplete={request.kind === "otp" ? "one-time-code" : request.kind === "password" ? "current-password" : "off"}
         inputMode={request.kind === "otp" ? "numeric" : undefined}
@@ -816,17 +860,17 @@ function SecretForm({ taskId, request, onDone }: { taskId: string; request: Secr
         onChange={(event) => setValue(event.target.value)}
       />
       {request.kind === "otp" ? null : (
-        <label className="flex items-center gap-2 text-sm text-neutral-700">
+        <label className="flex items-center gap-2 text-sm text-secondary">
           <input data-testid="secret-save" type="checkbox" checked={save} onChange={(event) => setSave(event.target.checked)} />
           保存以便下次使用
         </label>
       )}
-      {error ? <p className="text-sm text-red-700">{error}</p> : null}
+      {error ? <p className="text-sm text-danger">{error}</p> : null}
       <div className="flex gap-2">
-        <button data-testid="secret-submit" className="rounded-full bg-neutral-900 px-3 py-2 text-sm font-medium text-white" type="submit" disabled={submit.isPending || value.length === 0}>
+        <button data-testid="secret-submit" className="ui-btn" type="submit" disabled={submit.isPending || value.length === 0}>
           提交
         </button>
-        <button data-testid="secret-reject" className="rounded-full border border-neutral-300 px-3 py-2 text-sm" type="button" disabled={submit.isPending} onClick={() => submit.mutate("reject")}>
+        <button data-testid="secret-reject" className="ui-btn-ghost" type="button" disabled={submit.isPending} onClick={() => submit.mutate("reject")}>
           拒绝
         </button>
       </div>
