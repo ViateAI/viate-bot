@@ -1,0 +1,56 @@
+# Changelog
+
+## 0.1.0 (2026-11-22)
+
+
+### Features
+
+* add a deployment switch for filesystem confinement ([7a47456](https://github.com/ViateAI/viate-bot/commit/7a47456f0c27e3c814b220dbd34562f38ede6328))
+* add agent loop, machine tools, and chat UI ([5f40999](https://github.com/ViateAI/viate-bot/commit/5f40999e8d67cc18f1ca04f35bbc3bf40b1e3ad6))
+* add allow/deny path lists to filesystem confinement ([185e884](https://github.com/ViateAI/viate-bot/commit/185e884df0310e96565afec4a4dcf6dda784db60))
+* add browser foundation with per-bot CDP windows ([c5a0f98](https://github.com/ViateAI/viate-bot/commit/c5a0f9814c5a69f8d066c390b98a569c761430ce))
+* add browser tools and secure secret form ([4f19bec](https://github.com/ViateAI/viate-bot/commit/4f19bec66b872cce02e6a7b6984490fbd6b7fff6))
+* add context summary compaction ([2fd8ba4](https://github.com/ViateAI/viate-bot/commit/2fd8ba48286214a6900b5abd65d823fb7504b4e1))
+* add memory and admin provisioning ([42a9168](https://github.com/ViateAI/viate-bot/commit/42a9168160d67ff6f1f819cabc122323595ea4ea))
+* add OIDC login, sessions, and model credential providers ([4a98cbf](https://github.com/ViateAI/viate-bot/commit/4a98cbf7ad5230a16d2add808ed46135da68fbbb))
+* add project skeleton and per-user machine driver ([76c9e57](https://github.com/ViateAI/viate-bot/commit/76c9e5766f3cafeb91861aed9e3bdd4f130016e3))
+* add Rancher Desktop firewall provisioning ([ae00889](https://github.com/ViateAI/viate-bot/commit/ae0088988be8c075ba76b0c5869557fafd66ebad))
+* add routine punctuality metrics, load test, and deployment README ([dd78fed](https://github.com/ViateAI/viate-bot/commit/dd78fed4de60a245a30819eca725394f98820b78))
+* add self-serve provisioning and new-bot creation switches ([e26fdf5](https://github.com/ViateAI/viate-bot/commit/e26fdf5a87fe317cad53759eb2d34c4000188937))
+* add shared app credentials and lazy mcp_inspect/mcp_call tools ([eb2140d](https://github.com/ViateAI/viate-bot/commit/eb2140d10b810413a19da52bc255c0da292a47ae))
+* add user secrets management page and API ([494c6b4](https://github.com/ViateAI/viate-bot/commit/494c6b42017a07f8f0fec408b3e7b2cceece8b41))
+* **approvals:** block writes after an unconfirmed exec ([b3d7fa1](https://github.com/ViateAI/viate-bot/commit/b3d7fa1c677e9bf1a21b71e9d20a9a0be1dff582))
+* **apps:** install skills and validated private packages ([ecae4af](https://github.com/ViateAI/viate-bot/commit/ecae4afaa31ae318e1b47b3f947751deba31f6ff))
+* bot app packaging and admin-reviewed publishing ([f0fd294](https://github.com/ViateAI/viate-bot/commit/f0fd2947d4c0174a7d41b77ddab19f5fbaf3cce4))
+* configurable task duration and step limits, loading feedback, markdown replies ([8f9b6e6](https://github.com/ViateAI/viate-bot/commit/8f9b6e6968e114f31507cc0a442bc9d24ffc196f))
+* **control:** wire M2 tools into the chat service ([b9bb6e2](https://github.com/ViateAI/viate-bot/commit/b9bb6e2dd08792da67772b145a80f2c36d6aed9b))
+* deliver chat uploads apart from message order ([d0adc5d](https://github.com/ViateAI/viate-bot/commit/d0adc5d9f791a65f29dfd75ea4f7b2390899dafb))
+* flag human checks and try them once ([e0532b1](https://github.com/ViateAI/viate-bot/commit/e0532b160b92191bf17bd72a5f4e02a0a750f3cd))
+* freeze M2 schema and event contract ([2a2bc1c](https://github.com/ViateAI/viate-bot/commit/2a2bc1c6cef6b0483073b417d63a98e18d501d05))
+* let bots install MCP servers with per-install approval ([8022202](https://github.com/ViateAI/viate-bot/commit/802220272766f9b85f77438f9ddcba9eb5a049a7))
+* **machined:** serve apps, displays, and MCP sessions ([58c907f](https://github.com/ViateAI/viate-bot/commit/58c907faaa08cb4c003fd5c4a81a8b0ff7c58186))
+* notify the primary bot of important app updates ([75b2ea2](https://github.com/ViateAI/viate-bot/commit/75b2ea2ef71dcaf199cf919a8960d228ea6f4cee))
+* **ops:** roll up failures into the admin overview ([4a2574c](https://github.com/ViateAI/viate-bot/commit/4a2574cf3c7cc76cb2a8e04d07c57003ccbc7c06))
+* polish M2 deployment and admin flows ([6c51ed8](https://github.com/ViateAI/viate-bot/commit/6c51ed87b9fd3111fdc75a3597246d15a5157737))
+* polish M2 for unattended use ([7e832e4](https://github.com/ViateAI/viate-bot/commit/7e832e45a52cae557a2f02aeb61b50dea7cafc56))
+* prepare open-source release with machine protocol checks ([fb6b3fb](https://github.com/ViateAI/viate-bot/commit/fb6b3fbd3d40074ea4d89b126d13f636ccdf3e75))
+* **protocol:** add skill frontmatter and app routine templates ([e6fc296](https://github.com/ViateAI/viate-bot/commit/e6fc2964648f68407ff35d3f99f1f23bf145097d))
+* **routines:** wake a machine only inside the lead window ([59f9995](https://github.com/ViateAI/viate-bot/commit/59f9995acb22d05f8f4cc983de9b0781f613f412))
+* **screen:** keep takeover input closed until disarm succeeds ([d383e2e](https://github.com/ViateAI/viate-bot/commit/d383e2e8182e5ee9a88e6b9be235ce95421b6fc9))
+* store chat uploads in S3 when configured ([d433f86](https://github.com/ViateAI/viate-bot/commit/d433f86e00874a186793fe8446b9a4921e48f14c))
+* use a three-column chat layout ([07a0ef4](https://github.com/ViateAI/viate-bot/commit/07a0ef4e7f825bedfdb7a5b4625e568e5a7932e4))
+* **web:** improve responsive approval and admin lists ([624cbee](https://github.com/ViateAI/viate-bot/commit/624cbeeb7967b8208575bb0c984953566a6fdaa6))
+* **web:** polish chat dock alignment, profile panel, markdown, and admin cards ([cba44d4](https://github.com/ViateAI/viate-bot/commit/cba44d4785af5eff6eb2313e5df0f7bfdb9fca28))
+* **web:** unify web UI with Signal & Hearth light/dark design system ([286bd0f](https://github.com/ViateAI/viate-bot/commit/286bd0ffac70cf2f8ce738db02371bee03c9707f))
+
+
+### Bug Fixes
+
+* abort exec before response headers and align tests with approval gate ([fd6ec77](https://github.com/ViateAI/viate-bot/commit/fd6ec77962f57f067c2ef0796a1fb0a6b6ff3268))
+* clean up interrupted uploads after pending writes close ([33f055e](https://github.com/ViateAI/viate-bot/commit/33f055eb9c759ce768a0d16ae2bf6e81f1728318))
+* harden M2 exec cancellation, screen viewers, routines, and VNC ([24882ad](https://github.com/ViateAI/viate-bot/commit/24882ad27ac0528cda327528250d98a0f9fd5192))
+* keep filesystem confinement on unless an admin turns it off ([e278679](https://github.com/ViateAI/viate-bot/commit/e278679e7da822c733aa4edf102b0254d4568c8b))
+* keep machine shell scripts executable when Git checks out CRLF ([f19d047](https://github.com/ViateAI/viate-bot/commit/f19d0476848ff37bf14f8f979615995842ae1fad))
+* recover machines whose container is gone and harden reconcile ([744eab3](https://github.com/ViateAI/viate-bot/commit/744eab39129c2cf8323a0a4f9b74a63857b53f12))
+* typecheck uploads on main and drop failed partials ([71d8f85](https://github.com/ViateAI/viate-bot/commit/71d8f8500a27a17a27278524e2ffe20bf7ca2f69))
+* **web:** keep user quotas readable at responsive widths ([1573b37](https://github.com/ViateAI/viate-bot/commit/1573b375644939db26c1ae04444d26d7735b383b))
