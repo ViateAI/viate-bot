@@ -6,6 +6,15 @@ Each user gets one container machine (browser, terminal, filesystem) and a contr
 
 Requires Node.js 24 or newer and pnpm 12.16.1 (the `packageManager` field).
 
+## Features
+
+- Each user has one Docker container: a terminal, a filesystem, and a built-in browser. The browser can be viewed live over VNC, and a person can take it over. Bots of the same user share that machine.
+- The web UI streams replies and renders Markdown. Long tasks compress their context automatically. A task stops when it hits its step, duration, or token budget, and model calls are rate-limited per user and per bot. Chat attachments and images are stored on local disk or, when configured, S3.
+- Dangerous commands and writes wait on an approval queue. An administrator can add automatic approval rules, or turn on a switch that skips approvals. File access and the shell working directory can be confined, with a switch plus a directory allowlist and denylist.
+- An administrator can push an app or review a package submitted by a user. A package is a Skill, a CLI, or an MCP server. A third-party MCP server is loaded only when the bot calls `mcp_inspect` or `mcp_call`. An app update is written into the main bot's conversation as a system notice.
+- App-specific secrets and user-level shared secrets are stored encrypted. The `/secrets` page shows names only and does not return the plaintext. During a task the bot can ask the user to enter a secret.
+- Cron routines wake the machine shortly before they are due. The admin UI has a monitoring board, and `GET /metrics` serves metrics when a bearer token is configured. Sign-in is OIDC. An optional self-serve switch lets a signed-in user who has no quota provision a first bot and machine.
+
 ## Architecture
 
 `apps/web` is the UI. `apps/control` handles login, bots, chat tasks, approvals, routines, and the admin UI. State is SQLite. Each user has one machine container. `machined` inside that image runs commands, reads and writes files, drives the browser, and loads pushed apps. The control plane connects out to machined. It does not join the user's bridge.

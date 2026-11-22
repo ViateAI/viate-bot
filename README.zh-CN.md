@@ -4,6 +4,17 @@ English: [README.md](README.md)
 
 给每个用户一台容器机器（浏览器、终端、文件系统）和一个控制面。用户在网页上和自己的 bot 对话；bot 可以跑定时任务，也可以使用管理员推送的应用（Skill、MCP、CLI）。用户之间隔离；同一用户的 bot 共享这台机器。
 
+要求 Node.js 24 或更高，pnpm 12.16.1（`packageManager` 字段）。
+
+## 主要功能
+
+- 每个用户一台 Docker 容器，内有终端、文件系统和内置浏览器。浏览器可通过 VNC 实时查看，人也可以接管。同一用户的多个 bot 共用这台机器。
+- 网页上流式显示回复，并渲染 Markdown。长任务会自动压缩上下文。任务在步数、时长或 token 预算用尽时停止，模型调用按用户和按 bot 限速。聊天附件和图片存在本地磁盘，也可选 S3。
+- 危险命令和写操作进入审批队列。管理员可以添加自动审批规则，或打开跳过全部审批的开关。文件访问和 shell 工作目录可以限制，支持开关以及目录白名单和黑名单。
+- 管理员可以推送应用，也可以审核用户提交的包。包可以是 Skill、CLI 或 MCP。第三方 MCP 只在 bot 调用 `mcp_inspect` 或 `mcp_call` 时加载。应用更新作为系统通知写入主 bot 的对话。
+- 应用独立密钥和用户级共享密钥加密存储。`/secrets` 只显示名称，不返回明文。任务运行中，bot 可以请求用户输入密钥。
+- cron 例行任务在临近执行时先唤醒机器。管理端有监控看板，`GET /metrics` 在配置了 Bearer token 后提供指标。登录使用 OIDC。可选的自助开通开关允许已登录且没有配额的用户开通首个 bot 和机器。
+
 ## 架构
 
 网页是 `apps/web`。控制面 `apps/control` 负责登录、bot、对话任务、审批、定时任务和管理端，数据在 SQLite。每个用户一台机器容器：镜像里的 `machined` 执行命令、读写文件、打开浏览器，并加载管理员推送的应用。控制面主动连接这台机器上的 machined。同一用户的 bot 共享这台机器；用户之间用各自的 Docker 网络和防火墙隔开。
@@ -40,8 +51,6 @@ docker run --rm --network host \
 Docker socket 访问等于该 daemon 的 root 权限。不要用 `chmod 666` 或未认证的 Docker TCP 端口解决权限。绑定宿主目录到 `/data` 时还须允许 UID 1000 写入。
 
 在 IdP 注册 `{VB_PUBLIC_URL}/auth/callback`。把 `admin@example.com` 换成 IdP 中已验证的管理员邮箱，把 `your-model-id` 换成模型网关提供的模型。管理员登录后在管理端开通用户。创建任何用户机器之前，先安装并验收 Rancher Desktop 防火墙；仅有 Docker 网桥不能提供文档所述的出口隔离。
-
-要求 Node.js 24 或更高，pnpm 12.16.1（`packageManager` 字段）。
 
 ## 开发
 
@@ -134,8 +143,8 @@ Docker socket 访问相当于该 daemon 的 root 权限；不要用 `chmod 666` 
 | `VB_TASK_TOKEN_BUDGET` | `2000000` | 单任务 token 预算。`0` 表示不限制。管理员可在模型设置改全局值，在配额里按用户覆盖。计入输入和输出，不计缓存读写 |
 | `VB_MODEL_RATE_USER` | `120` | 每用户每分钟模型请求上限。非负整数，`0` 表示不限制。管理员可在模型设置覆盖，下一次调用即生效。超限会等待，不让任务失败 |
 | `VB_MODEL_RATE_BOT` | `60` | 每 bot 每分钟模型请求上限。非负整数，`0` 表示不限制。和用户窗口一起判断，两个都有空位才记一次 |
-| `VB_MAX_TASK_STEPS` | `16` | 单任务步数上限，正整数 |
-| `VB_MAX_TASK_DURATION_SEC` | `600` | 单任务时长上限（秒），正整数 |
+| `VB_MAX_TASK_STEPS` | `200` | 单任务步数上限。非负整数。`0` 表示不限制。管理员可改全局值，并按用户覆盖。对正在运行的任务立即生效 |
+| `VB_MAX_TASK_DURATION_SEC` | `3600` | 单任务有效运行时长上限，单位秒。非负整数。`0` 表示不限制。等待审批、接管、用户输入或限速的时间不计。已用时间会保存，重启后继续累计，停机时间不计。管理员可改全局值，并按用户覆盖。每次模型请求另有 120 秒网络超时 |
 | `VB_DEFAULT_MAX_BOTS` | `5` | 管理员开通时写入配额的 bot 上限。已有配额行不会被这个值改写 |
 | `VB_DEFAULT_MAX_CONCURRENT_TASKS` | `2` | 开通时写入配额的单用户并发任务上限 |
 | `VB_DEFAULT_MAX_ROUTINES` | `10` | 开通时写入配额的定时任务上限。已有配额为 0 的用户不会被改写 |
@@ -275,7 +284,7 @@ pnpm --filter @viate-bot/e2e e2e
 
 本地冒烟用 `fake`；真实部署默认 `deepseek-flash`，可用 `VB_E2E_MODEL` 指定白名单内模型。真实部署必须使用已开通的专用普通测试账号（机器已存在），并显式设置 `VB_E2E_ALLOW_ACCOUNT_MUTATION=1`。头像场景需要该账号机器上预先准备好的 PNG 文件，路径由 `VB_E2E_AVATAR_PATH` 提供。套件只删除自己新建的 bot、规则和定时任务，并卸载唯一测试名的新安装；临时用户配额/详细过程开关在 finally 恢复。模型设置测试使用独立随机模型名，不改正在使用的模型。审计和软删除历史保留。Windows/真实模型验收需要另外运行，不能以本地假模型结果替代。
 
-Clash 的 fake-ip 会把部署域名指到错误地址。二选一：`VB_E2E_HOST_RESOLVER_RULES` 传给 Chromium 的 `--host-resolver-rules`；或 curl 形式的 `VB_E2E_RESOLVE=host:port:address`（逗号分隔），套件转成 `MAP host ip`。端口只为对齐 curl。交给 Chromium 的地址必须是 IPv4。设了这条规则后，接口请求改在页面里 `fetch`，因为 Playwright 自己的 HTTP 客户端不走这条规则。给了 `VB_E2E_BROWSER_PATH` 时不再使用 `channel`。
+如果本机代理把部署域名解析到套件用不了的地址，二选一：`VB_E2E_HOST_RESOLVER_RULES` 传给 Chromium 的 `--host-resolver-rules`；或 curl 形式的 `VB_E2E_RESOLVE=host:port:address`（逗号分隔），套件转成 `MAP host ip`。端口只为对齐 curl。交给 Chromium 的地址必须是 IPv4。设了这条规则后，接口请求改在页面里 `fetch`，因为 Playwright 自己的 HTTP 客户端不走这条规则。给了 `VB_E2E_BROWSER_PATH` 时不再使用 `channel`。
 
 Windows 宿主机是 Node 22，且没有 pnpm。`apps/e2e/docker-run.sh` 在 `mcr.microsoft.com/playwright:v1.49.1-noble` 里装 Node 24，再跑部署验收（镜像自带与 `playwright-core` 1.49 匹配的 Chromium）：
 
