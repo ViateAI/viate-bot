@@ -171,6 +171,7 @@ function parseContent(json: string): {
       text?: string;
       attachments?: unknown;
       notice?: unknown;
+      delivery?: unknown;
     };
     const attachments = attachmentRefs(value.attachments);
     const notice = noticeMark(value.notice);
@@ -178,6 +179,13 @@ function parseContent(json: string): {
       return {
         pi: value.pi,
         text: value.text ?? textOf(value.pi),
+        ...(attachments ? { attachments } : {}),
+        ...(notice ? { notice } : {}),
+      };
+    }
+    if (value.delivery === "file") {
+      return {
+        text: typeof value.text === "string" ? value.text : "",
         ...(attachments ? { attachments } : {}),
         ...(notice ? { notice } : {}),
       };

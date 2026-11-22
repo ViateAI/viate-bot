@@ -6,6 +6,7 @@ import {
   deleteConfined,
   fsFailure,
   listConfined,
+  openDownloadStream,
   packConfined,
   readConfined,
   readRaw,
@@ -67,6 +68,7 @@ export interface FsClient {
   upload(path: string, source: Readable, maxBytes: number, deliveryId: string, confine?: boolean, policy?: ConfinePolicy): Promise<{ path: string; bytes: number; sha256: string }>;
   delete(path: string, confine?: boolean, policy?: ConfinePolicy): Promise<{ path: string }>;
   pack(path: string, confine?: boolean, policy?: ConfinePolicy): Promise<Readable>;
+  download(path: string, maxBytes: number, confine?: boolean, policy?: ConfinePolicy): Promise<Readable>;
 }
 
 /** root 时把文件操作交给降权子进程；测试和非 root 进程就地执行。 */
@@ -108,6 +110,9 @@ class LocalFs implements FsClient {
   }
   pack(path: string, confine = true, policy?: ConfinePolicy): Promise<Readable> {
     return settle(packConfined(path, confine, policy));
+  }
+  download(path: string, maxBytes: number, confine = true, policy?: ConfinePolicy): Promise<Readable> {
+    return settle(openDownloadStream(path, maxBytes, confine, policy)).then((opened) => opened.stream);
   }
 }
 
@@ -272,6 +277,54 @@ class WorkerFs implements FsClient {
     });
   }
 
+  download(path: string, maxBytes: number, confine = true, policy?: ConfinePolicy): Promise<Readable> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [workerBin(), "--download", path, String(maxBytes), confine ? "true" : "false", policy ? JSON.stringify(policy) : ""], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+          HOME: "/home/bot",
+          USER: "bot",
+          LOGNAME: "bot",
+          LANG: "C.UTF-8",
+        },
+      });
+      const out = new PassThrough({ highWaterMark: 64 * 1024 });
+      let errorText = "";
+      let delivered = false;
+      child.stdout.pipe(out, { end: false });
+      out.once("readable", () => {
+        delivered = true;
+        resolve(out);
+      });
+      out.once("close", () => {
+        if (child.exitCode === null) child.kill();
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        errorText = (errorText + chunk.toString("utf8")).slice(0, 4096);
+      });
+      const fail = (error: Error) => {
+        if (delivered) out.destroy(error);
+        else {
+          out.destroy();
+          reject(error);
+        }
+      };
+      child.on("error", fail);
+      child.on("close", (code) => {
+        if (code === 0) {
+          if (!delivered) {
+            delivered = true;
+            resolve(out);
+          }
+          out.end();
+          return;
+        }
+        fail(workerStreamFailure(errorText));
+      });
+    });
+  }
+
   private call(request: Omit<RpcRequest, "id">): Promise<RpcOk> {
     const id = this.nextId;
     this.nextId += 1;
@@ -311,4 +364,20 @@ export function throwFs(error: unknown): never {
   const wrapped = new Error(failure.error);
   wrapped.name = failure.name;
   throw Object.assign(wrapped, { statusCode: failure.statusCode });
+}
+
+function workerStreamFailure(errorText: string): Error {
+  const text = errorText.trim();
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown; name?: unknown; statusCode?: unknown };
+    if (typeof parsed.error === "string") {
+      const error = new Error(parsed.error);
+      if (typeof parsed.name === "string" && parsed.name.length > 0) error.name = parsed.name;
+      const statusCode = typeof parsed.statusCode === "number" ? parsed.statusCode : 500;
+      return Object.assign(error, { statusCode });
+    }
+  } catch {
+    // 子进程没有写出 JSON 时用原文。
+  }
+  return Object.assign(new Error(text || "下载失败"), { statusCode: 400 });
 }

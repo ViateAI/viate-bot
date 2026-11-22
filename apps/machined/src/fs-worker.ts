@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import { pipeline } from "node:stream/promises";
 import type { FsEntry, FsSearchHit } from "@viate-bot/protocol";
-import { deleteConfined, fsFailure, listConfined, packConfined, readConfined, readRaw, searchConfined, streamUpload, writeConfined } from "./fs-ops.js";
+import { deleteConfined, fsFailure, listConfined, openDownloadStream, packConfined, readConfined, readRaw, searchConfined, streamUpload, writeConfined } from "./fs-ops.js";
 import { parseConfinePolicy, PathEscapeError, type ConfinePolicy } from "./paths.js";
 
 dropToBot();
@@ -42,6 +42,8 @@ if (process.argv[2] === "--pack") {
     process.stdout.write(JSON.stringify({ ok: false, ...failure }));
     process.exitCode = 1;
   });
+} else if (process.argv[2] === "--download") {
+  void runDownload();
 } else {
   const lines = createInterface({ input: process.stdin });
   let chain = Promise.resolve();
@@ -149,4 +151,20 @@ function policyArg(raw: string | undefined): ConfinePolicy | undefined {
     throw new PathEscapeError("confinePolicy 必须是对象");
   }
   return parseConfinePolicy(parsed);
+}
+
+async function runDownload(): Promise<void> {
+  try {
+    const requested = process.argv[3] ?? "";
+    const maxBytes = Number(process.argv[4]);
+    const confine = process.argv[5] !== "false";
+    const policy = policyArg(process.argv[6]);
+    const opened = await openDownloadStream(requested, maxBytes, confine, policy);
+    await pipeline(opened.stream, process.stdout);
+  } catch (error: unknown) {
+    await new Promise<void>((resolve) => {
+      process.stderr.write(JSON.stringify(fsFailure(error)), () => resolve());
+    });
+    process.exit(1);
+  }
 }

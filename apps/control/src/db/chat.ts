@@ -164,11 +164,12 @@ export function chatRepository(db: AppDatabase) {
       const previous = this.readSummary(scope, id);
       const included = new Set(messageIds);
       const prefix = db
-        .select({ id: messages.id })
+        .select({ id: messages.id, contentJson: messages.contentJson })
         .from(messages)
         .where(and(eq(messages.conversationId, id), lte(messages.id, untilMessageId), previous ? gt(messages.id, previous.untilMessageId) : undefined))
         .all();
-      return prefix.length > 0 && prefix.every((row) => included.has(row.id));
+      // 无 pi 的文件展示消息不进模型转录，但 id 仍落在前缀里。放行它们，压缩才不会被卡住。
+      return prefix.length > 0 && prefix.every((row) => included.has(row.id) || fileDelivery(row.contentJson));
     },
     touchConversation(scope: UserScope, id: string, title?: string): void {
       if (!this.findConversation(scope, id)) return;
@@ -474,4 +475,13 @@ function toStep(row: typeof taskSteps.$inferSelect): StepRecord {
     startedAt: row.startedAt,
     endedAt: row.endedAt,
   };
+}
+
+function fileDelivery(json: string): boolean {
+  try {
+    const value = JSON.parse(json) as { pi?: unknown; delivery?: unknown; attachments?: unknown };
+    return value.pi === undefined && value.delivery === "file" && Array.isArray(value.attachments) && value.attachments.length > 0;
+  } catch {
+    return false;
+  }
 }

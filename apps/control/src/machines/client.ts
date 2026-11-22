@@ -151,6 +151,13 @@ export class MachinedClient {
     return bytes;
   }
 
+  async download(path: string, maxBytes: number, signal?: AbortSignal, confine = true, policy?: ConfinePolicy): Promise<Readable> {
+    const response = await this.post("/fs/download", { path, maxBytes, confine, ...policyField(policy) }, signal);
+    if (!response.ok) throw new Error(await readError(response));
+    if (!response.body) return Readable.from([]);
+    return Readable.fromWeb(response.body);
+  }
+
   async ensureDisplay(display: number, signal?: AbortSignal): Promise<DisplayEnsureResponse> {
     const response = await this.post(`/displays/${display}`, { width: 1280, height: 720 }, signal);
     if (!response.ok) throw new Error(await readError(response));

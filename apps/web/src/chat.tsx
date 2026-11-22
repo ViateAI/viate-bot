@@ -768,20 +768,24 @@ function MessageItem({ message, previous, botName, avatarUrl, presence }: { mess
             <AttachmentCards items={message.attachments ?? []} />
           </div>
         </li>
-      ) : usesMarkdown(message.role, message.isError) ? (
-        <li className="msg-bot">
-          <BotMark name={botName} avatarUrl={avatarUrl} presence={presence} className="size-8 text-xs" />
-          <div className="prose-msg">
-            <Suspense fallback={<p className="whitespace-pre-wrap break-words">{text}</p>}>
-              <MarkdownView text={text} />
-            </Suspense>
-          </div>
-        </li>
       ) : (
         <li className="msg-bot">
           <BotMark name={botName} avatarUrl={avatarUrl} presence={presence} className="size-8 text-xs" />
-          <div className="prose-msg">
-            <p className="whitespace-pre-wrap break-words">{text}</p>
+          <div className="min-w-0">
+            {text ? (
+              usesMarkdown(message.role, message.isError) ? (
+                <div className="prose-msg">
+                  <Suspense fallback={<p className="whitespace-pre-wrap break-words">{text}</p>}>
+                    <MarkdownView text={text} />
+                  </Suspense>
+                </div>
+              ) : (
+                <div className="prose-msg">
+                  <p className="whitespace-pre-wrap break-words">{text}</p>
+                </div>
+              )
+            ) : null}
+            <AttachmentCards items={message.attachments ?? []} />
           </div>
         </li>
       )}

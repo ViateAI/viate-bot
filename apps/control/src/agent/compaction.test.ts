@@ -242,8 +242,8 @@ describe("context summary", () => {
     });
     const { config, ctx } = await opened({
       VB_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`,
-      // 懒加载工具也占上下文。窗口只要大到先调用工具，再把更早的对话压成摘要。
-      VB_MODEL_CONTEXT_TOKENS: "8900",
+      // 工具声明算进上下文。窗口要让第一次请求先调用工具，工具结果再把更早的对话压成摘要。
+      VB_MODEL_CONTEXT_TOKENS: "9060",
       VB_MAX_TASK_STEPS: "2",
     });
     const scope = userScope("user-a");

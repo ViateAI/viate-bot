@@ -150,18 +150,19 @@ export function PendingAttachments({
 export function AttachmentCards({ items }: { items: AttachmentView[] }) {
   if (items.length === 0) return null;
   return (
-    <ul data-testid="message-attachments" className="mt-2 grid gap-2">
+    <ul data-testid="message-attachments" className="mt-2 grid min-w-0 max-w-full gap-2">
       {items.map((item) => (
-        <li key={item.id}>
+        <li key={item.id} className="min-w-0 max-w-full">
           {item.kind === "image" ? (
-            <a href={`/api/uploads/${item.id}`} target="_blank" rel="noreferrer">
-              <img data-testid="message-image" src={`/api/uploads/${item.id}`} alt={item.name} className="max-h-40 rounded-lg" />
+            <a href={`/api/uploads/${item.id}`} target="_blank" rel="noreferrer" className="block max-w-full">
+              <img data-testid="message-image" src={`/api/uploads/${item.id}`} alt={item.name} className="max-h-60 max-w-full rounded-lg border border-line-strong object-contain" />
             </a>
           ) : (
-            <a data-testid="message-file" href={`/api/uploads/${item.id}`} className="flex items-center gap-2 rounded-xl bg-surface px-3 py-2 text-sm text-fg">
-              <span className="truncate">{item.name}</span>
-              <span className="text-muted">{formatBytes(item.size)}</span>
-              <span className="text-muted">{item.mime}</span>
+            <a data-testid="message-file" href={`/api/uploads/${item.id}`} className="flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border border-line-strong bg-surface px-3 py-2 text-sm text-fg">
+              <span className="min-w-0 flex-1 truncate">{item.name}</span>
+              <span className="shrink-0 text-muted">{formatBytes(item.size)}</span>
+              <span className="max-w-full shrink truncate text-muted">{item.mime}</span>
+              <span className="shrink-0 font-medium text-primary">下载</span>
             </a>
           )}
         </li>

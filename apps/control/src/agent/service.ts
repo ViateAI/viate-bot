@@ -63,6 +63,7 @@ import { describePublish, requestAppPublishTool } from "../apps/publish-request.
 import { markRemoteUncertain, remoteUncertain } from "./remote-uncertain.js";
 import { skillHttpMachine, skillPrompt, skillTools } from "./skill-tools.js";
 import { machineTools } from "./tools.js";
+import { createSendFileTool } from "./file-send-tool.js";
 import { assistantText, loadTranscript, loadTranscriptEntries, messageView, stepView, storedContent, taskView, withoutImages } from "./view.js";
 import { foldNoticeEntries } from "./notices.js";
 import { buildModel, type GatewayTask } from "../gateway/stream.js";
@@ -1010,6 +1011,25 @@ export function createChatService(deps: ChatServiceDeps) {
             const config = settingsRepository(deps.db).fsConfineConfig();
             return { allow: config.allow, deny: config.deny };
           },
+        }),
+        createSendFileTool({
+          db: deps.db,
+          dataDir: deps.config.dataDir,
+          storage: deps.uploads,
+          userId: live.userId,
+          scope,
+          taskId: live.id,
+          conversationId: live.conversationId,
+          confined: settingsRepository(deps.db).fsConfine(),
+          confineNow: () => settingsRepository(deps.db).fsConfine(),
+          confinePolicyNow: () => {
+            const config = settingsRepository(deps.db).fsConfineConfig();
+            return { allow: config.allow, deny: config.deny };
+          },
+          knownSecrets: () => broker.known(live.userId, live.id),
+          now,
+          files,
+          publish: (messageId) => publishMessage(live.conversationId, messageId, scope),
         }),
         ...approvalTools({
           delete: (path, signal) => {

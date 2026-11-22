@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { link, lstat, mkdir, open, readdir, stat, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, stat, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import type { FsEntry, FsSearchHit } from "@viate-bot/protocol";
@@ -38,6 +38,59 @@ export async function readRaw(requested: string, confine = true, policy?: Confin
     return { path, data };
   } finally {
     await file.close();
+  }
+}
+
+const DOWNLOAD_CHUNK = 64 * 1024;
+
+/** 流式读普通文件。打开时不跟随最后一层符号链接，读取中再次限制总字节数。 */
+export async function openDownloadStream(
+  requested: string,
+  maxBytes: number,
+  confine = true,
+  policy?: ConfinePolicy,
+): Promise<{ path: string; size: number; stream: Readable }> {
+  if (!Number.isFinite(maxBytes) || maxBytes < 0) {
+    throw Object.assign(new Error("maxBytes 无效"), { statusCode: 400 });
+  }
+  const path = resolveAccessible(requested, confine, policy);
+  const file = await open(path, READ_FLAGS | constants.O_NONBLOCK);
+  let closed = false;
+  const closeFile = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    await file.close().catch(() => undefined);
+  };
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) throw Object.assign(new Error("不是普通文件"), { statusCode: 400 });
+    if (info.size > maxBytes) throw Object.assign(new Error("单个文件不能超过 25 MB"), { statusCode: 413 });
+    const stream = Readable.from(readBounded(file, maxBytes, closeFile), { highWaterMark: DOWNLOAD_CHUNK });
+    stream.on("close", () => {
+      void closeFile();
+    });
+    return { path, size: info.size, stream };
+  } catch (error) {
+    await closeFile();
+    throw error;
+  }
+}
+
+async function* readBounded(file: FileHandle, maxBytes: number, closeFile: () => Promise<void>): AsyncGenerator<Buffer> {
+  let total = 0;
+  try {
+    for (;;) {
+      const chunk = Buffer.allocUnsafe(DOWNLOAD_CHUNK);
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, total);
+      if (bytesRead === 0) return;
+      if (total + bytesRead > maxBytes) {
+        throw Object.assign(new Error("单个文件不能超过 25 MB"), { statusCode: 413 });
+      }
+      total += bytesRead;
+      yield bytesRead === chunk.length ? chunk : chunk.subarray(0, bytesRead);
+    }
+  } finally {
+    await closeFile();
   }
 }
 

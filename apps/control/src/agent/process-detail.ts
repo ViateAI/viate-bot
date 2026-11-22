@@ -36,6 +36,7 @@ const TOOL_LABELS: Record<string, string> = {
   update_bot_profile: "正在修改资料",
   propose_approval_rule: "正在提议自动审批规则",
   bulk_delete_action: "正在删除文件",
+  send_file: "正在发送文件",
 };
 
 export function userShowsProcess(db: AppDatabase, scope: UserScope): boolean {
@@ -86,6 +87,7 @@ export function redactMessages(messages: MessageView[], tasks: TaskView[], detai
     }
   }
   return messages.flatMap((message) => {
+    if (message.role === "assistant" && (message.attachments?.length ?? 0) > 0) return [stripReasoning(message)];
     if (message.role === "user" || (message.role === "assistant" && message.taskId === null)) return [stripReasoning(message)];
     if (message.role === "assistant" && finalIds.has(message.id)) {
       const copy = stripReasoning(message);
