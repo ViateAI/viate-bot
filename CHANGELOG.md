@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/ViateAI/viate-bot/compare/v0.1.0...v0.2.0) (2026-11-22)
+
+
+### Features
+
+* let bots send files and images via send_file ([f7b55bb](https://github.com/ViateAI/viate-bot/commit/f7b55bb9b54da050d70225b17f1a1d6ba4ff46cd))
+
 ## 0.1.0 (2026-11-22)
 
 
