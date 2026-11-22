@@ -179,15 +179,35 @@ describe("confine policy lists", () => {
     expect(() => resolveAccessible("/private/etc/passwd", true, policy)).toThrow(/允许目录/);
   });
 
-  it("still allows /tmp when it is a symlink to /private/tmp", async () => {
+  it("allows a same-basename symlink root and anchors a missing deny path", async () => {
     const { resolveAccessible } = await confined();
-    const file = join("/tmp", `vb-policy-tmp-${process.pid}`);
-    roots.push(file);
-    expect(resolveAccessible(file, true, { allow: ["/tmp"], deny: [] })).toBe(file);
-    expect(resolveAccessible(file.replace("/tmp", "/private/tmp"), true, { allow: ["/tmp"], deny: [] })).toBe(file.replace("/tmp", "/private/tmp"));
-    const missingDeny = `/tmp/vb-no-such-${process.pid}/secret`;
-    expect(() => resolveAccessible(`${missingDeny}/a.txt`, true, { allow: ["/tmp"], deny: [missingDeny] })).toThrow(/黑名单/);
-    expect(resolveAccessible(file, true, { allow: ["/tmp"], deny: [missingDeny] })).toBe(file);
+    const scratch = mkdtempSync(join(tmpdir(), "vb-policy-tmp-link-"));
+    roots.push(scratch);
+    const realTmp = join(scratch, "real", "tmp");
+    const linkTmp = join(scratch, "link", "tmp");
+    mkdirSync(realTmp, { recursive: true });
+    mkdirSync(join(scratch, "link"));
+    symlinkSync(realTmp, linkTmp);
+    const linkFile = join(linkTmp, "note.txt");
+    const realFile = join(realpathSync(realTmp), "note.txt");
+    expect(resolveAccessible(linkFile, true, { allow: [linkTmp], deny: [] })).toBe(linkFile);
+    expect(resolveAccessible(realFile, true, { allow: [linkTmp], deny: [] })).toBe(realFile);
+    const missingDeny = join(linkTmp, "gone", "secret");
+    const denied = { allow: [linkTmp], deny: [missingDeny] };
+    expect(() => resolveAccessible(join(missingDeny, "a.txt"), true, denied)).toThrow(/黑名单/);
+    expect(() => resolveAccessible(join(realpathSync(realTmp), "gone", "secret", "a.txt"), true, denied)).toThrow(/黑名单/);
+    expect(resolveAccessible(linkFile, true, denied)).toBe(linkFile);
+    expect(resolveAccessible(realFile, true, denied)).toBe(realFile);
+    if (realpathSync("/tmp") !== "/tmp") {
+      const hostFile = join("/tmp", `vb-policy-tmp-${process.pid}`);
+      roots.push(hostFile);
+      expect(resolveAccessible(hostFile, true, { allow: ["/tmp"], deny: [] })).toBe(hostFile);
+      const hostReal = join(realpathSync("/tmp"), `vb-policy-tmp-${process.pid}`);
+      expect(resolveAccessible(hostReal, true, { allow: ["/tmp"], deny: [] })).toBe(hostReal);
+      const hostMissing = join("/tmp", `vb-no-such-${process.pid}`, "secret");
+      expect(() => resolveAccessible(join(hostMissing, "a.txt"), true, { allow: ["/tmp"], deny: [hostMissing] })).toThrow(/黑名单/);
+      expect(resolveAccessible(hostFile, true, { allow: ["/tmp"], deny: [hostMissing] })).toBe(hostFile);
+    }
   });
 
   it("rejects a malformed confine policy instead of ignoring it", async () => {

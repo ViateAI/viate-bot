@@ -318,12 +318,25 @@ describe("exec cancellation", () => {
 describe("fs confine switch", () => {
   it("reads and writes an absolute path outside the roots only when confine is false", async () => {
     const app = buildServer({ token: "test-token" });
-    const outside = mkdtempSync(join(tmpdir(), "vb-fs-open-"));
-    dirs.push(outside);
+    const base = mkdtempSync(join(tmpdir(), "vb-fs-open-"));
+    dirs.push(base);
+    const allowed = join(base, "allowed");
+    const outside = join(base, "outside");
+    mkdirSync(allowed);
+    mkdirSync(outside);
     const path = join(outside, "note.txt");
     writeFileSync(path, "outside-ok");
     const headers = { authorization: "Bearer test-token" };
+    __setRootsForTest([allowed]);
     try {
+      const blocked = await app.inject({
+        method: "POST",
+        url: "/fs/read",
+        headers,
+        payload: { path },
+      });
+      expect(blocked.statusCode).toBe(400);
+
       const opened = await app.inject({
         method: "POST",
         url: "/fs/read",
@@ -359,17 +372,23 @@ describe("fs confine switch", () => {
       expect(removed.statusCode).toBe(200);
       expect(existsSync(join(outside, "new.txt"))).toBe(false);
     } finally {
+      __setRootsForTest([BOT_HOME, BOT_TMP]);
       await app.close();
     }
   });
 
   it("still rejects an empty path, a relative path, and a non-false confine value", async () => {
     const app = buildServer({ token: "test-token" });
-    const outside = mkdtempSync(join(tmpdir(), "vb-fs-reject-"));
-    dirs.push(outside);
+    const base = mkdtempSync(join(tmpdir(), "vb-fs-reject-"));
+    dirs.push(base);
+    const allowed = join(base, "allowed");
+    const outside = join(base, "outside");
+    mkdirSync(allowed);
+    mkdirSync(outside);
     const path = join(outside, "note.txt");
     writeFileSync(path, "secret");
     const headers = { authorization: "Bearer test-token" };
+    __setRootsForTest([allowed]);
     try {
       for (const payload of [
         { path: "", confine: false },
@@ -383,6 +402,7 @@ describe("fs confine switch", () => {
         expect(readFileSync(path, "utf8")).toBe("secret");
       }
     } finally {
+      __setRootsForTest([BOT_HOME, BOT_TMP]);
       await app.close();
     }
   });
@@ -449,10 +469,15 @@ describe("fs confine switch", () => {
 
   it("keeps upload and raw file routes confined unless confine is false", async () => {
     const app = buildServer({ token: "test-token" });
-    const outside = mkdtempSync(join(tmpdir(), "vb-fs-upload-"));
-    dirs.push(outside);
+    const base = mkdtempSync(join(tmpdir(), "vb-fs-upload-"));
+    dirs.push(base);
+    const allowed = join(base, "allowed");
+    const outside = join(base, "outside");
+    mkdirSync(allowed);
+    mkdirSync(outside);
     const headers = { authorization: "Bearer test-token", "content-type": "application/octet-stream" };
     const path = join(outside, "blob.bin");
+    __setRootsForTest([allowed]);
     try {
       const blocked = await app.inject({
         method: "PUT",
@@ -478,6 +503,7 @@ describe("fs confine switch", () => {
       expect(still.statusCode).toBe(400);
       expect(existsSync(join(outside, "other.bin"))).toBe(false);
     } finally {
+      __setRootsForTest([BOT_HOME, BOT_TMP]);
       await app.close();
     }
   });
@@ -486,6 +512,8 @@ describe("fs confine switch", () => {
     const app = buildServer({ token: "test-token" });
     const scratch = mkdtempSync(join(tmpdir(), "vb-fs-policy-"));
     dirs.push(scratch);
+    const allowed = join(scratch, "allowed");
+    mkdirSync(allowed);
     const work = join(scratch, "work");
     const secret = join(work, "secret");
     const other = join(work, "secret-other");
@@ -502,6 +530,7 @@ describe("fs confine switch", () => {
     symlinkSync(outside, join(work, "leak"));
     const headers = { authorization: "Bearer test-token" };
     const policy = { allow: [work], deny: [secret] };
+    __setRootsForTest([allowed]);
     try {
       const builtin = await app.inject({
         method: "POST",
@@ -575,6 +604,7 @@ describe("fs confine switch", () => {
       expect(linkedWrite.body).toContain("符号链接");
       expect(readFileSync(join(work, "note.txt"), "utf8")).toBe("old");
     } finally {
+      __setRootsForTest([BOT_HOME, BOT_TMP]);
       await app.close();
     }
   });

@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import type * as ChildProcess from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "./server.js";
+import { __setRootsForTest, BOT_HOME, BOT_TMP } from "./paths.js";
 
 const spawns: Array<{ args: readonly string[]; cwd: string | undefined }> = [];
 
@@ -40,8 +41,13 @@ afterEach(() => {
 
 describe("exec cwd confine", () => {
   it("uses another absolute cwd only when confine is false, and otherwise stays at /home/bot", async () => {
-    const outside = mkdtempSync(join(tmpdir(), "vb-cwd-"));
-    dirs.push(outside);
+    const base = mkdtempSync(join(tmpdir(), "vb-cwd-"));
+    dirs.push(base);
+    const allowed = join(base, "allowed");
+    const outside = join(base, "outside");
+    mkdirSync(allowed);
+    mkdirSync(outside);
+    __setRootsForTest([allowed]);
     const app = buildServer({ token: "test-token", execSpawn: { command: process.execPath, baseArgs: ["run-as-bot.mjs"] } });
     try {
       const headers = { authorization: "Bearer test-token" };
@@ -80,6 +86,7 @@ describe("exec cwd confine", () => {
       expect(home.statusCode).toBe(200);
       expect(spawns.at(-1)?.cwd).toBe("/home/bot");
     } finally {
+      __setRootsForTest([BOT_HOME, BOT_TMP]);
       await app.close();
     }
   });
