@@ -5,6 +5,7 @@ import { AdminApps } from "./admin-apps.js";
 import { AdminReviews } from "./admin-reviews.js";
 import { AdminLayout, AdminMachines, AdminNav, AdminSettings, AdminTemplates, AdminUsers } from "./admin.js";
 import { AppsPage } from "./apps-page.js";
+import { SecretsPage } from "./secrets-page.js";
 import { AdminAudit, AdminMetrics } from "./admin-metrics.js";
 import { Approvals } from "./approval.js";
 import { api, rememberCsrf, type Me } from "./api.js";
@@ -56,6 +57,12 @@ const appsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/apps",
   component: AppsPage,
+});
+
+const secretsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/secrets",
+  component: SecretsPage,
 });
 
 const adminRoute = createRoute({
@@ -117,6 +124,7 @@ export const routeTree = rootRoute.addChildren([
   chatRoute,
   approvalsRoute,
   appsRoute,
+  secretsRoute,
   adminRoute.addChildren([
     adminIndexRoute,
     adminMachinesRoute,
@@ -280,6 +288,9 @@ function Rail({
       <RailLink label="应用" active={pathname === "/apps"} to="/apps">
         <GridIcon />
       </RailLink>
+      <RailLink label="密钥" active={pathname === "/secrets"} to="/secrets" testId="secrets-link">
+        <KeyIcon />
+      </RailLink>
       {me?.isAdmin ? (
         <RailLink label="管理" active={admin} to="/admin" testId="admin-link">
           <ShieldIcon />
@@ -315,7 +326,7 @@ function RailLink({
   testId,
   children,
 }: {
-  to: "/" | "/approvals" | "/apps" | "/admin";
+  to: "/" | "/approvals" | "/apps" | "/secrets" | "/admin";
   label: string;
   active: boolean;
   testId?: string;
@@ -381,6 +392,15 @@ function GridIcon() {
       <rect x="13.5" y="4.5" width="6" height="6" rx="1.4" stroke="currentColor" strokeWidth="1.6" />
       <rect x="4.5" y="13.5" width="6" height="6" rx="1.4" stroke="currentColor" strokeWidth="1.6" />
       <rect x="13.5" y="13.5" width="6" height="6" rx="1.4" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  );
+}
+
+function KeyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none">
+      <circle cx="8.2" cy="14.2" r="3.2" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M11 14.2h8.5M16.2 14.2v2.5M19 14.2v2.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
     </svg>
   );
 }

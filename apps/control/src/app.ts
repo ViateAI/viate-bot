@@ -40,6 +40,7 @@ import { registerRoutineRoutes as registerRoutineHttp } from "./routines/routes.
 import type { AppRuntime } from "./providers.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerChatRoutes } from "./routes/chat.js";
+import { registerSecretRoutes } from "./routes/secrets.js";
 import { cleanupUnreferencedUploads } from "./uploads/store.js";
 import { registerUploadRoutes } from "./uploads/routes.js";
 import { createUploadStorage, type UploadStorage } from "./uploads/storage.js";
@@ -341,6 +342,7 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
       });
     },
   });
+  registerSecretRoutes(app, { db, key });
   registerWeb(app);
   app.addHook("onClose", async () => {
     chat.shutdown();

@@ -743,6 +743,18 @@ export function AppsPage() {
       return rows.some((install) => install.state === "installing" || install.state === "removing") ? 2000 : false;
     },
   });
+  const userSecrets = useQuery({
+    queryKey: ["user-secret-names"],
+    queryFn: async () => {
+      try {
+        const body = await api<{ secrets?: Array<{ name?: unknown }> }>("/api/secrets");
+        const listed = Array.isArray(body.secrets) ? body.secrets : [];
+        return listed.flatMap((item) => typeof item?.name === "string" ? [item.name] : []);
+      } catch {
+        return [] as string[];
+      }
+    },
+  });
   const [filter, setFilter] = useState<CatalogFilter>("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -756,6 +768,7 @@ export function AppsPage() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["apps"] }),
       queryClient.invalidateQueries({ queryKey: ["app-installs"] }),
+      queryClient.invalidateQueries({ queryKey: ["user-secret-names"] }),
     ]);
   }
 
@@ -883,6 +896,7 @@ export function AppsPage() {
               key={selected.id}
               row={selected}
               provisioned={!me.data || me.data.provisioned}
+              secretNames={userSecrets.data ?? []}
               onClose={closeDetail}
               onChanged={reload}
             />
@@ -1157,11 +1171,13 @@ function WarningList({ warnings }: { warnings: string[] }) {
 function AppDetail({
   row,
   provisioned,
+  secretNames,
   onClose,
   onChanged,
 }: {
   row: UserAppRow;
   provisioned: boolean;
+  secretNames: readonly string[];
   onClose: () => void;
   onChanged: () => Promise<void>;
 }) {
@@ -1377,7 +1393,7 @@ function AppDetail({
           <span id="app-version-hint" className="text-muted">{forced ? "管理员推送的应用不能更换版本。" : versionHint}</span>
         </label>
       ) : null}
-      <ConfigEditor drafts={drafts} disabled={pending !== null} onChange={updateDraft} onAdd={() => { setDirty(true); setDrafts((current) => [...current, blankDraft()]); }} onRemove={(id) => { setDirty(true); setDrafts((current) => current.filter((item) => item.id !== id)); }} />
+      <ConfigEditor drafts={drafts} secretNames={secretNames} disabled={pending !== null} onChange={updateDraft} onAdd={() => { setDirty(true); setDrafts((current) => [...current, blankDraft()]); }} onRemove={(id) => { setDirty(true); setDrafts((current) => current.filter((item) => item.id !== id)); }} />
       {installReason ? <p id="install-block-reason" className="text-sm text-muted">{installReason}</p> : null}
       {error ? <ErrorText>{error}</ErrorText> : null}
       {message ? <StatusText>{message}</StatusText> : null}
@@ -1397,17 +1413,20 @@ function AppDetail({
 
 export function ConfigEditor({
   drafts,
+  secretNames = [],
   disabled,
   onChange,
   onAdd,
   onRemove,
 }: {
   drafts: ConfigDraft[];
+  secretNames?: readonly string[];
   disabled: boolean;
   onChange: (id: string, patch: Partial<Pick<ConfigDraft, "key" | "mode" | "value" | "secretRef" | "prefix">>) => void;
   onAdd: () => void;
   onRemove: (id: string) => void;
 }) {
+  const names = secretNames.filter((item) => item.length > 0);
   return (
     <fieldset className="grid min-w-0 gap-3" disabled={disabled}>
       <legend className="text-sm font-medium">配置</legend>
@@ -1434,8 +1453,23 @@ export function ConfigEditor({
                 <p className="text-sm font-medium">引用共享密钥</p>
                 <label className="grid min-w-0 gap-1 text-sm">
                   密钥名
-                  <input className={appFieldClass} value={draft.secretRef} spellCheck={false} autoComplete="off" onChange={(event) => onChange(draft.id, { secretRef: event.target.value })} />
+                  <input
+                    className={appFieldClass}
+                    value={draft.secretRef}
+                    spellCheck={false}
+                    autoComplete="off"
+                    list={names.length > 0 ? `secret-names-${draft.id}` : undefined}
+                    onChange={(event) => onChange(draft.id, { secretRef: event.target.value })}
+                  />
                 </label>
+                {names.length > 0 ? (
+                  <>
+                    <datalist id={`secret-names-${draft.id}`}>
+                      {names.map((item) => <option key={item} value={item} />)}
+                    </datalist>
+                    <p className="text-sm text-muted">已有密钥：{names.join("、")}。也可以直接输入。</p>
+                  </>
+                ) : null}
                 <label className="grid min-w-0 gap-1 text-sm">
                   前缀
                   <input className={appFieldClass} value={draft.prefix} spellCheck={false} autoComplete="off" placeholder="可空，例如 Bearer " onChange={(event) => onChange(draft.id, { prefix: event.target.value })} />

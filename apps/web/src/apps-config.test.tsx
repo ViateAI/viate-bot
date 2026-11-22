@@ -53,4 +53,19 @@ describe("shared config drafts", () => {
     expect(back.secretRef).toBe("");
     expect(buildConfigInput([back])).toEqual({ ok: true, config: { API_TOKEN: { secret: true } } });
   });
+
+  it("offers known secret names without requiring one", () => {
+    const drafts = draftsFromConfig({ MCP_TOKEN: { secret: true, secretRef: "corp" } } as RedactedConfig);
+    const props = { drafts, disabled: false, onChange: () => {}, onAdd: () => {}, onRemove: () => {} };
+    const plain = renderToStaticMarkup(<ConfigEditor {...props} />);
+    expect(plain).toContain("引用共享密钥");
+    expect(plain).toContain("corp");
+    expect(plain).not.toContain("<datalist");
+    const hinted = renderToStaticMarkup(<ConfigEditor {...props} secretNames={["corp_token", "other_key"]} />);
+    expect(hinted).toContain("<datalist");
+    expect(hinted).toContain("corp_token");
+    expect(hinted).toContain("other_key");
+    expect(hinted).toContain("corp");
+    expect(hinted).not.toContain("secret-value");
+  });
 });

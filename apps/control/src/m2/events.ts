@@ -41,6 +41,10 @@ export const AUDIT_ACTIONS = {
   approvalDecided: "approval.decided",
   takeover: "takeover",
   secretForm: "secret.form",
+  /** 密钥页保存。attrs 只有 name、length、created，没有明文或密文。 */
+  secretSaved: "secret.saved",
+  /** 密钥页删除。attrs 只有 name。 */
+  secretDeleted: "secret.deleted",
   secretSavedFromMachine: "secret.saved_from_machine",
   secretLinkApp: "secret.link_app",
   appInstall: "app.install",
