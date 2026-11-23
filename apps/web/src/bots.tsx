@@ -202,7 +202,7 @@ export function BotSidebar({ activeId }: { activeId?: string | undefined }) {
                         <span className="min-w-0">
                           <span className="flex min-w-0 items-center gap-2">
                             <span className="truncate text-[15px] font-medium text-fg">{bot.name}</span>
-                            {bot.primary ? <span data-testid="primary-bot" className="shrink-0 rounded bg-active px-1.5 py-0.5 text-[10px] font-medium text-primary">主 bot</span> : null}
+                            {bot.primary ? <span data-testid="primary-bot" className="shrink-0 rounded bg-active px-1.5 py-0.5 text-[11px] font-medium text-primary">主 bot</span> : null}
                             {bot.busy ? <span data-testid="bot-busy" aria-label="进行中" className="size-1.5 shrink-0 rounded-full bg-primary motion-safe:animate-pulse" /> : null}
                           </span>
                           <span className="block truncate text-sm text-muted">{preview(bot)}</span>

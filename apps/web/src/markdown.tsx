@@ -66,7 +66,7 @@ function CodeBlock({ children }: { children?: ReactNode | undefined }) {
         </button>
       </div>
       <InCodeBlock.Provider value={true}>
-        <pre ref={ref} className="min-w-0 max-w-full overflow-x-auto px-3 py-2 font-mono text-[13px] leading-5 whitespace-pre">
+        <pre ref={ref} className="min-w-0 max-w-full overflow-x-auto break-normal px-3 py-2 font-mono text-[13px] leading-5 whitespace-pre">
           {children}
         </pre>
       </InCodeBlock.Provider>
@@ -76,7 +76,7 @@ function CodeBlock({ children }: { children?: ReactNode | undefined }) {
 
 function InlineOrBlockCode({ className, children }: { className?: string | undefined; children?: ReactNode | undefined }) {
   const block = useContext(InCodeBlock);
-  if (block) return <code className={["block max-w-full overflow-x-auto whitespace-pre", className].filter(Boolean).join(" ")}>{children}</code>;
+  if (block) return <code className={["inline-block min-w-full whitespace-pre break-normal", className].filter(Boolean).join(" ")}>{children}</code>;
   return <code className="rounded bg-code px-1 font-mono text-[0.92em]">{children}</code>;
 }
 
@@ -93,12 +93,12 @@ const components: Components = {
   blockquote: ({ children }) => <blockquote className="border-l-2 border-line-strong pl-3 text-secondary">{children}</blockquote>,
   hr: () => <hr className="my-3 border-line" />,
   table: ({ children }) => (
-    <div className="table-wrap my-2">
-      <table className="w-full border-collapse text-left text-sm">{children}</table>
+    <div className="table-wrap my-2 min-w-0 max-w-full">
+      <table className="w-max min-w-full border-collapse text-left text-sm">{children}</table>
     </div>
   ),
-  th: ({ children }) => <th className="border-b border-line bg-surface px-3 py-2 text-left text-xs font-medium text-secondary">{children}</th>,
-  td: ({ children }) => <td className="border-b border-line px-3 py-2">{children}</td>,
+  th: ({ children }) => <th className="border-b border-line bg-surface px-3 py-2 text-left text-xs font-medium whitespace-nowrap text-secondary">{children}</th>,
+  td: ({ children }) => <td className="max-w-40 border-b border-line px-3 py-2 whitespace-normal [overflow-wrap:anywhere] sm:max-w-64">{children}</td>,
   tr: ({ children }) => <tr className="[&:last-child>td]:border-b-0">{children}</tr>,
   code: InlineOrBlockCode,
 };

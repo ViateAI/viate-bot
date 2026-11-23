@@ -21,9 +21,26 @@ function statusClass(routine: Routine): string {
   return routine.enabled ? "font-medium text-ok" : "text-muted";
 }
 
-export function Routines({ botId }: { botId: string }) {
+function runStateText(state: string): string {
+  switch (state) {
+    case "succeeded":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "claimed":
+      return "执行中";
+    case "skipped":
+      return "已跳过";
+    case "missed":
+      return "已错过";
+    default:
+      return state;
+  }
+}
+
+export function Routines({ botId, initialHistory = null }: { botId: string; initialHistory?: string | null }) {
   const client = useQueryClient();
-  const [history, setHistory] = useState<string | null>(null);
+  const [history, setHistory] = useState<string | null>(initialHistory);
   const routines = useQuery({ queryKey: ["routines", botId], queryFn: () => api<{ routines: Routine[] }>(`/api/bots/${encodeURIComponent(botId)}/routines`) });
   const runs = useQuery({ queryKey: ["routine-runs", history], enabled: history !== null, queryFn: () => api<{ runs: Run[] }>(`/api/routines/${encodeURIComponent(history!)}/runs`) });
   const change = useMutation({
@@ -48,10 +65,10 @@ export function Routines({ botId }: { botId: string }) {
               <button type="button" className={secondaryButton} disabled={change.isPending} onClick={() => change.mutate({ id: routine.id, action: "run" })}>运行一次</button>
             </>}
             <button type="button" className={secondaryButton} onClick={() => setHistory(history === routine.id ? null : routine.id)}>运行记录</button>
-            <button type="button" className={dangerButton} disabled={change.isPending} onClick={() => change.mutate({ id: routine.id, action: "delete" })}>删除</button>
+            <button type="button" className={`${dangerButton} ml-auto`} disabled={change.isPending} onClick={() => change.mutate({ id: routine.id, action: "delete" })}>删除</button>
           </>}
         />
-        {history === routine.id ? <div className="pb-3 text-sm text-muted">{runs.isLoading ? "加载中…" : runs.error ? runs.error.message : runs.data && runs.data.runs.length === 0 ? "没有运行记录" : <ul>{runs.data?.runs.map((run) => <li key={run.id} className="[overflow-wrap:anywhere]">{new Date(run.scheduledAt).toLocaleString()} · {run.state}{run.error ? ` · ${run.error}` : ""}</li>)}</ul>}</div> : null}
+        {history === routine.id ? <div className="pb-3 text-sm text-muted">{runs.isLoading ? "加载中…" : runs.error ? runs.error.message : runs.data && runs.data.runs.length === 0 ? "没有运行记录" : <ul>{runs.data?.runs.map((run) => <li key={run.id} className="[overflow-wrap:anywhere]">{new Date(run.scheduledAt).toLocaleString()} · {runStateText(run.state)}{run.error ? ` · ${run.error}` : ""}</li>)}</ul>}</div> : null}
       </li>)}
     </ul>
   </section>;
