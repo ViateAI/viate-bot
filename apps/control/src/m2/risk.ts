@@ -19,6 +19,7 @@ export const READ_ONLY_TOOLS: Record<string, true> = {
   fs_list: true,
   fs_search: true,
   send_file: true,
+  send_to_bot: true,
   browser_snapshot: true,
   browser_screenshot: true,
   desktop_screenshot: true,

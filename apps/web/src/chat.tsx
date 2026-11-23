@@ -16,7 +16,7 @@ import { Routines } from "./routines.js";
 // The parser stays out of the first screen. Login and the bot list should not download it.
 const MarkdownView = lazy(() => import("./markdown.js"));
 
-export function ChatPage({ botId }: { botId: string }) {
+export function ChatPage({ botId, requestedConversationId }: { botId: string; requestedConversationId?: string | undefined }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const scroller = useRef<HTMLDivElement>(null);
@@ -55,7 +55,8 @@ export function ChatPage({ botId }: { botId: string }) {
     queryKey: ["conversations", botId],
     queryFn: () => api<{ conversations: { id: string }[] }>(`/api/bots/${botId}/conversations`),
   });
-  const conversationId = conversations.data?.conversations[0]?.id;
+  const list = conversations.data?.conversations;
+  const conversationId = list?.find((item) => item.id === requestedConversationId)?.id ?? list?.[0]?.id;
   const messages = useQuery({
     queryKey: ["messages", conversationId],
     enabled: Boolean(conversationId),
@@ -757,10 +758,14 @@ function MessageItem({ message, previous, botName, avatarUrl, presence }: { mess
           <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all">{text}</pre>
         </li>
       ) : message.notice ? (
+        message.notice.kind === "bot_message" || message.notice.kind === "bot_reply" ? (
+          <BotExchangeCard message={message} text={text} />
+        ) : (
         <li data-testid="system-notice" className="notice-card justify-self-start">
           <p className="mb-1 text-xs font-medium">系统通知</p>
           <p className="whitespace-pre-wrap break-words">{text}</p>
         </li>
+        )
       ) : message.role === "user" ? (
         <li className="flex justify-end">
           <div className="bubble">
@@ -797,6 +802,35 @@ function messageText(message: ChatMessage): string {
   if (message.text.trim()) return message.text;
   if (message.toolCalls?.length) return message.toolCalls.map((call) => call.name).join("、");
   return "";
+}
+
+function BotExchangeCard({ message, text }: { message: ChatMessage; text: string }) {
+  const reply = message.notice?.kind === "bot_reply";
+  const name = message.notice?.peerName ?? "另一个 bot";
+  const title = reply ? `来自${name}的回复` : `来自${name}的 bot 消息`;
+  const testId = reply ? "bot-reply" : "bot-message";
+  const body = (
+    <>
+      <p className="mb-1 text-xs font-medium">{title}</p>
+      {message.notice?.shown ? (
+        <p data-testid="bot-reply-held" className="mb-1 text-xs">未自动继续处理</p>
+      ) : null}
+      <p className="whitespace-pre-wrap break-words">{text}</p>
+    </>
+  );
+  const peer = message.notice?.peerBotId;
+  const conversationId = message.notice?.peerConversationId;
+  return (
+    <li data-testid={testId} className="notice-card bot-exchange justify-self-start">
+      {peer ? (
+        <Link to="/b/$botId" params={{ botId: peer }} search={conversationId ? { conversationId } : {}} className="block min-w-0" data-testid="bot-message-jump">
+          {body}
+        </Link>
+      ) : (
+        body
+      )}
+    </li>
+  );
 }
 
 function showStamp(current: string, previous?: string): boolean {

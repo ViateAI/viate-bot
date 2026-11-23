@@ -682,11 +682,18 @@ select {
 .notice-card {
   margin-left: 40px;
   max-width: min(68ch, calc(100% - 40px));
+  min-width: 0;
   border-radius: 12px;
   border: 1px solid var(--info-border);
   background: var(--info-bg);
   color: var(--info-fg);
   padding: 10px 14px;
+  overflow-wrap: anywhere;
+}
+
+.bot-exchange {
+  margin-left: 0;
+  max-width: 100%;
 }
 
 .tool-card {

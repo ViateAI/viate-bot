@@ -87,9 +87,10 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
   }
   function bind(taskId: string): ToolHooks {
     return { beforeToolCall: async (context: BeforeToolCallContext, signal?: AbortSignal) => {
-      const bot = db.prepare("select b.id, b.user_id, b.settings_json from tasks t join bots b on b.id=t.bot_id where t.id=? and b.deleted_at is null")
-        .get(taskId) as { id: string; user_id: string; settings_json: string } | undefined;
+      const bot = db.prepare("select b.id, b.user_id, b.settings_json, t.trigger from tasks t join bots b on b.id=t.bot_id where t.id=? and b.deleted_at is null")
+        .get(taskId) as { id: string; user_id: string; settings_json: string; trigger: string } | undefined;
       if (!bot) return { block: true, reason: "找不到任务" };
+      const fromBot = bot.trigger === "bot_message";
       const name = context.toolCall.name;
       const settings = readBotSettings(bot.settings_json);
       const risky = typeof options.riskyToolNames === "function" ? options.riskyToolNames(bot.id) : options.riskyToolNames;
@@ -109,7 +110,7 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
       if (name === "propose_approval_rule") {
         const problem = proposalError(context.args);
         if (problem) return { block: true, reason: problem };
-      } else if (settings.approveNone && name !== "request_app_publish") {
+      } else if (!fromBot && settings.approveNone && name !== "request_app_publish") {
         const gated = name === "update_bot_profile" ? profileNeedsApproval(context.args) : Boolean(category);
         if (gated) {
           auditRepository(options.db).write(adminScope(bot.user_id), "approval.skip_all", bot.id, { note: "全部免审批", taskId, tool: name });
@@ -117,9 +118,9 @@ export function createApprovalGate(options: ApprovalGateOptions): ApprovalGate {
         return undefined;
       }
       if (name === "update_bot_profile" && !profileNeedsApproval(context.args)) return undefined;
-      if (skipsApproval(category, settings)) return undefined;
-      if (autoRule(taskId, bot.id, bot.user_id, name, context.args, category)) return undefined;
-      if (category === "browser" && name !== "browser_open") {
+      if (!category || (!fromBot && skipsApproval(category, settings))) return undefined;
+      if (!fromBot && autoRule(taskId, bot.id, bot.user_id, name, context.args, category)) return undefined;
+      if (!fromBot && category === "browser" && name !== "browser_open") {
         const rules = approvalRuleRepository(options.db).active(userScope(bot.user_id), bot.id);
         if (rules.some((rule) => rule.category === "browser")) {
           const page = await options.browserUrl?.(taskId, name, context.args);
