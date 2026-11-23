@@ -3,7 +3,7 @@ import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil
 import type { ControlConfig } from "../config.js";
 import { decrypt } from "../crypto.js";
 import { botRepository, type BotRecord } from "../db/bots.js";
-import { chatRepository, type ConversationRecord, type StepRecord } from "../db/chat.js";
+import { chatRepository, type ConversationRecord, type StepRecord, type TaskPatch, type TaskRecord } from "../db/chat.js";
 import { credentialRepository } from "../db/credentials.js";
 import type { AppDatabase } from "../db/index.js";
 import { memoryRepository } from "../db/memories.js";
@@ -64,6 +64,8 @@ import { markRemoteUncertain, remoteUncertain } from "./remote-uncertain.js";
 import { skillHttpMachine, skillPrompt, skillTools } from "./skill-tools.js";
 import { machineTools } from "./tools.js";
 import { createSendFileTool } from "./file-send-tool.js";
+import { attachBotMessageCards, createSendToBotTool, openBotMessageText, recordTerminalReply, replyConversationId, type TerminalReply } from "./bot-messaging.js";
+import { deliveryProblem, earliestQueued, findBotMessage, markBotMessage, queuedRecipientIds, taskHop, type BotMessageRow } from "../db/bot-messages.js";
 import { assistantText, loadTranscript, loadTranscriptEntries, messageView, stepView, storedContent, taskView, withoutImages } from "./view.js";
 import { foldNoticeEntries } from "./notices.js";
 import { buildModel, type GatewayTask } from "../gateway/stream.js";
@@ -261,6 +263,24 @@ async function recoverOutstandingTools(input: {
   }
 }
 
+type TerminalState = "succeeded" | "failed" | "cancelled" | "interrupted";
+
+function storeTerminal(
+  db: AppDatabase, scope: UserScope, taskId: string, state: TerminalState, error: string | null, now: Date, patch?: TaskPatch,
+): { task: TaskRecord; reply: TerminalReply | undefined } | undefined {
+  const chat = chatRepository(db);
+  return db.$client.transaction(() => {
+    const task = chat.findTask(scope, taskId);
+    if (!task || task.endedAt !== null) return undefined;
+    chat.updateTask(scope, taskId, { ...patch, state, error, endedAt: now.toISOString() });
+    const reply = task.trigger === "bot_message"
+      ? recordTerminalReply(db, { taskId, userId: scope.userId, botId: task.botId, state, error, now })
+      : undefined;
+    if (task.trigger === "bot_message") notifyTaskSettled(db, { userId: scope.userId, botId: task.botId, taskId, outcome: state });
+    return { task, reply };
+  })();
+}
+
 export function recoverInterruptedTasks(db: AppDatabase, now = new Date()): number {
   const chat = chatRepository(db);
   let count = 0;
@@ -305,7 +325,7 @@ export function recoverInterruptedTasks(db: AppDatabase, now = new Date()): numb
       }
     }
     const unconfirmed = chat.findTask(scope, meta.id)?.error === "remote_unconfirmed";
-    chat.updateTask(scope, meta.id, { state: "interrupted", endedAt: now.toISOString(), error: unconfirmed ? "remote_unconfirmed" : null });
+    storeTerminal(db, scope, meta.id, "interrupted", unconfirmed ? "remote_unconfirmed" : null, now);
     count += 1;
   }
   return count;
@@ -323,6 +343,7 @@ export function createChatService(deps: ChatServiceDeps) {
   const running = new Map<string, Live>();
   const liveByBot = new Map<string, Live>();
   const tails = new Map<string, Promise<void>>();
+  const deletingBots = new Set<string>();
   const saved = new WeakSet<object>();
   const messageIds = new WeakMap<object, string>();
   const browsers = new BrowserPool();
@@ -355,7 +376,7 @@ export function createChatService(deps: ChatServiceDeps) {
       const task = chat.findTask(userScope(live.userId), taskId);
       if (!task?.conversationId) return;
       publishTask(live.userId, task.conversationId, taskId);
-      if (task.trigger === "routine") notifyTaskSettled(deps.db, { userId: live.userId, botId: live.botId, taskId, outcome: "needs_user" });
+      if (task.trigger === "routine" || task.trigger === "bot_message") notifyTaskSettled(deps.db, { userId: live.userId, botId: live.botId, taskId, outcome: "needs_user" });
     },
     onHold(taskId) {
       holdRun(taskId, true);
@@ -427,11 +448,15 @@ export function createChatService(deps: ChatServiceDeps) {
     publishTask(meta.userId, meta.conversationId, meta.id);
   }
   pump();
+  for (const botId of queuedRecipientIds(deps.db)) dispatchLocked(botId);
 
   return {
     approvalGate,
+    flushBotMessages(botId: string): Promise<void> {
+      return dispatchBotMessages(botId);
+    },
     enqueueRoutine(input: { userId: string; botId: string; prompt: string; routineRunId: string }): string {
-      if (chat.systemBotBusy(input.botId)) throw new ChatError("这个 bot 还有未完成的任务", 409);
+      if (deletingBots.has(input.botId) || chat.systemBotBusy(input.botId)) throw new ChatError("这个 bot 还有未完成的任务", 409);
       const scope = userScope(input.userId);
       const bot = botRepository(deps.db).findById(scope, input.botId);
       if (!bot) throw new ChatError("找不到 bot", 404);
@@ -468,7 +493,8 @@ export function createChatService(deps: ChatServiceDeps) {
       }
       if (task.state === "waiting_takeover") {
         deps.leases?.stop(task.botId);
-        chat.updateTask(scope, taskId, { state: "cancelled", endedAt: now().toISOString(), error: null });
+        settleTask(scope, taskId, "cancelled", null);
+        removeQueuedTask(taskId);
         if (task.conversationId) publishTask(scope.userId, task.conversationId, taskId);
         return true;
       }
@@ -477,7 +503,8 @@ export function createChatService(deps: ChatServiceDeps) {
         return true;
       }
       if (task.state === "waiting_approval") {
-        chat.updateTask(scope, taskId, { state: "cancelled", endedAt: now().toISOString(), error: null });
+        settleTask(scope, taskId, "cancelled", null);
+        removeQueuedTask(taskId);
         deps.db.$client
           .prepare("update approvals set state='stopped', decided_at=? where task_id=? and state='pending'")
           .run(now().toISOString(), taskId);
@@ -485,27 +512,32 @@ export function createChatService(deps: ChatServiceDeps) {
         return true;
       }
       if (task.state !== "queued") return false;
-      const index = queue.findIndex((item) => item.id === taskId);
-      if (index >= 0) queue.splice(index, 1);
-      chat.updateTask(scope, taskId, { state: "cancelled", endedAt: now().toISOString(), error: null });
-      forgetIfIdle(task.botId ? scope.userId : scope.userId);
+      settleTask(scope, taskId, "cancelled", null);
+      removeQueuedTask(taskId);
+      forgetIfIdle(scope.userId);
       publishTask(scope.userId, task.conversationId, taskId);
       return true;
     },
-    async cancelBot(scope: UserScope, botId: string): Promise<void> {
-      const live = liveByBot.get(botId);
-      if (live && live.userId === scope.userId) {
-        this.stop(scope, live.id);
-        await live.done;
-      }
-      const queued = chat.findActiveByBot(scope, botId, "queued");
-      if (queued) this.stop(scope, queued.id);
-      const waiting = chat.findActiveByBot(scope, botId, "waiting_input");
-      if (waiting) this.stop(scope, waiting.id);
-      const approving = chat.findActiveByBot(scope, botId, "waiting_approval");
-      if (approving) this.stop(scope, approving.id);
-      const takeover = chat.findActiveByBot(scope, botId, "waiting_takeover");
-      if (takeover) this.stop(scope, takeover.id);
+    cancelBot(scope: UserScope, botId: string, remove: () => Promise<boolean>): Promise<boolean> {
+      return exclusive(botId, async () => {
+        if (!botRepository(deps.db).findById(scope, botId)) return false;
+        deletingBots.add(botId);
+        try {
+          const live = liveByBot.get(botId);
+          if (live && live.userId === scope.userId) {
+            this.stop(scope, live.id);
+            await live.done;
+          }
+          for (const state of ["queued", "waiting_input", "waiting_approval", "waiting_takeover"] as const) {
+            const task = chat.findActiveByBot(scope, botId, state);
+            if (task) this.stop(scope, task.id);
+          }
+          return await remove();
+        } finally {
+          deletingBots.delete(botId);
+          scheduleBotDispatch(botId);
+        }
+      });
     },
     /** 等正在跑的任务结束。排队但因名额开不了工的会留下。 */
     async idle(): Promise<void> {
@@ -604,6 +636,7 @@ export function createChatService(deps: ChatServiceDeps) {
     }
     const waiting = chat.findActiveByBot(scope, bot.id, "waiting_input");
     if (waiting) throw new ChatError("正在等待输入", 409);
+    if (chat.systemBotBusy(bot.id)) throw new ChatError("这个 bot 还有未完成的任务", 409);
     const task = chat.insertTask(scope, { id: ulid(), botId: bot.id, conversationId: conversation.id });
     if (!task) throw new ChatError("找不到 bot", 404);
     const row = persistUser(scope, conversation.id, message, task.id, attachments);
@@ -753,6 +786,11 @@ export function createChatService(deps: ChatServiceDeps) {
     }
   }
 
+  function removeQueuedTask(taskId: string): void {
+    const index = queue.findIndex((item) => item.id === taskId);
+    if (index >= 0) queue.splice(index, 1);
+  }
+
   function pick(): boolean {
     if (ring.length === 0) return false;
     const previous = lastStarted ? ring.indexOf(lastStarted) : -1;
@@ -763,7 +801,7 @@ export function createChatService(deps: ChatServiceDeps) {
       if (!userId) continue;
       const used = [...running.values()].filter((live) => live.userId === userId).length;
       if (used >= userLimit(userId)) continue;
-      const taskIndex = queue.findIndex((item) => item.userId === userId && !liveByBot.has(item.botId));
+      const taskIndex = queue.findIndex((item) => item.userId === userId && !liveByBot.has(item.botId) && !deletingBots.has(item.botId));
       if (taskIndex < 0) continue;
       const [task] = queue.splice(taskIndex, 1);
       if (!task) continue;
@@ -1147,6 +1185,16 @@ export function createChatService(deps: ChatServiceDeps) {
         }),
         proposeApprovalRuleTool({ db: deps.db, userId: live.userId, botId: bot.id }),
       ];
+      const sendToBot = createSendToBotTool({
+        db: deps.db,
+        userId: live.userId,
+        fromBotId: bot.id,
+        taskId: live.id,
+        hop: taskHop(deps.db, live.id),
+        now,
+        scheduleDispatch: scheduleBotDispatch,
+      });
+      if (sendToBot) rawTools.push(sendToBot);
       seq = chat.maxSeq(scope, live.id);
       const guardedTools = rawTools.map((tool) => {
         const execute = tool.execute.bind(tool);
@@ -1524,26 +1572,28 @@ export function createChatService(deps: ChatServiceDeps) {
   function finish(
     scope: UserScope,
     live: Live,
-    state: string,
+    state: TerminalState,
     error: string | null,
     stepCount: number,
     usage?: string,
   ): void {
     if (live.preserveWait) return;
+    // A manual stop of bot work must never turn a late runner error into a new task for the sender.
+    if (live.stopRequested && state !== "cancelled" && chat.findTask(scope, live.id)?.trigger === "bot_message") {
+      state = "cancelled";
+      error = null;
+    }
     const gateway = deps.tasks.get(live.id);
     if (gateway) {
       pauseTaskClock(gateway, now().getTime());
       usage = taskUsageJson(gateway);
     }
     const shown = live.remoteUnconfirmed ? "remote_unconfirmed" : error;
-    chat.updateTask(scope, live.id, {
-      state,
-      error: shown,
-      endedAt: now().toISOString(),
+    const settled = settleTask(scope, live.id, state, shown, {
       stepCount,
       ...(usage !== undefined ? { usageJson: usage } : {}),
     });
-    const settled = chat.findTask(scope, live.id);
+    if (!settled) return;
     const errorClass = terminalErrorClass(error);
     const ts = now().toISOString();
     if (state === "failed") {
@@ -1639,13 +1689,13 @@ export function createChatService(deps: ChatServiceDeps) {
     const task = chat.findTask(scope, taskId);
     if (!task || task.state !== "waiting_input" || !task.conversationId) return;
     appendSecretResult(scope, task.conversationId, taskId, error, true);
-    chat.updateTask(scope, taskId, { state: "failed", error, endedAt: now().toISOString() });
+    settleTask(scope, taskId, "failed", error);
     publishTask(userId, task.conversationId, taskId);
   }
 
   function cancelWaiting(scope: UserScope, task: { id: string; conversationId: string | null }): void {
     if (task.conversationId) appendSecretResult(scope, task.conversationId, task.id, "用户停止了任务", true);
-    chat.updateTask(scope, task.id, { state: "cancelled", error: null, endedAt: now().toISOString() });
+    settleTask(scope, task.id, "cancelled", null);
     if (task.conversationId) publishTask(scope.userId, task.conversationId, task.id);
   }
 
@@ -1726,10 +1776,12 @@ export function createChatService(deps: ChatServiceDeps) {
       const messages = (chat.listMessages(scope, conversationId) ?? []).map(messageView);
       const redacted = redactMessage(view, messages, tasks, false);
       if (!redacted) return;
-      deps.hub.publish(conversationId, { type: "message", conversationId, message: redacted });
+      const [card] = attachBotMessageCards(deps.db, scope, [redacted]);
+      if (card) deps.hub.publish(conversationId, { type: "message", conversationId, message: card });
       return;
     }
-    deps.hub.publish(conversationId, { type: "message", conversationId, message: view });
+    const [card] = attachBotMessageCards(deps.db, scope, [view]);
+    if (card) deps.hub.publish(conversationId, { type: "message", conversationId, message: card });
   }
 
   function publishTask(userId: string, conversationId: string | null, taskId: string): void {
@@ -1756,6 +1808,88 @@ export function createChatService(deps: ChatServiceDeps) {
       ),
     );
     return run;
+  }
+
+  function dispatchBotMessages(botId: string): Promise<void> {
+    return exclusive(botId, () => {
+      dispatchLocked(botId);
+    });
+  }
+
+  function scheduleBotDispatch(botId: string): void {
+    void dispatchBotMessages(botId).catch((error: unknown) => {
+      console.error("bot 消息派发失败，消息仍在队列", botId, error);
+    });
+  }
+
+  function dispatchLocked(botId: string): void {
+    const opened = deps.db.$client.transaction(() => {
+      if (chat.systemBotBusy(botId)) return;
+      for (;;) {
+        const message = earliestQueued(deps.db, botId);
+        if (!message) return;
+        const problem = deliveryProblem(deps.db, message);
+        if (problem) {
+          markBotMessage(deps.db, message.id, { state: "dropped", error: problem, updatedAt: now().toISOString() });
+          continue;
+        }
+        return openBotMessage(message);
+      }
+    }).immediate();
+    if (!opened) return;
+    const { task, messageId } = opened;
+    queue.push(task);
+    remember(task.userId);
+    publishMessage(task.conversationId, messageId, userScope(task.userId));
+    publishTask(task.userId, task.conversationId, task.id);
+    pump();
+  }
+
+  function openBotMessage(message: BotMessageRow): { task: QueuedTask; messageId: string } {
+    const scope = userScope(message.userId);
+    const target = botRepository(deps.db).findById(scope, message.toBotId);
+    const source = botRepository(deps.db).findById(scope, message.fromBotId);
+    if (!target || !source) throw new ChatError("找不到 bot", 404);
+    const conversation = conversationFor(scope, target, message);
+    const opened = openBotMessageText(deps.db, message, source.name);
+    const task = chat.insertTask(scope, {
+      id: ulid(),
+      botId: target.id,
+      conversationId: conversation.id,
+      trigger: "bot_message",
+      botMessageId: message.id,
+    });
+    if (!task) throw new ChatError("找不到 bot", 404);
+    const row = chat.insertMessage(scope, {
+      id: ulid(), conversationId: conversation.id, role: "user", taskId: task.id,
+      contentJson: storedContent(userMessage(opened.modelText, now()), opened.text, [], { kind: opened.kind, noticeId: message.id }),
+    });
+    if (!row) throw new ChatError("找不到对话", 404);
+    chat.touchConversation(scope, conversation.id);
+    markBotMessage(deps.db, message.id, { state: "dispatched", taskId: task.id, error: null, updatedAt: now().toISOString() });
+    return { task: { id: task.id, botId: target.id, userId: message.userId, conversationId: conversation.id }, messageId: row.id };
+  }
+
+  function conversationFor(scope: UserScope, bot: BotRecord, message: BotMessageRow): ConversationRecord {
+    if (message.replyToId) {
+      const request = findBotMessage(deps.db, message.replyToId);
+      const existing = request ? replyConversationId(deps.db, message.userId, request, bot.id) : undefined;
+      if (existing) {
+        const found = chat.findConversation(scope, existing);
+        if (found) return found;
+      }
+    }
+    return resolveConversation(scope, bot, undefined, message.replyToId ? "bot 回复" : message.body);
+  }
+
+  function settleTask(scope: UserScope, taskId: string, state: TerminalState, error: string | null, patch?: TaskPatch): TaskRecord | undefined {
+    const result = storeTerminal(deps.db, scope, taskId, state, error, now(), patch);
+    if (!result) return undefined;
+    const { task, reply } = result;
+    if (reply?.messageId && reply.conversationId) publishMessage(reply.conversationId, reply.messageId, scope);
+    if (reply && !reply.shown) scheduleBotDispatch(reply.toBotId);
+    scheduleBotDispatch(task.botId);
+    return task;
   }
 }
 

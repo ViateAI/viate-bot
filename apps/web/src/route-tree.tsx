@@ -41,9 +41,12 @@ const indexRoute = createRoute({
 const chatRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/b/$botId",
+  validateSearch: (search: Record<string, unknown>): { conversationId?: string } =>
+    typeof search.conversationId === "string" ? { conversationId: search.conversationId } : {},
   component: function ChatRoute() {
     const { botId } = chatRoute.useParams();
-    return <ChatPage botId={botId} />;
+    const { conversationId } = chatRoute.useSearch();
+    return <ChatPage botId={botId} requestedConversationId={conversationId} />;
   },
 });
 

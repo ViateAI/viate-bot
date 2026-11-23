@@ -4,6 +4,7 @@ import { avatarFile } from "../agent/profile-tool.js";
 import type { ChatService } from "../agent/service.js";
 import { ChatError } from "../agent/service.js";
 import { messageView, stepView, taskView } from "../agent/view.js";
+import { attachBotMessageCards } from "../agent/bot-messaging.js";
 import { taskRateWaiting } from "../model-rate.js";
 import { redactMessage, redactMessages, redactStep, userShowsProcess } from "../agent/process-detail.js";
 import { reportedElapsedMs } from "../task-limits.js";
@@ -118,11 +119,12 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
       return reply.code(409).send({ error: "主 bot 不能删除" });
     }
     try {
-      await deps.chat.cancelBot(scope, request.params.id);
-      const ok = await deleteBot(
-        { db: deps.db, key: deps.key, credentials: deps.credentials, providerId: deps.providerId },
-        scope,
-        request.params.id,
+      const ok = await deps.chat.cancelBot(scope, request.params.id, () =>
+        deleteBot(
+          { db: deps.db, key: deps.key, credentials: deps.credentials, providerId: deps.providerId },
+          scope,
+          request.params.id,
+        ),
       );
       if (!ok) return reply.code(404).send({ error: "找不到 bot" });
       return { ok: true };
@@ -188,7 +190,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!rows) return reply.code(404).send({ error: "找不到对话" });
     const detail = userShowsProcess(deps.db, scope);
     const tasks = (chat.listTasks(scope, request.params.id) ?? []).map(taskView);
-    return { messages: redactMessages(rows.map(messageView), tasks, detail) };
+    return { messages: attachBotMessageCards(deps.db, scope, redactMessages(rows.map(messageView), tasks, detail)) };
   });
 
   app.get<{ Params: { id: string } }>("/api/conversations/:id/tasks", async (request, reply) => {
@@ -213,12 +215,12 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     const row = chat.findMessage(scope, request.params.id);
     if (!row) return reply.code(404).send({ error: "找不到消息" });
     const view = messageView(row);
-    if (userShowsProcess(deps.db, scope)) return { message: view };
+    if (userShowsProcess(deps.db, scope)) return { message: attachBotMessageCards(deps.db, scope, [view])[0] };
     const tasks = (chat.listTasks(scope, row.conversationId) ?? []).map(taskView);
     const messages = (chat.listMessages(scope, row.conversationId) ?? []).map(messageView);
     const redacted = redactMessage(view, messages, tasks, false);
     if (!redacted) return reply.code(404).send({ error: "找不到消息" });
-    return { message: redacted };
+    return { message: attachBotMessageCards(deps.db, scope, [redacted])[0] };
   });
 
   app.get<{ Params: { id: string } }>("/api/tasks/:id", async (request, reply) => {

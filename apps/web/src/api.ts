@@ -96,7 +96,7 @@ export interface ChatMessage {
   toolCalls?: Array<{ id: string; name: string; arguments: unknown }>;
   toolName?: string;
   isError?: boolean;
-  notice?: { kind: string; noticeId: string };
+  notice?: { kind: string; noticeId: string; peerBotId?: string; peerName?: string; peerConversationId?: string; shown?: boolean };
 }
 
 export interface Task {

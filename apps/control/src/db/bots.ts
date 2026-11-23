@@ -129,12 +129,18 @@ export function botRepository(db: AppDatabase): BotStore {
     },
     softDelete(scope, id) {
       const now = new Date().toISOString();
-      const result = db
-        .update(bots)
-        .set({ deletedAt: now, updatedAt: now })
-        .where(and(eq(bots.id, id), eq(bots.userId, scope.userId), isNull(bots.deletedAt)))
-        .run();
-      return result.changes > 0;
+      return db.$client.transaction(() => {
+        const result = db
+          .update(bots)
+          .set({ deletedAt: now, updatedAt: now })
+          .where(and(eq(bots.id, id), eq(bots.userId, scope.userId), isNull(bots.deletedAt)))
+          .run();
+        if (!result.changes) return false;
+        db.$client.prepare(`update bot_messages set state='dropped', updated_at=?,
+          error=case when to_bot_id=? then '接收方 bot 已删除' else '发送方 bot 已删除' end
+          where state='queued' and user_id=? and (from_bot_id=? or to_bot_id=?)`).run(now, id, scope.userId, id, id);
+        return true;
+      })();
     },
     remove(scope, id) {
       const result = db

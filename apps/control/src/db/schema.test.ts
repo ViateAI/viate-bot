@@ -4,8 +4,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import { getTableConfig } from "drizzle-orm/sqlite-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase, type AppDatabase } from "./index.js";
+import { botMessages, tasks } from "./schema.js";
 
 const dirs: string[] = [];
 
@@ -32,6 +34,29 @@ afterEach(() => {
 });
 
 describe("schema migration", () => {
+  it("keeps bot-message foreign keys in sync with the migration", () => {
+    const dir = mkdtempSync(join(tmpdir(), "vb-db-"));
+    dirs.push(dir);
+    const db = openDatabase(join(dir, "bot-message.sqlite"));
+    try {
+      const migrationsFolder = fileURLToPath(new URL("../../drizzle", import.meta.url));
+      migrate(db, { migrationsFolder });
+      migrate(db, { migrationsFolder });
+      for (const table of [botMessages, tasks]) {
+        const config = getTableConfig(table);
+        const sqlite = db.$client.prepare(`select "from" || '->' || "table" as ref from pragma_foreign_key_list(?)`)
+          .pluck().all(config.name).sort();
+        const drizzle = config.foreignKeys.map((fk) => {
+          const ref = fk.reference();
+          return `${ref.columns[0]?.name}->${getTableConfig(ref.foreignTable).name}`;
+        }).sort();
+        expect(drizzle).toEqual(sqlite);
+      }
+    } finally {
+      db.$client.close();
+    }
+  });
+
   it("preserves private versions and pending reviews across migration restart", () => {
     const dir = mkdtempSync(join(tmpdir(), "vb-db-"));
     dirs.push(dir);
@@ -92,6 +117,7 @@ describe("schema migration", () => {
       "approval_rules",
       "audit_log",
       "bot_apps",
+      "bot_messages",
       "bots",
       "conversations",
       "events",
@@ -134,6 +160,26 @@ describe("schema migration", () => {
     expect(columnNames(db, "app_versions")).toEqual(expect.arrayContaining(["important_note", "important_at"]));
     expect(columnNames(db, "system_notices")).toEqual(expect.arrayContaining(["user_id", "dedupe_key", "payload_json", "delivered_message_id"]));
     expect(columnNames(db, "app_installs")).toEqual(expect.arrayContaining(["installed_by_bot_id", "installed_by_bot_name"]));
+    expect(columnNames(db, "bot_messages")).toEqual([
+      "id",
+      "user_id",
+      "from_bot_id",
+      "to_bot_id",
+      "reply_to_id",
+      "origin_task_id",
+      "hop",
+      "body",
+      "state",
+      "task_id",
+      "error",
+      "created_at",
+      "updated_at",
+    ]);
+    expect(columnNames(db, "tasks")).toContain("bot_message_id");
+    const dispatchIndex = db.$client
+      .prepare("select name from sqlite_master where type = 'index' and tbl_name = 'bot_messages'")
+      .all() as Array<{ name: string }>;
+    expect(dispatchIndex.map((row) => row.name)).toContain("bot_messages_to_state_created");
     const viateColumns = db.$client
       .prepare(
         `select m.name as tbl, p.name as col

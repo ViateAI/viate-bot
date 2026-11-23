@@ -162,6 +162,15 @@ function script(body: string): string {
   const text = lastUser(body);
   const recent = JSON.stringify(messagesSinceUser(body));
   const tools = toolCount(recent);
+  if (text.includes("e2e-bot-send")) {
+    if (tools === 0) {
+      const name = /e2e-bot-send\s+(\S+)/.exec(text)?.[1] ?? "";
+      return toolSse("send_to_bot", { bot: name, text: "请给出结论 e2e-bot-work" });
+    }
+    return textSse("已派出");
+  }
+  if (text.includes("【bot 消息")) return textSse("e2e-bot-result");
+  if (text.includes("【bot 回复")) return textSse("e2e-bot-continued");
   if (text.includes("e2e-upload")) {
     if (tools === 0) {
       const path = /\/home\/bot\/uploads\/[^\s"\\]+notes\.txt/.exec(text)?.[0] ?? "";

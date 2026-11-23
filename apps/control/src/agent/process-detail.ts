@@ -37,6 +37,7 @@ const TOOL_LABELS: Record<string, string> = {
   propose_approval_rule: "正在提议自动审批规则",
   bulk_delete_action: "正在删除文件",
   send_file: "正在发送文件",
+  send_to_bot: "正在发给另一个 bot",
 };
 
 export function userShowsProcess(db: AppDatabase, scope: UserScope): boolean {

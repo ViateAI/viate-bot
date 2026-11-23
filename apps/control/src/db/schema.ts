@@ -188,6 +188,7 @@ export const tasks = sqliteTable("tasks", {
     .references(() => bots.id),
   conversationId: text("conversation_id").references(() => conversations.id),
   routineRunId: text("routine_run_id"),
+  botMessageId: text("bot_message_id").references((): AnySQLiteColumn => botMessages.id),
   state: text("state").notNull(),
   trigger: text("trigger").notNull(),
   stepCount: integer("step_count").notNull().default(0),
@@ -196,6 +197,32 @@ export const tasks = sqliteTable("tasks", {
   startedAt: text("started_at"),
   endedAt: text("ended_at"),
 });
+
+export const botMessages = sqliteTable(
+  "bot_messages",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id),
+    fromBotId: text("from_bot_id")
+      .notNull()
+      .references(() => bots.id),
+    toBotId: text("to_bot_id")
+      .notNull()
+      .references(() => bots.id),
+    replyToId: text("reply_to_id").references((): AnySQLiteColumn => botMessages.id),
+    originTaskId: text("origin_task_id").references((): AnySQLiteColumn => tasks.id),
+    hop: integer("hop").notNull(),
+    body: text("body").notNull(),
+    state: text("state").notNull(),
+    taskId: text("task_id").references((): AnySQLiteColumn => tasks.id),
+    error: text("error"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [index("bot_messages_to_state_created").on(table.toBotId, table.state, table.createdAt)],
+);
 
 export const taskSteps = sqliteTable("task_steps", {
   id: text("id").primaryKey(),

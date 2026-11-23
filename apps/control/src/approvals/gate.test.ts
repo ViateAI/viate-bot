@@ -36,6 +36,36 @@ function pending(db: AppDatabase) {
 }
 
 describe("approval gate", () => {
+  it.each([
+    ["全免审批", { approveNone: true }],
+    ["类别免审批", { alwaysAllow: ["shell"] }],
+    ["规则免审批", {}],
+  ])("requires the owner to approve a bot-triggered tool despite %s", async (label, settings) => {
+    const { db } = fixture();
+    db.$client.prepare("update bots set settings_json=? where id='bot'").run(JSON.stringify(settings));
+    if (label === "规则免审批") {
+      db.$client.prepare("insert into approval_rules(id,user_id,bot_id,category,match_json,created_at) values ('rule','a','bot','shell',?,'now')")
+        .run(JSON.stringify({ prefix: ["echo", "ok"] }));
+    }
+    const gate = createApprovalGate({ db, waitMs: 5000 });
+    const hook = gate.bind("task").beforeToolCall!;
+    expect(await hook(context("shell_exec", { cmd: "echo ok" }))).toBeUndefined();
+    db.$client.prepare("update tasks set trigger='bot_message' where id='task'").run();
+    expect(await hook(context("send_to_bot", { bot: "peer", text: "job" }))).toBeUndefined();
+    const signal = new AbortController();
+    const waiting = hook(context("shell_exec", { cmd: "echo ok" }), signal.signal);
+    try {
+      const approval = pending(db);
+      expect(approval).toBeDefined();
+      expect(gate.decide("b", approval.id, "allow")).toBe("not_found");
+      expect(gate.decide("a", approval.id, "deny")).toBe("ok");
+      expect((await waiting)?.block).toBe(true);
+    } finally {
+      signal.abort();
+      await waiting;
+    }
+  });
+
   it("rejects changed profile edits and a takeover acquired during approval", async () => {
     const { db } = fixture();
     const gate = createApprovalGate({ db, waitMs: 5000 });

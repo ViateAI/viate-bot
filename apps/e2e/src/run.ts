@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { join, resolve } from "node:path";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
 import { solidPng } from "./fake-model.js";
 import { hostResolverRules } from "./hosts.js";
 import { ignoreHTTPSErrors, type LoginModule } from "./login.js";
@@ -309,6 +309,7 @@ export async function runSuite(): Promise<void> {
       return listed.routines.some((item) => item.state !== "draft") ? "ok" : "定时任务还是草稿";
     });
     if (local) await sendUpload(page, userApi, baseURL, botId);
+    if (local) await botExchange(page, userApi, baseURL, botId, userCsrf, model);
     await json(adminApi, `${baseURL}/api/admin/users/${me.id}/quota`, {
       method: "PATCH",
       headers: { "x-vb-csrf": adminCsrf },
@@ -380,6 +381,63 @@ async function sendUpload(page: Page, api: HttpClient, baseURL: string, botId: s
     } finally {
       await view.close();
     }
+  }
+}
+
+async function botExchange(page: Page, api: HttpClient, baseURL: string, botId: string, csrfToken: string, model: string): Promise<void> {
+  const created = await json<{ bot: { id: string } }>(api, `${baseURL}/api/bots`, {
+    method: "POST",
+    headers: { "x-vb-csrf": csrfToken },
+    data: { name: "e2e-worker", model },
+  });
+  const workerId = created.bot.id;
+  try {
+    const sent = await say(page, botId, "e2e-bot-send e2e-worker");
+    await waitState(api, baseURL, sent.taskId, "succeeded");
+    const { task } = await json<{ task: { conversationId: string } }>(api, `${baseURL}/api/tasks/${sent.taskId}`);
+    await waitFor(async () => {
+      const messages = await json<{ messages: Array<{ role: string; taskId: string | null; text: string }> }>(api, `${baseURL}/api/conversations/${task.conversationId}/messages`);
+      return messages.messages.some((message) => message.role === "assistant" && message.taskId && message.taskId !== sent.taskId && message.text.includes("e2e-bot-continued"))
+        ? "ok" : "派活回复还没让发送方继续";
+    });
+    const reply = page.getByTestId("bot-reply");
+    await reply.waitFor({ timeout: TASK_TIMEOUT_MS });
+    const shots = process.env.VB_E2E_SHOTS ? join(process.env.VB_E2E_SHOTS, "bot-messaging") : undefined;
+    if (shots) mkdirSync(shots, { recursive: true });
+    await checkCardLayout(page, reply, shots ? join(shots, "reply") : undefined);
+    const worker = await json<{ conversations: Array<{ id: string }> }>(api, `${baseURL}/api/bots/${workerId}/conversations`);
+    const workerConversation = worker.conversations[0]?.id;
+    if (!workerConversation) throw new Error("接收方没有任务对话");
+    await reply.getByTestId("bot-message-jump").click();
+    await page.waitForURL(`${baseURL}/b/${workerId}?conversationId=${workerConversation}`, { timeout: TASK_TIMEOUT_MS });
+    const request = page.getByTestId("bot-message");
+    await request.waitFor({ timeout: TASK_TIMEOUT_MS });
+    await checkCardLayout(page, request, shots ? join(shots, "message") : undefined);
+    await request.getByTestId("bot-message-jump").click();
+    await page.waitForURL(`${baseURL}/b/${botId}?conversationId=${task.conversationId}`, { timeout: TASK_TIMEOUT_MS });
+    await page.setViewportSize({ width: 1440, height: 900 });
+  } finally {
+    const removed = await api.fetch(`${baseURL}/api/bots/${workerId}`, { method: "DELETE", headers: { "x-vb-csrf": csrfToken } });
+    if (!removed.ok()) throw new Error(`删除 e2e-worker 失败 ${removed.status()} ${await removed.text()}`);
+  }
+}
+
+async function checkCardLayout(page: Page, card: Locator, stem?: string): Promise<void> {
+  for (const width of [375, 1280]) {
+    await page.setViewportSize({ width, height: 800 });
+    await card.scrollIntoViewIfNeeded();
+    const layout = await card.evaluate((element) => {
+      const root = document.documentElement;
+      const bounds = element.getBoundingClientRect();
+      const transcript = element.closest(".thread")?.getBoundingClientRect();
+      return {
+        overflow: root.scrollWidth > root.clientWidth + 1 || element.scrollWidth > element.clientWidth + 1,
+        visible: transcript && bounds.top >= transcript.top - 1 && bounds.bottom <= transcript.bottom + 1,
+      };
+    });
+    if (layout.overflow) throw new Error(`横向溢出 ${width}`);
+    if (!layout.visible) throw new Error(`卡片未完全进入转录视口 ${width}`);
+    if (stem) await page.screenshot({ path: `${stem}-${width}.png` });
   }
 }
 

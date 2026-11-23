@@ -37,6 +37,7 @@ export interface TaskRecord {
   conversationId: string | null;
   state: string;
   trigger: string;
+  botMessageId: string | null;
   stepCount: number;
   usageJson: string | null;
   error: string | null;
@@ -112,6 +113,8 @@ export function chatRepository(db: AppDatabase) {
         db.$client.prepare("update uploads set kind='deleted', message_id=null, delivered_at=null where user_id=? and message_id in (select id from messages where conversation_id = ?)").run(scope.userId, id);
         db.$client.prepare(`update memories set source_task_id = null where source_task_id in (${taskIds})`).run(id);
         db.$client.prepare(`update routine_runs set task_id = null where task_id in (${taskIds})`).run(id);
+        db.$client.prepare(`update bot_messages set task_id = null where task_id in (${taskIds})`).run(id);
+        db.$client.prepare(`update bot_messages set origin_task_id = null where origin_task_id in (${taskIds})`).run(id);
         db.$client.prepare(`delete from notifications where task_id in (${taskIds})`).run(id);
         db.$client.prepare(`delete from takeover_leases where task_id in (${taskIds})`).run(id);
         db.$client.prepare(`delete from approvals where task_id in (${taskIds})`).run(id);
@@ -195,6 +198,12 @@ export function chatRepository(db: AppDatabase) {
       rows.reverse();
       return rows;
     },
+    listTaskAssistantMessages(scope: UserScope, conversationId: string, taskId: string): MessageRecord[] | undefined {
+      if (!this.findConversation(scope, conversationId)) return undefined;
+      return db.select().from(messages)
+        .where(and(eq(messages.conversationId, conversationId), eq(messages.taskId, taskId), eq(messages.role, "assistant")))
+        .orderBy(desc(messages.id)).all().map(toMessage);
+    },
     /** 模型加载摘要锚点和全部未覆盖消息，不沿用界面的 500 条分页。 */
     listContextMessages(scope: UserScope, conversationId: string): MessageRecord[] | undefined {
       if (!this.findConversation(scope, conversationId)) return undefined;
@@ -271,7 +280,7 @@ export function chatRepository(db: AppDatabase) {
     },
     insertTask(
       scope: UserScope,
-      draft: { id: string; botId: string; conversationId: string; trigger?: "user" | "routine"; routineRunId?: string },
+      draft: { id: string; botId: string; conversationId: string; trigger?: "user" | "routine" | "bot_message"; routineRunId?: string; botMessageId?: string },
     ): TaskRecord | undefined {
       if (!ownsBot(db, scope, draft.botId)) return undefined;
       db.insert(tasks)
@@ -280,6 +289,7 @@ export function chatRepository(db: AppDatabase) {
           botId: draft.botId,
           conversationId: draft.conversationId,
           ...(draft.routineRunId !== undefined ? { routineRunId: draft.routineRunId } : {}),
+          ...(draft.botMessageId !== undefined ? { botMessageId: draft.botMessageId } : {}),
           state: "queued",
           trigger: draft.trigger ?? "user",
           stepCount: 0,
@@ -456,6 +466,7 @@ function toTask(row: typeof tasks.$inferSelect): TaskRecord {
     conversationId: row.conversationId,
     state: row.state,
     trigger: row.trigger,
+    botMessageId: row.botMessageId,
     stepCount: row.stepCount,
     usageJson: row.usageJson,
     error: row.error,
