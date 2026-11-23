@@ -7,6 +7,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type Me } from "./api.js";
 import { ScanRow } from "./scan-row.js";
+import { isWorkDesktop, resolveMasterId, useMasterReturn, useWorkDesktop } from "./work-layout.js";
 import {
   AppConfirmDialog,
   ArchivePicker,
@@ -40,7 +41,7 @@ const PUSH_IDS_KEY = "viate-admin-push-ids";
 const NPM_NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 
 type AdminView = "library" | "upload" | "pushes";
-type Leave = { kind: "app"; id: string } | { kind: "view"; view: AdminView };
+type Leave = { kind: "app"; id: string; row: HTMLButtonElement } | { kind: "back" } | { kind: "view"; view: AdminView };
 type ScopeChoice = "" | "all" | "user" | "push";
 
 interface DirectoryUser {
@@ -53,8 +54,8 @@ interface DirectoryUser {
 
 export function AdminApps() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<Me>("/api/me") });
-  if (me.isPending) return <p className="px-6 py-10 text-muted">正在确认登录…</p>;
-  if (!me.data?.isAdmin) return <p data-testid="not-found" className="px-6 py-10">404 页面不存在</p>;
+  if (me.isPending) return <p className="work-page-wide text-muted">正在确认登录…</p>;
+  if (!me.data?.isAdmin) return <p data-testid="not-found" className="work-page-wide">404 页面不存在</p>;
   return <AdminAppsBody csrf={me.data.csrf} />;
 }
 
@@ -77,13 +78,15 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
   const [view, setView] = useState<AdminView>("library");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const desktop = useWorkDesktop();
+  const masterReturn = useMasterReturn();
   const [pushIds, setPushIds] = useState<string[]>(() => readPushIds());
   const [knownPushes, setKnownPushes] = useState<PushView[]>([]);
   const [publishNote, setPublishNote] = useState<PackagePublishResult | null>(null);
   const [leave, setLeave] = useState<Leave | null>(null);
-  const dirtyRef = useRef(false);
-  const markDirty = useCallback((dirty: boolean) => {
-    dirtyRef.current = dirty;
+  const [dirtyAppId, setDirtyAppId] = useState<string | null>(null);
+  const markDirty = useCallback((id: string, dirty: boolean) => {
+    setDirtyAppId((current) => dirty ? id : current === id ? null : current);
   }, []);
   const tracked = useQuery({
     queryKey: ["admin-app-pushes", pushIds],
@@ -110,7 +113,8 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
   }, [pushIds]);
 
   const listed = (apps.data?.apps ?? []).filter((app) => app.name.toLowerCase().includes(query.trim().toLowerCase()));
-  const selected = (apps.data?.apps ?? []).find((app) => app.id === selectedId) ?? null;
+  const resolvedId = resolveMasterId(selectedId, listed.map((app) => app.id), desktop);
+  const selected = (apps.data?.apps ?? []).find((app) => app.id === (dirtyAppId ?? resolvedId)) ?? null;
   const pushes = mergePushes(pushIds, tracked.data ?? [], knownPushes);
   const directory = (users.data?.users ?? []).filter(isListedUser);
 
@@ -126,64 +130,64 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
     setKnownPushes((current) => current.filter((item) => item.id !== id));
   }
 
-  function requestSelect(id: string) {
-    if (id === selectedId) return;
-    if (dirtyRef.current) setLeave({ kind: "app", id });
-    else setSelectedId(id);
+  function select(id: string, row: HTMLButtonElement) {
+    masterReturn.remember(row);
+    setSelectedId(id);
+  }
+
+  function requestSelect(id: string, row: HTMLButtonElement) {
+    if (dirtyAppId && id !== selected?.id) setLeave({ kind: "app", id, row });
+    else select(id, row);
   }
 
   function requestView(next: AdminView) {
     if (next === view) return;
-    if (dirtyRef.current) setLeave({ kind: "view", view: next });
+    if (dirtyAppId) setLeave({ kind: "view", view: next });
     else setView(next);
   }
 
   function confirmLeave() {
-    dirtyRef.current = false;
     if (!leave) return;
+    setDirtyAppId(null);
     if (leave.kind === "view") setView(leave.view);
-    else if (leave.id) setSelectedId(leave.id);
+    else if (leave.kind === "app") select(leave.id, leave.row);
     else {
-      const current = selectedId;
       setSelectedId(null);
-      if (current) {
-        requestAnimationFrame(() => {
-          document.querySelector<HTMLElement>(`[data-admin-app-id="${CSS.escape(current)}"]`)?.focus();
-        });
-      }
+      masterReturn.restore();
     }
     setLeave(null);
   }
 
   function closeDetail() {
-    const current = selectedId;
-    if (dirtyRef.current) {
-      setLeave({ kind: "app", id: "" });
+    if (dirtyAppId) {
+      setLeave({ kind: "back" });
       return;
     }
     setSelectedId(null);
-    if (!current) return;
-    requestAnimationFrame(() => {
-      document.querySelector<HTMLElement>(`[data-admin-app-id="${CSS.escape(current)}"]`)?.focus();
-    });
+    masterReturn.restore();
   }
 
   return (
-    <section className="mx-auto grid max-w-6xl gap-6 px-4 py-6 sm:px-6" data-testid="admin-apps">
-      <div>
-        <h1 className="text-2xl font-semibold">应用管理</h1>
-        <p className="mt-1 text-sm text-muted">上传后默认不公开。推送进度按用户刷新。</p>
-      </div>
-      <div role="group" aria-label="管理分区" className="flex flex-wrap gap-2">
-        {([
-          ["library", "应用库"],
-          ["upload", "上传"],
-          ["pushes", "推送记录"],
-        ] as const).map(([id, label]) => (
-          <button key={id} className={choiceClass(view === id)} type="button" aria-pressed={view === id} onClick={() => requestView(id)}>
-            {label}
-          </button>
-        ))}
+    <section className="work-page-wide grid min-w-0 gap-6" data-testid="admin-apps">
+      <div className="work-head">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-semibold">应用管理</h1>
+          <p className="mt-1 text-sm text-muted">上传后默认不公开。推送进度按用户刷新。</p>
+        </div>
+        <div className="work-head-actions">
+          <div role="group" aria-label="管理分区" className="flex flex-wrap gap-2">
+            {([
+              ["library", "应用库"],
+              ["upload", "上传"],
+              ["pushes", "推送记录"],
+            ] as const).map(([id, label]) => (
+              <button key={id} className={choiceClass(view === id)} type="button" aria-pressed={view === id} onClick={() => requestView(id)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <button className={appGhostClass} type="button" onClick={() => void queryClient.invalidateQueries({ queryKey: ["admin-apps"] })}>刷新</button>
+        </div>
       </div>
       {view === "upload" ? (
         <UploadPanel
@@ -191,7 +195,7 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
           onPublished={(result) => {
             setPublishNote(result);
             if (result.appId) setSelectedId(result.appId);
-            dirtyRef.current = false;
+            setQuery("");
             setView("library");
             void queryClient.invalidateQueries({ queryKey: ["admin-apps"] });
           }}
@@ -202,13 +206,14 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
           <PushProgressList pushes={pushes} users={directory} apps={apps.data?.apps ?? []} onForget={forgetPush} />
         </div>
       ) : null}
-      {view === "library" ? (
-        apps.isPending ? <p className="text-sm text-muted">正在加载应用…</p> : apps.isError ? (
+      {view === "library" && apps.isPending ? <p className="text-sm text-muted">正在加载应用…</p> : null}
+      {view === "library" && apps.isError ? (
           <div className="grid gap-3">
-            <p role="alert" className="text-sm text-danger">出错：{appErrorMessage(apps.error)}</p>
+            <p role="alert" className="break-words text-sm text-danger">出错：{appErrorMessage(apps.error)}</p>
             <button className={appGhostClass} type="button" onClick={() => void queryClient.invalidateQueries({ queryKey: ["admin-apps"] })}>重试</button>
           </div>
-        ) : (
+      ) : null}
+      {view === "library" && apps.data ? (
           <div className="grid gap-4">
             {publishNote ? (
               <div className="rounded-xl border border-line bg-surface p-3 text-sm">
@@ -217,14 +222,15 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
                 <button className={`${appGhostClass} mt-3`} type="button" onClick={() => setPublishNote(null)}>知道了</button>
               </div>
             ) : null}
-            <form role="search" onSubmit={(event) => event.preventDefault()}>
-              <label className="grid gap-1 text-sm" htmlFor="admin-app-search">
-                搜索应用
-                <input id="admin-app-search" data-testid="admin-app-search" className={appFieldClass} value={query} spellCheck={false} onChange={(event) => setQuery(event.target.value)} />
-              </label>
-            </form>
-            <div className="lg:grid lg:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)] lg:items-start lg:gap-6">
-              <div className={selected ? "max-lg:hidden" : ""}>
+            <div className="master-split">
+              <div className={selected ? "work-master has-detail" : "work-master"} ref={masterReturn.master} tabIndex={-1}>
+                <form role="search" className="master-tools" onSubmit={(event) => event.preventDefault()}>
+                  <label className="grid gap-1 text-sm" htmlFor="admin-app-search">
+                    搜索应用
+                    <input id="admin-app-search" data-testid="admin-app-search" className={appFieldClass} value={query} spellCheck={false} onChange={(event) => setQuery(event.target.value)} />
+                  </label>
+                  <p className="text-sm text-muted">共 {listed.length} 个</p>
+                </form>
                 {listed.length === 0 ? (
                   <div className="rounded-xl border border-line bg-surface px-4 py-8 text-sm text-secondary">
                     <p>{(apps.data?.apps.length ?? 0) === 0 ? "还没有应用。先上传插件包。" : "没有匹配的应用。"}</p>
@@ -235,16 +241,16 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
                     )}
                   </div>
                 ) : (
-                  <ul className="grid gap-2 lg:max-h-[calc(100dvh-12rem)] lg:overflow-auto" aria-label="应用库">
+                  <ul className="master-list" aria-label="应用库">
                     {listed.map((app) => (
                       <li key={app.id}>
                         <button
-                          className={`min-h-11 w-full rounded-xl border px-3 py-2 text-left ${selectedId === app.id ? "border-primary bg-active" : "border-line bg-surface hover:bg-hover"}`}
+                          className={`app-row min-h-11 w-full text-left ${selected?.id === app.id ? "is-selected border-primary bg-active" : "border-line bg-surface hover:bg-hover"}`}
                           type="button"
                           data-testid="admin-app-row"
                           data-admin-app-id={app.id}
-                          aria-pressed={selectedId === app.id}
-                          onClick={() => requestSelect(app.id)}
+                          aria-pressed={desktop ? selected?.id === app.id : undefined}
+                          onClick={(event) => requestSelect(app.id, event.currentTarget)}
                         >
                           <ScanRow
                             tone="dark"
@@ -260,7 +266,7 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
                   </ul>
                 )}
               </div>
-              <div className={!selected ? "max-lg:hidden" : "min-w-0"}>
+              <div className={selected ? "min-w-0" : "master-empty"}>
                 {selected ? (
                   <AppEditor
                     key={selected.id}
@@ -277,12 +283,11 @@ function AdminAppsBody({ csrf }: { csrf: string }) {
                     onForget={forgetPush}
                   />
                 ) : (
-                  <p className="hidden text-sm text-muted lg:block">请选择一个应用。</p>
+                  <p className="text-sm text-muted">{apps.data.apps.length === 0 ? "还没有应用。先上传插件包。" : "没有匹配的应用。"}</p>
                 )}
               </div>
             </div>
           </div>
-        )
       ) : null}
       {leave ? (
         <AppConfirmDialog
@@ -313,7 +318,7 @@ function AppEditor({
   users: Array<DirectoryUser & { id: string }>;
   usersError: string;
   pushes: PushView[];
-  onDirty: (dirty: boolean) => void;
+  onDirty: (id: string, dirty: boolean) => void;
   onClose: () => void;
   onChanged: () => Promise<void>;
   onPushed: (push: PushView) => void;
@@ -336,13 +341,14 @@ function AppEditor({
   const [notes, setNotes] = useState<Record<string, string>>({});
   const visibleIds = scope === "user" ? userIds : [];
   const visibilityDirty = scope !== savedScope || !sameSet(visibleIds, savedUsers);
-  const dirty = visibilityDirty || targets.length > 0 || forced || wake;
+  const notesDirty = active.some((version) => notes[version.id] !== undefined && notes[version.id] !== (version.importantNote ?? ""));
+  const dirty = visibilityDirty || targets.length > 0 || forced || wake || notesDirty;
   useEffect(() => {
-    onDirty(dirty);
-    return () => onDirty(false);
-  }, [dirty, onDirty]);
+    onDirty(app.id, dirty);
+    return () => onDirty(app.id, false);
+  }, [app.id, dirty, onDirty]);
   useEffect(() => {
-    if (window.matchMedia("(max-width: 1023px)").matches) headingRef.current?.focus();
+    if (!isWorkDesktop()) headingRef.current?.focus();
   }, []);
 
   async function saveVisibility() {
@@ -451,10 +457,10 @@ function AppEditor({
   }
 
   return (
-    <article className="grid gap-5 lg:max-h-[calc(100dvh-12rem)] lg:overflow-auto" aria-label="应用详情">
+    <article className="master-detail grid gap-5" aria-label="应用详情">
       <div>
-        <button className={`${appGhostClass} mb-3 lg:hidden`} type="button" onClick={onClose}>返回</button>
-        <h2 ref={headingRef} tabIndex={-1} className="break-all text-xl font-semibold outline-none">{app.name}</h2>
+        <button className={`${appGhostClass} master-back mb-3`} type="button" onClick={onClose}>返回</button>
+        <h2 ref={headingRef} tabIndex={-1} className="break-all text-xl font-semibold">{app.name}</h2>
         <p className="mt-1 text-sm text-muted" data-testid={app.source === "user" ? "admin-user-source" : undefined}>{app.source === "user" ? `用户来源 · 所有者 ${app.ownerName ?? "未知"}` : `${visibilityText(app.visibility)}${dirty ? " · 未保存" : ""}`}</p>
       </div>
       <section className="grid gap-3" aria-label="版本">

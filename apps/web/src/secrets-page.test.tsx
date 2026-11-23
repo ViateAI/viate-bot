@@ -60,6 +60,26 @@ describe("secret page", () => {
     expect(html.indexOf("alpha")).toBeLessThan(html.indexOf("zeta"));
   });
 
+  it("keeps the create form closed until asked when secrets already exist", () => {
+    const html = page({
+      secrets: [{ name: "alpha", updatedAt: "2026-11-21T04:05:06.000Z" }],
+    });
+    expect(html).toContain("新增密钥");
+    expect(html).toContain("{{secret:alpha}}");
+    expect(html).toContain(SECRET_UPDATE_NOTE);
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain("密钥名");
+    expect(html).toContain("work-page");
+    expect(html).not.toContain("mx-auto");
+  });
+
+  it("keeps the create form available on an empty secret list", () => {
+    const html = page({ secrets: [] });
+    expect(html).toContain("还没有保存的密钥");
+    expect(html).toContain("新增密钥");
+    expect(html).toContain("密钥名");
+  });
+
   it("states what update and delete will do", () => {
     expect(SECRET_UPDATE_NOTE).toBe("保存后会覆盖旧值；正在运行的任务不受影响，下次启动应用或新任务时生效");
     const dialog = renderToStaticMarkup(

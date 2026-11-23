@@ -13,6 +13,7 @@ import { BotSidebar } from "./bots.js";
 import { ChatPage } from "./chat.js";
 import { initials } from "./presence.js";
 import { useTheme } from "./theme.js";
+import { workPageFrame } from "./work-layout.js";
 
 const ShellUI = createContext<{ openDrawer: () => void }>({ openDrawer: () => {} });
 
@@ -191,6 +192,7 @@ function Shell() {
   const showRoster = workspace && Boolean(me.data);
   const showAdminNav = admin && Boolean(me.data?.isAdmin);
   const shellClass = showAdminNav ? "shell-admin" : showRoster ? "shell-user" : "shell-stage";
+  const authFrame = workPageFrame(pathname) ?? "px-6 py-10";
 
   return (
     <ShellUI.Provider value={{ openDrawer }}>
@@ -247,8 +249,8 @@ function Shell() {
             </div>
           ) : null}
           <div className="stage-fill">
-            {me.isPending ? <p className="px-6 py-10 text-muted">正在确认登录…</p> : null}
-            {me.isError ? <p className="px-6 py-10 text-muted">需要登录。</p> : null}
+            {me.isPending ? <p className={`${authFrame} text-muted`}>正在确认登录…</p> : null}
+            {me.isError ? <p className={`${authFrame} text-muted`}>需要登录。</p> : null}
             {me.data ? <Outlet /> : null}
           </div>
         </div>

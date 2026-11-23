@@ -7,6 +7,7 @@ import { chromium, type Browser, type BrowserContext, type Locator, type Page } 
 import { solidPng } from "./fake-model.js";
 import { hostResolverRules } from "./hosts.js";
 import { ignoreHTTPSErrors, type LoginModule } from "./login.js";
+import { checkWorkLayout } from "./work-layout.js";
 
 const TASK_TIMEOUT_MS = 45_000;
 const paceRaw = process.env.VB_E2E_PACE_MS;
@@ -36,6 +37,7 @@ export async function runSuite(): Promise<void> {
   // The login adapter is selected at runtime by VB_E2E_LOGIN_MODULE.
   const login = (await import(pathToFileURL(resolve(process.env.INIT_CWD || process.cwd(), loginPath)).href)) as LoginModule;
   try {
+    if (local) await checkWorkLayout(browser, baseURL);
     const adminState = await login.login({ browser, baseURL, role: "admin" });
     const userState = await login.login({ browser, baseURL, role: "user" });
     const ignoreCertErrors = ignoreHTTPSErrors();
