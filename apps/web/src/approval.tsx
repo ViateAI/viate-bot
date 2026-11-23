@@ -42,7 +42,7 @@ const alertClass = "ui-alert";
 const detailClass = "grid min-w-0 gap-1 [overflow-wrap:anywhere]";
 const preClass = "pre-scroll max-h-40 whitespace-pre-wrap break-all p-2 text-xs";
 
-export function ApprovalList({ taskId }: { taskId?: string }) {
+export function ApprovalList({ taskId, headingLevel = "h3" }: { taskId?: string; headingLevel?: "h2" | "h3" }) {
   const client = useQueryClient();
   const approvals = useQuery({ queryKey: ["approvals"], queryFn: () => api<{ approvals: Approval[] }>("/api/approvals"), refetchInterval: 3000 });
   const decide = useMutation({
@@ -64,6 +64,7 @@ export function ApprovalList({ taskId }: { taskId?: string }) {
           key={item.id}
           item={item}
           pending={decide.isPending}
+          headingLevel={headingLevel}
           onDecide={(decision) => decide.mutate({ id: item.id, decision })}
         />
       ))}
@@ -71,8 +72,9 @@ export function ApprovalList({ taskId }: { taskId?: string }) {
   </>;
 }
 
-export function ApprovalCard({ item, pending, onDecide }: { item: Approval; pending: boolean; onDecide: (decision: "allow" | "deny") => void }) {
+export function ApprovalCard({ item, pending, onDecide, headingLevel = "h3" }: { item: Approval; pending: boolean; onDecide: (decision: "allow" | "deny") => void; headingLevel?: "h2" | "h3" }) {
   const view = approvalView(item);
+  const Title = headingLevel;
   const allowDisabled = pending || (item.tool === "install_mcp" && !installCard(item.summary)) || (item.tool === "request_app_publish" && !publishCard(item.summary));
   const grantClass = view.details
     ? "col-span-2 col-start-1 row-start-3 min-w-0 font-medium [overflow-wrap:anywhere] *:min-w-0 *:[overflow-wrap:anywhere] [&_*]:min-w-0 [&_*]:[overflow-wrap:anywhere] @min-[40rem]:col-span-1"
@@ -83,7 +85,7 @@ export function ApprovalCard({ item, pending, onDecide }: { item: Approval; pend
   return (
     <article data-testid="approval-item" className={`decide ${approvalTone(item)} @container min-w-0 p-3 text-sm`}>
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_5.5rem] items-start gap-x-3 gap-y-2 @min-[40rem]:grid-cols-[minmax(0,1fr)_5.5rem_minmax(0,18rem)]">
-        <h3 className="col-start-1 row-start-1 min-w-0 font-medium [overflow-wrap:anywhere]" data-testid={item.tool === "install_mcp" && installCard(item.summary) ? "install-title" : undefined}>{view.title}</h3>
+        <Title className="col-start-1 row-start-1 min-w-0 font-medium [overflow-wrap:anywhere]" data-testid={item.tool === "install_mcp" && installCard(item.summary) ? "install-title" : undefined}>{view.title}</Title>
         <p className="col-start-2 row-start-1 text-right font-medium text-amber-fg">待批准</p>
         {view.details ? <div className="col-span-2 col-start-1 row-start-2 min-w-0 text-secondary @min-[40rem]:col-span-1">{view.details}</div> : null}
         <div className={grantClass} data-testid="approval-grant">{view.grant}</div>
@@ -414,7 +416,7 @@ export function Approvals() {
       <h1 className="text-2xl font-semibold">待批准操作</h1>
     </div>
     <div className="work-approvals grid max-w-4xl gap-3">
-      <ApprovalList />
+      <ApprovalList headingLevel="h2" />
     </div>
   </section>;
 }

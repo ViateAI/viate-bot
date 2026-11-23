@@ -290,6 +290,121 @@ const cases = {
     for (const action of await card.getByRole("button").all()) assert.ok((await action.boundingBox())!.height >= 44);
     await noOverflow(page);
   },
+
+  async "mobile user cards keep a long email readable without scrolling or overlapping status"(page: Page, baseURL: string) {
+    await fixtures(page);
+    await page.route("**/api/admin/machines", (route) => route.fulfill({ json: { machines: [] } }));
+    const email = `${"long-account-name-".repeat(3)}@example.com`;
+    await page.route("**/api/admin/users", (route) => route.fulfill({ json: {
+      users: [{ id: "u1", email, name: "Ada", status: "active", provisioned: true, botCount: 1, tasks7d: 0 }],
+    } }));
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto(`${baseURL}/admin`);
+    const row = page.getByTestId("user-row");
+    await visible(row);
+    assert.equal(await row.evaluate((el) => {
+      const cell = el.firstElementChild!;
+      const status = el.children[2]!;
+      const container = el.closest("table")!.parentElement!;
+      const range = document.createRange();
+      range.selectNodeContents(cell);
+      const cellRect = cell.getBoundingClientRect();
+      const statusRect = status.getBoundingClientRect();
+      return container.scrollWidth === container.clientWidth && [...range.getClientRects()].every((line) =>
+        line.right <= cellRect.right + 1 && (line.right <= statusRect.left + 1 || line.bottom <= statusRect.top + 1));
+    }), true, "长邮箱不得溢出卡片或遮挡状态");
+    await visible(row.getByRole("cell", { name: email, exact: true }));
+    await visible(row.getByTestId("quota-editor"));
+    await noOverflow(page);
+  },
+
+  async "chat tables wrap prose but scroll many columns and long code locally"(page: Page, baseURL: string) {
+    await fixtures(page);
+    const longCell = "这是一段需要自然换行才能读完的正文说明".repeat(3);
+    const shortCells = Array.from({ length: 8 }, () => "简短内容");
+    const tablesMarkdown = [
+      [["名称", "说明", "编号"], ["普通条目", longCell, "一"]],
+      [shortCells, shortCells],
+    ].map(([headers, row]) => [headers!, headers!.map(() => "---"), row!].map((columns) => `| ${columns.join(" | ")} |`).join("\n"));
+    const text = [...tablesMarkdown,
+      "行内 `example` 保持行内。", "```\nconst sample = '" + "abcdef0123456789".repeat(10) + "';\n```"].join("\n\n");
+    const bot = { id: "b1", name: "通用", bio: "", instructions: "", avatar: null, model: "test", primary: true };
+    await page.route("**/api/bots", (route) => route.fulfill({ json: { bots: [bot] } }));
+    await page.route("**/api/bots/b1", (route) => route.fulfill({ json: { bot } }));
+    await page.route("**/api/bots/b1/conversations", (route) => route.fulfill({ json: { conversations: [{ id: "c1" }] } }));
+    await page.route("**/api/bots/b1/routines", (route) => route.fulfill({ json: { routines: [] } }));
+    await page.route("**/api/bots/b1/approval-rules", (route) => route.fulfill({ json: { rules: [] } }));
+    await page.route("**/api/conversations/c1/tasks", (route) => route.fulfill({ json: { tasks: [] } }));
+    await page.route("**/api/conversations/c1/messages", (route) => route.fulfill({ json: {
+      messages: [{ id: "a1", role: "assistant", text, taskId: null, createdAt: stamp }],
+    } }));
+    await page.goto(`${baseURL}/b/b1`);
+    const prose = page.getByRole("cell", { name: longCell, exact: true });
+    await visible(prose);
+    assert.equal(await prose.evaluate((cell) => {
+      const wrap = cell.closest("table")!.parentElement!;
+      const range = document.createRange();
+      range.selectNodeContents(cell);
+      return wrap.scrollWidth === wrap.clientWidth && range.getClientRects().length > 1;
+    }), true, "普通三列表格的长说明应自然换行，不应强制整表横滚");
+    await page.setViewportSize({ width: 375, height: 812 });
+    const tables = page.getByRole("table");
+    assert.equal(await tables.count(), 2);
+    assert.equal(await tables.nth(1).evaluate((el) => {
+      const wrap = el.parentElement!;
+      return wrap.scrollWidth > wrap.clientWidth && getComputedStyle(wrap).overflowX === "auto";
+    }), true, "宽表格应在消息内局部横滚");
+    assert.equal(await page.locator(".prose-msg pre").evaluate((pre) => {
+      const code = pre.querySelector("code")!;
+      return pre.scrollWidth > pre.clientWidth && getComputedStyle(pre).overflowX === "auto" &&
+        getComputedStyle(code).whiteSpace === "pre" && getComputedStyle(code).overflowX === "visible";
+    }), true, "长代码由 pre 而非 code 承载滚动");
+    assert.equal(await page.locator(".prose-msg p code").evaluate((el) => getComputedStyle(el).display), "inline");
+    await noOverflow(page);
+  },
+
+  async "machine delete clears confirmation after success and after the selected row disappears"(page: Page, baseURL: string) {
+    await fixtures(page);
+    const machine = (id: string, email: string) => ({ id, email, state: "running", spec: { cpu: 1, memMb: 1024, diskGb: 10 }, image: "test-machine", createdAt: stamp });
+    const first = machine("first", "ada@example.com");
+    const second = machine("second", "bea@example.com");
+    let listed = [first, second];
+    let audits = 0;
+    await page.route("**/api/admin/machines", (route) => route.fulfill({ json: { machines: listed } }));
+    await page.route("**/api/admin/machines/*/*", (route) => route.fulfill({ json: {} }));
+    await page.route("**/api/admin/audit**", (route) => { audits++; return route.fulfill({ json: { audit: [] } }); });
+    await page.goto(`${baseURL}/admin/machines`);
+    const target = page.getByTestId("machine-row").filter({ hasText: first.email });
+    const other = page.getByTestId("machine-row").filter({ hasText: second.email });
+    const confirmation = page.getByTestId("machine-delete-email");
+    await visible(target);
+    assert.equal(await confirmation.count(), 0);
+    assert.equal(await page.getByRole("link", { name: "查看审计日志" }).getAttribute("href"), "/admin/audit");
+    await target.getByTestId("machine-delete").click();
+    await visible(target.getByText(`删除 ${first.email} 的机器`, { exact: true }));
+    await confirmation.fill(first.email);
+    await target.getByRole("button", { name: "取消", exact: true }).click();
+    assert.equal(await confirmation.count(), 0);
+    await target.getByTestId("machine-delete").click();
+    assert.equal(await confirmation.inputValue(), "");
+    await confirmation.fill(first.email);
+    const deleted = page.waitForRequest("**/api/admin/machines/first/delete");
+    await target.getByTestId("machine-delete-submit").click();
+    assert.deepEqual((await deleted).postDataJSON(), { email: first.email });
+    // The read model can still contain the row on the first refresh.
+    await confirmation.waitFor({ state: "detached" });
+    await visible(target);
+    await target.getByTestId("machine-delete").click();
+    await confirmation.fill(first.email);
+    listed = [second];
+    await other.getByTestId("machine-stop").click();
+    await target.waitFor({ state: "detached" });
+    listed = [first, second];
+    await other.getByTestId("machine-start").click();
+    await visible(target);
+    assert.equal(await confirmation.count(), 0, "旧目标短暂消失后不能重新打开删除确认");
+    assert.equal(audits, 0, "机器页不请求不再展示的审计列表");
+  },
 };
 
 export async function checkWorkLayout(browser: Browser, baseURL: string): Promise<void> {

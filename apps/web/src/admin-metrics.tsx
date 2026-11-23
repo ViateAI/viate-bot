@@ -59,7 +59,7 @@ export function AdminMetrics() {
           </dl>
           {punctual ? (
             <div data-testid="routine-punctuality">
-              <h3 className="mb-2 text-sm text-muted">定时任务按时率（近 7 天）</h3>
+              <h2 className="mb-2 text-sm text-muted">定时任务按时率（近 7 天）</h2>
               <dl className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
                 <Stat label="按时率" value={punctualRate} />
                 <Stat label="计划次数" value={String(punctual.planned)} />
@@ -73,23 +73,23 @@ export function AdminMetrics() {
           ) : null}
           <div className="grid gap-4 md:grid-cols-2">
             <section className={`rounded-xl border p-4 ${data.anomalies.length > 0 ? "border-danger-border bg-danger-bg" : "border-line bg-surface"}`}>
-              <h3 className={`mb-2 text-sm ${data.anomalies.length > 0 ? "text-danger" : "text-muted"}`}>资源异常</h3>
+              <h2 className={`mb-2 text-sm ${data.anomalies.length > 0 ? "text-danger" : "text-muted"}`}>资源异常</h2>
               <ul className="grid gap-1 text-sm">
                 {data.anomalies.length === 0 ? <li className="text-muted">没有</li> : null}
                 {data.anomalies.map((item) => (
                   <li key={`${item.machineId}-${item.kind}`}>
-                    <ScanRow tone="dark" subject={item.machineId} status={item.kind} />
+                    <ScanRow tone="dark" subject={<IdText value={item.machineId} />} status={anomalyLabel[item.kind]} />
                   </li>
                 ))}
               </ul>
             </section>
             <section className={`rounded-xl border p-4 ${data.alerts.length > 0 ? "border-danger-border bg-danger-bg" : "border-line bg-surface"}`}>
-              <h3 className={`mb-2 text-sm ${data.alerts.length > 0 ? "text-danger" : "text-muted"}`}>站内告警</h3>
+              <h2 className={`mb-2 text-sm ${data.alerts.length > 0 ? "text-danger" : "text-muted"}`}>站内告警</h2>
               <ul className="grid gap-1 text-sm">
                 {data.alerts.length === 0 ? <li className="text-muted">没有</li> : null}
                 {data.alerts.map((item) => (
                   <li key={`${item.kind}-${item.target}`}>
-                    <ScanRow tone="dark" subject={item.target} status={item.kind} />
+                    <ScanRow tone="dark" subject={<IdText value={item.target} />} status={alertLabel[item.kind]} />
                   </li>
                 ))}
               </ul>
@@ -97,7 +97,7 @@ export function AdminMetrics() {
           </div>
           <div className="grid gap-4 md:grid-cols-2">
             <section className="rounded-xl border border-line bg-surface p-4">
-              <h3 className="mb-2 text-sm text-muted">失败类别</h3>
+              <h2 className="mb-2 text-sm text-muted">失败类别</h2>
               <ul className="grid gap-1 text-sm">
                 {data.failureClasses.length === 0 ? <li className="text-muted">没有</li> : null}
                 {data.failureClasses.map((item) => (
@@ -108,7 +108,7 @@ export function AdminMetrics() {
               </ul>
             </section>
             <section className="rounded-xl border border-line bg-surface p-4">
-              <h3 className="mb-2 text-sm text-muted">活跃趋势</h3>
+              <h2 className="mb-2 text-sm text-muted">活跃趋势</h2>
               <ul className="grid gap-1 text-sm">
                 {data.activeTrend.map((item) => (
                   <li key={item.day}>
@@ -155,4 +155,12 @@ function Stat(props: { label: string; value: string }) {
       <dd className="mt-1 text-2xl font-semibold tabular-nums">{props.value}</dd>
     </div>
   );
+}
+
+const anomalyLabel = { heartbeat: "心跳", disk: "磁盘", error: "异常" } as const;
+const alertLabel = { machine: "机器", routine: "定时任务" } as const;
+
+function IdText({ value }: { value: string }) {
+  if (!/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/i.test(value)) return value;
+  return <span title={value}>{`${value.slice(0, 6)}…${value.slice(-4)}`}</span>;
 }

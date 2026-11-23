@@ -117,4 +117,37 @@ describe("markdown replies", () => {
     expect(usesMarkdown("user", false)).toBe(false);
     expect(usesMarkdown("toolResult", false)).toBe(false);
   });
+
+  it("scrolls wide tables and long code lines inside the message", () => {
+    const html = renderToStaticMarkup(
+      <MarkdownView
+        text={[
+          "| 周会 | 纪要 |",
+          "| --- | --- |",
+          "| 密钥 | 轮换 |",
+          "",
+          "```",
+          "const token = \"abcdefghijklmnopqrstuvwxyz0123456789\";",
+          "```",
+        ].join("\n")}
+      />,
+    );
+    const table = html.match(/<table[^>]*>/)?.[0] ?? "";
+    expect(table).toContain("w-max");
+    expect(table).toContain("min-w-full");
+    expect(table.split(/[\s"]+/)).not.toContain("w-full");
+    expect(html).toContain('class="table-wrap my-2 min-w-0 max-w-full"');
+    expect(html.match(/<th\s[^>]*>/)?.[0]).toContain("whitespace-nowrap");
+    const pre = html.match(/<pre[^>]*>/)?.[0] ?? "";
+    expect(pre).toContain("overflow-x-auto");
+    expect(pre).toContain("max-w-full");
+    expect(pre).toContain("whitespace-pre");
+    expect(pre).toContain("break-normal");
+    const blockCode = html.slice(html.indexOf("<pre")).match(/<code[^>]*>/)?.[0] ?? "";
+    expect(blockCode).toContain("inline-block");
+    expect(blockCode).toContain("min-w-full");
+    expect(blockCode).toContain("whitespace-pre");
+    expect(blockCode).toContain("break-normal");
+    expect(blockCode).not.toContain("overflow-x-auto");
+  });
 });

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { readQuotaForm } from "./quota-input.js";
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { api, type Me } from "./api.js";
 import { ScanRow } from "./scan-row.js";
 import { workPageFrame } from "./work-layout.js";
@@ -45,13 +45,6 @@ interface AdminMachine {
   createdAt: string;
   lastHeartbeatAt: string | null;
   statusDetail?: string | null;
-}
-
-interface AuditRow {
-  id: string;
-  ts: string;
-  action: string;
-  target: string;
 }
 
 const field = "ui-field";
@@ -338,8 +331,7 @@ export function AdminUsers() {
       {users.isPending ? <p className="text-sm text-muted">正在加载用户…</p> : null}
       {users.isError ? <p role="alert" className={alertClass}>{users.error.message}</p> : null}
       {users.data && users.data.users.length === 0 ? <p className="text-sm text-muted">没有用户</p> : null}
-      <div className="@container relative min-w-0 overflow-x-auto rounded-xl border border-line bg-canvas">
-        <style>{".vb-user-label{display:block;font-size:.75rem;line-height:1.25rem}.vb-user-table{display:block;width:100%}.vb-user-table thead{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.vb-user-table tbody{display:block}.vb-user-table tbody tr{display:grid;grid-template-columns:minmax(0,1fr) 5.5rem;column-gap:.75rem;row-gap:.25rem;padding:.75rem 0}.vb-user-table td:nth-child(1){grid-column:1;grid-row:1;min-width:0;overflow-wrap:anywhere}.vb-user-table td:nth-child(3){grid-column:2;grid-row:1;text-align:right}.vb-user-table td:nth-child(n+2):not(:nth-child(3)){grid-column:1 / -1;min-width:0;overflow-wrap:anywhere}@container (min-width: 52rem){.vb-user-label{display:none}.vb-user-table{display:table;width:100%;max-width:100%;table-layout:fixed}.vb-user-table thead{position:static;display:table-header-group;width:auto;height:auto;margin:0;overflow:visible;clip:auto;white-space:normal}.vb-user-table tbody{display:table-row-group}.vb-user-table thead tr,.vb-user-table tbody tr{display:table-row;padding:0}.vb-user-table th,.vb-user-table td{display:table-cell;text-align:left;vertical-align:top;padding:.5rem .75rem .5rem 0;overflow-wrap:anywhere}.vb-user-table th:nth-child(n+2),.vb-user-table td:nth-child(n+2){padding-left:.75rem}.vb-user-table th:nth-child(2),.vb-user-table td:nth-child(2){width:4.5rem}.vb-user-table th:nth-child(3),.vb-user-table td:nth-child(3){width:5.75rem}.vb-user-table th:nth-child(4),.vb-user-table td:nth-child(4){width:5rem}.vb-user-table th:nth-child(5),.vb-user-table td:nth-child(5){width:6rem;white-space:nowrap}.vb-user-table th:nth-child(6),.vb-user-table td:nth-child(6){width:3.5rem}.vb-user-table th:nth-child(7),.vb-user-table td:nth-child(7){width:8.25rem;white-space:nowrap}.vb-user-table th:nth-child(8),.vb-user-table td:nth-child(8){width:19rem}}"}</style>
+      <div className="@container relative min-w-0 overflow-x-auto rounded-xl border border-line bg-canvas p-3">
         <table className="vb-user-table text-left text-sm">
           <thead className="bg-surface text-muted">
             <tr>
@@ -444,21 +436,24 @@ function QuotaEditor({
   );
 }
 
-export function AdminMachines() {
+export function AdminMachines({ initialDeleteId = "" }: { initialDeleteId?: string } = {}) {
   const queryClient = useQueryClient();
   const machines = useQuery({ queryKey: ["admin-machines"], queryFn: () => api<{ machines: AdminMachine[] }>("/api/admin/machines") });
-  const audit = useQuery({ queryKey: ["admin-audit"], queryFn: () => api<{ audit: AuditRow[] }>("/api/admin/audit") });
-  const [email, setEmail] = useState("");
-  const [target, setTarget] = useState("");
+  const [confirmation, setConfirmation] = useState(initialDeleteId ? { id: initialDeleteId, email: "" } : null);
   const [error, setError] = useState("");
   const [stats, setStats] = useState("");
+  useEffect(() => {
+    const listed = machines.data?.machines;
+    if (listed) setConfirmation((current) => current && !listed.some((item) => item.id === current.id) ? null : current);
+  }, [machines.data]);
   const run = useMutation({
     mutationFn: (input: { id: string; action: string; body?: unknown }) =>
       api(`/api/admin/machines/${input.id}/${input.action}`, {
         method: "POST",
         ...(input.body ? { body: JSON.stringify(input.body) } : { body: "{}" }),
       }),
-    onSuccess: async () => {
+    onSuccess: async (_, { id, action }) => {
+      if (action === "delete") setConfirmation((current) => current?.id === id ? null : current);
       setError("");
       await queryClient.invalidateQueries({ queryKey: ["admin-machines"] });
       await queryClient.invalidateQueries({ queryKey: ["admin-audit"] });
@@ -471,14 +466,15 @@ export function AdminMachines() {
 
   function onDelete(event: FormEvent) {
     event.preventDefault();
-    if (!target) return;
-    run.mutate({ id: target, action: "delete", body: { email } });
+    if (!confirmation) return;
+    run.mutate({ id: confirmation.id, action: "delete", body: { email: confirmation.email } });
   }
 
   return (
     <div className="work-page grid min-w-0 gap-6">
       <div className="work-head">
         <h1 className="text-2xl font-semibold">机器</h1>
+        <Link to="/admin/audit" className="text-sm text-primary">查看审计日志</Link>
       </div>
       {machines.isPending ? <p className="text-sm text-muted">正在加载机器…</p> : null}
       {machines.isError ? <p role="alert" className={alertClass}>{machines.error.message}</p> : null}
@@ -496,7 +492,7 @@ export function AdminMachines() {
                 <button data-testid="machine-start" className={machineButton} type="button" onClick={() => run.mutate({ id: machine.id, action: "start" })}>启动</button>
                 <button className={machineButton} type="button" onClick={() => run.mutate({ id: machine.id, action: "restart" })}>重启</button>
                 <button className={machineButton} type="button" onClick={() => run.mutate({ id: machine.id, action: "rebuild" })}>重建</button>
-                <button data-testid="machine-delete" className={machineButton} type="button" onClick={() => setTarget(machine.id)}>删除</button>
+                <button data-testid="machine-delete" className={machineButton} type="button" onClick={() => setConfirmation({ id: machine.id, email: "" })}>删除</button>
                 <button
                   data-testid={`machine-stats-${machine.id}`}
                   className={machineButton}
@@ -511,29 +507,24 @@ export function AdminMachines() {
                 </button>
               </>}
             />
+            {confirmation?.id === machine.id ? (
+              <form className="mb-3 grid max-w-xl gap-3 rounded-xl border border-danger-border bg-danger-bg p-4" onSubmit={onDelete}>
+                <p className="text-sm font-medium text-danger">删除 {machine.email} 的机器</p>
+                <label className="grid gap-1 text-sm">
+                  确认邮箱
+                  <input data-testid="machine-delete-email" className={field} value={confirmation.email} onChange={(event) => setConfirmation({ id: machine.id, email: event.target.value })} />
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  <button data-testid="machine-delete-submit" className="ui-btn-danger" type="submit">确认删除</button>
+                  <button className={machineButton} type="button" onClick={() => setConfirmation(null)}>取消</button>
+                </div>
+              </form>
+            ) : null}
           </li>
         ))}
       </ul>
-      <form className="grid max-w-xl gap-3 rounded-xl border border-line bg-surface p-4" onSubmit={onDelete}>
-        <h2 className="text-sm font-medium text-danger">删除机器</h2>
-        <label className="grid gap-1 text-sm">
-          确认邮箱
-          <input data-testid="machine-delete-email" className={field} value={email} onChange={(event) => setEmail(event.target.value)} />
-        </label>
-        <button data-testid="machine-delete-submit" className={button} type="submit">确认删除</button>
-      </form>
       {error ? <p data-testid="machine-delete-error" className="text-sm text-danger">{error}</p> : null}
       {stats ? <p data-testid="machine-stats">{stats}</p> : null}
-      <section className="rounded-xl border border-line bg-surface p-4">
-        <h2 className="text-lg font-medium">审计</h2>
-        {audit.isPending ? <p className="text-sm text-muted">正在加载审计…</p> : null}
-        {audit.isError ? <p role="alert" className={alertClass}>{audit.error.message}</p> : null}
-        <ul data-testid="audit-log" className="text-sm">
-          {(audit.data?.audit ?? []).map((row) => (
-            <li key={row.id}><ScanRow tone="dark" subject={row.action} meta={`${row.ts} · ${row.target}`} /></li>
-          ))}
-        </ul>
-      </section>
     </div>
   );
 }
@@ -607,12 +598,12 @@ export function AdminTemplates() {
           create.mutate();
         }}
       >
-        <input data-testid="template-name" className={field} placeholder="名字" value={name} onChange={(event) => setName(event.target.value)} required />
-        <input className={field} placeholder="说明" value={description} onChange={(event) => setDescription(event.target.value)} />
-        <textarea className={field} placeholder="指令" value={instructions} onChange={(event) => setInstructions(event.target.value)} />
-        <input className={field} placeholder="默认模型" value={defaultModel} onChange={(event) => setDefaultModel(event.target.value)} />
-        <input className={field} placeholder="欢迎消息" value={welcome} onChange={(event) => setWelcome(event.target.value)} />
-        <textarea className={field} placeholder="初始记忆，一行一条" value={initialMemories} onChange={(event) => setInitialMemories(event.target.value)} />
+        <label className="grid gap-1 text-sm">名字 <input data-testid="template-name" className={field} value={name} onChange={(event) => setName(event.target.value)} required /></label>
+        <label className="grid gap-1 text-sm">说明 <input className={field} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+        <label className="grid gap-1 text-sm">指令 <textarea className={field} value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label>
+        <label className="grid gap-1 text-sm">默认模型 <input className={field} value={defaultModel} onChange={(event) => setDefaultModel(event.target.value)} /></label>
+        <label className="grid gap-1 text-sm">欢迎消息 <input className={field} value={welcome} onChange={(event) => setWelcome(event.target.value)} /></label>
+        <label className="grid gap-1 text-sm">初始记忆 <textarea className={field} placeholder="一行一条" value={initialMemories} onChange={(event) => setInitialMemories(event.target.value)} /></label>
         <button className={button} type="submit">添加模板</button>
       </form>
       </div>
@@ -724,7 +715,7 @@ export function AdminSettings() {
             saveConfine.mutate(enabled);
           }}
         />
-        <span>目录限制，默认开启。打开时文件工具和 shell 工作目录按白名单和黑名单限制；白名单留空则只能用 /home/bot 和 /tmp。关闭后可以访问容器内 bot 用户读得到的路径。shell 命令正文两种情况下都不按目录拦截。</span>
+        <span>目录限制默认开启，约束文件工具和 shell 工作目录。白名单留空时仅允许 /home/bot 和 /tmp；黑名单优先。关闭后仅受容器内 bot 用户的权限限制。shell 正文不按目录拦截。</span>
       </label>
       {confineOn ? (
         <div className="grid gap-3">
@@ -896,7 +887,7 @@ function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { c
       </div>
       <div className="grid gap-3 rounded-xl border border-line bg-surface p-4">
         <h2 className="text-sm font-medium">模型上下文覆盖</h2>
-        <p className="text-sm text-muted">未单独设置的模型使用环境默认值：上下文 {defaults?.contextTokens ?? ""}，单次输出 {defaults?.maxTokens ?? ""}。只影响之后开始的任务。输出上限不能超过上下文窗口。</p>
+        <p className="text-sm text-muted">未单独设置时沿用环境默认值：上下文 {defaults?.contextTokens ?? ""}，单次输出 {defaults?.maxTokens ?? ""}。只影响之后开始的任务，且输出不能超过上下文。</p>
       <ul className="grid gap-1 text-sm">
         {Object.entries(settings?.modelLimits ?? {}).map(([name, limit]) => (
           <li key={name}>{name}：上下文 {limit.contextTokens}，输出 {limit.maxTokens}</li>
@@ -904,10 +895,10 @@ function ModelLimits({ settings }: { settings: { modelLimits: Record<string, { c
         {Object.keys(settings?.modelLimits ?? {}).length === 0 ? <li className="text-muted">还没有单独设置</li> : null}
       </ul>
       <form className="grid gap-2 md:grid-cols-4" onSubmit={(event) => { event.preventDefault(); save.mutate(false); }}>
-        <input data-testid="model-limit-name" list="known-models" className={field} placeholder="模型 ID" value={model} onChange={(event) => setModel(event.target.value)} required />
+        <label className="grid gap-1 text-sm">模型 ID <input data-testid="model-limit-name" list="known-models" className={field} value={model} onChange={(event) => setModel(event.target.value)} required /></label>
         <datalist id="known-models">{(settings?.models ?? []).map((name) => <option key={name} value={name} />)}</datalist>
-        <input data-testid="model-context" className={field} placeholder="上下文窗口" value={contextTokens} onChange={(event) => setContextTokens(event.target.value)} required />
-        <input data-testid="model-output" className={field} placeholder="单次输出上限" value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} required />
+        <label className="grid gap-1 text-sm">上下文窗口 <input data-testid="model-context" className={field} value={contextTokens} onChange={(event) => setContextTokens(event.target.value)} required /></label>
+        <label className="grid gap-1 text-sm">单次输出上限 <input data-testid="model-output" className={field} value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} required /></label>
         <button className={button} type="submit">保存</button>
       </form>
       {error ? <p className="text-sm text-danger">{error}</p> : null}

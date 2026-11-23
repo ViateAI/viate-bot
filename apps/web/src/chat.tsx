@@ -639,7 +639,7 @@ function ProfilePanel({
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
             <h2 className="truncate text-base font-semibold">{name}</h2>
-            {primary ? <span data-testid="primary-bot" className="shrink-0 rounded bg-active px-1.5 py-0.5 text-[10px] font-medium text-primary">主 bot</span> : null}
+            {primary ? <span data-testid="primary-bot" className="shrink-0 rounded bg-active px-1.5 py-0.5 text-[11px] font-medium text-primary">主 bot</span> : null}
           </div>
           <p className="mt-0.5 truncate text-xs text-muted">{[model, status].filter((item) => item.length > 0).join(" · ")}</p>
           {bio ? <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{bio}</p> : null}
@@ -689,7 +689,7 @@ function ProfilePanel({
                   <details className="rounded-2xl bg-surface px-3 py-2 text-sm">
                     <summary className={`cursor-pointer break-all ${step.kind === "compact" ? "text-muted" : ""}`}>
                       {stepTitle(step)}
-                      {step.kind === "compact" ? "" : ` · ${step.status}`}
+                      {step.kind === "compact" ? "" : ` · ${stepStatusText(step.status)}`}
                     </summary>
                     <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs text-secondary">{stepBody(step)}</pre>
                   </details>
@@ -947,6 +947,32 @@ function stepTitle(step: Step): string {
   if (step.kind === "mcp") return mcpTitle(step);
   if (step.kind === "tool") return toolTitle(step);
   return "模型";
+}
+
+function stepStatusText(status: string): string {
+  switch (status) {
+    case "running":
+      return "执行中";
+    case "succeeded":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "cancelled":
+      return "已停止";
+    case "interrupted":
+      return "已中断";
+    case "waiting_approval":
+      return "等待批准";
+    case "waiting_input":
+      return "等待输入";
+    case "waiting_takeover":
+      return "等待接管";
+    case "pending":
+    case "queued":
+      return "排队中";
+    default:
+      return status;
+  }
 }
 
 function mcpTitle(step: Step): string {
