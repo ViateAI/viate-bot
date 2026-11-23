@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/ViateAI/viate-bot/compare/v0.2.0...v0.2.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* deliver app update notices only to a ready primary bot ([#3](https://github.com/ViateAI/viate-bot/issues/3)) ([5448de2](https://github.com/ViateAI/viate-bot/commit/5448de232c2bec55618a9e43d4483caf7a650de4))
+* harden S3 upload storage switching, cleanup and endpoint handling ([#4](https://github.com/ViateAI/viate-bot/issues/4)) ([d8b06b6](https://github.com/ViateAI/viate-bot/commit/d8b06b62fd036f638894daf89a33bc0626a6f006))
+
 ## [0.2.0](https://github.com/ViateAI/viate-bot/compare/v0.1.0...v0.2.0) (2026-11-22)
 
 
