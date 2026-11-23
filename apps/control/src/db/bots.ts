@@ -12,6 +12,7 @@ export interface BotRecord {
   model: string;
   instructions: string;
   modelCredentialId: string | null;
+  noticeReady: boolean;
   updatedAt: string;
 }
 
@@ -21,6 +22,7 @@ export interface BotDraft {
   model: string;
   instructions?: string;
   modelCredentialId?: string | null;
+  noticeReady?: boolean;
 }
 
 export interface BotPatch {
@@ -39,6 +41,7 @@ export interface BotStore {
   insert(scope: UserScope, draft: BotDraft): BotRecord;
   update(scope: UserScope, id: string, patch: BotPatch): boolean;
   setCredential(scope: UserScope, id: string, credentialId: string): boolean;
+  markNoticeReady(scope: UserScope, id: string): boolean;
   softDelete(scope: UserScope, id: string): boolean;
   /** 签发凭据失败时删掉刚插入、还没有凭据的 bot。 */
   remove(scope: UserScope, id: string): boolean;
@@ -83,6 +86,7 @@ export function botRepository(db: AppDatabase): BotStore {
           model: draft.model,
           instructions: draft.instructions ?? "",
           modelCredentialId: draft.modelCredentialId ?? null,
+          noticeReady: draft.noticeReady ?? true,
           createdAt: now,
           updatedAt: now,
         })
@@ -117,6 +121,11 @@ export function botRepository(db: AppDatabase): BotStore {
         .where(and(eq(bots.id, id), eq(bots.userId, scope.userId), isNull(bots.deletedAt)))
         .run();
       return result.changes > 0;
+    },
+    markNoticeReady(scope, id) {
+      return db.update(bots).set({ noticeReady: true })
+        .where(and(eq(bots.userId, scope.userId), eq(bots.id, id), isNull(bots.deletedAt)))
+        .run().changes > 0;
     },
     softDelete(scope, id) {
       const now = new Date().toISOString();
@@ -156,6 +165,7 @@ function toRecord(row: typeof bots.$inferSelect): BotRecord {
     model: row.model,
     instructions: row.instructions,
     modelCredentialId: row.modelCredentialId,
+    noticeReady: row.noticeReady,
     updatedAt: row.updatedAt,
   };
 }

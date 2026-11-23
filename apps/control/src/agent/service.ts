@@ -804,6 +804,9 @@ export function createChatService(deps: ChatServiceDeps) {
       const tokenBudget = usage.tokenBudget ?? resolveTaskTokenBudget(deps.db, live.userId, deps.config.taskTokenBudget);
       const restored = restoreActive(typeof usage.activeMs === "number" && Number.isFinite(usage.activeMs) ? usage.activeMs : 0, now().getTime());
       chat.updateTask(scope, live.id, { state: "running", startedAt: previous?.startedAt ?? now().toISOString(), error: null });
+      // 等机器期间到达的系统通知只留给下一次运行。用户发给当前任务的消息由 takeParkedMessages 补入。
+      const contextRows = chat.listContextMessages(scope, live.conversationId) ?? [];
+      const untilMessageId = chat.readSummary(scope, live.conversationId)?.untilMessageId;
       publishTask(live.userId, live.conversationId, live.id);
       const endpoint = await deps.prepareEndpoint(live.userId, (phase) => {
         deps.hub.publish(live.conversationId, { type: "machine", conversationId: live.conversationId, phase });
@@ -835,8 +838,7 @@ export function createChatService(deps: ChatServiceDeps) {
       chat.updateTask(scope, live.id, { usageJson: taskUsageJson(gatewayTask) });
       deps.tasks.set(live.id, gatewayTask);
       const platform = settingsRepository(deps.db).platformPrompt().text;
-      const contextEntries = loadTranscriptEntries(chat.listContextMessages(scope, live.conversationId) ?? []);
-      const untilMessageId = chat.readSummary(scope, live.conversationId)?.untilMessageId;
+      const contextEntries = loadTranscriptEntries(contextRows);
       const anchorIndex = untilMessageId ? contextEntries.findIndex((entry) => entry.id === untilMessageId) : -1;
       // 锚点行必须留在列表里，openTail 才按原始 id 切开。只折叠锚点之后的条目，新通知不会把代表 id 改成组内最大 id，也不会把锚点并进新组。
       const tail = foldNoticeEntries(anchorIndex >= 0 ? contextEntries.slice(anchorIndex + 1) : contextEntries);
@@ -1164,9 +1166,17 @@ export function createChatService(deps: ChatServiceDeps) {
       });
       model.contextWindow = limits.contextTokens;
       model.maxTokens = limits.maxTokens;
-      const compactLive = (next: AgentMessage[], force: boolean, signal?: AbortSignal) =>
-        applyCompaction(
-          cropUserImages(next, { vision: deps.config.visionModels.includes(bot.model) }),
+      const compactLive = (next: AgentMessage[], force: boolean, signal?: AbortSignal) => {
+        const cropped = cropUserImages(next, { vision: deps.config.visionModels.includes(bot.model) });
+        // 裁图副本仍代表同一条入库消息，否则摘要不能覆盖这条消息及之后的通知。
+        for (const [index, message] of cropped.entries()) {
+          const original = next[index]!;
+          if (message === original) continue;
+          const id = messageIds.get(original);
+          if (id) messageIds.set(message, id);
+        }
+        return applyCompaction(
+          cropped,
           {
             contextTokens: limits.contextTokens,
             summaryMaxTokens: deps.config.summaryMaxTokens,
@@ -1210,6 +1220,7 @@ export function createChatService(deps: ChatServiceDeps) {
           },
           { force, ...(signal ? { signal } : {}) },
         );
+      };
       const executable = bindSecrets(
         deps.flights ? guardedTools.map((tool) => trackExecution(live.userId, tool, deps.flights!)) : guardedTools,
         (name) => broker.lookup(live.userId, live.id, name),

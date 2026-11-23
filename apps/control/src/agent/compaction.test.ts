@@ -3,11 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { fileURLToPath } from "node:url";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildApp, chatService, type ControlContext } from "../app.js";
+import { buildApp, chatService, type AppOptions, type ControlContext } from "../app.js";
 import { createBot } from "../bot-service.js";
 import { loadConfig, type ControlConfig } from "../config.js";
 import { encrypt, loadOrCreateKey } from "../crypto.js";
@@ -19,8 +20,9 @@ import { ensureDevUser } from "../db/users.js";
 import { createRuntime } from "../compose.js";
 import { ulid } from "../id.js";
 import { userScope } from "../scope.js";
+import { claimUploads, saveUpload } from "../uploads/store.js";
 import { estimateTextTokens } from "./compact.js";
-import { NOTICE_PREFIX } from "./notices.js";
+import { noticeContent, NOTICE_PREFIX } from "./notices.js";
 import { storedContent } from "./view.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -86,7 +88,7 @@ async function opened(env: Record<string, string>) {
   return { config, ctx };
 }
 
-async function appFor(ctx: ControlContext, config: ControlConfig, prepare: { host: string; port: number; token: string }) {
+async function appFor(ctx: ControlContext, config: ControlConfig, prepare: { host: string; port: number; token: string }, options?: AppOptions) {
   const app = buildApp(ctx, {
     retryDelays: [0, 0],
     ensureMachine: async () => {},
@@ -94,6 +96,7 @@ async function appFor(ctx: ControlContext, config: ControlConfig, prepare: { hos
       onPhase("ready");
       return prepare;
     },
+    ...options,
   });
   let closed = false;
   const close = async () => {
@@ -465,6 +468,117 @@ describe("context summary", () => {
     const task = chat.listTasks(scope, conversation.id)?.[0];
     expect(task?.state).toBe("succeeded");
     expect(chat.listMessages(scope, conversation.id)?.some((row) => row.contentJson.includes("重试成功"))).toBe(true);
+  });
+
+  it("waits until the next run to read a notice delivered while preparing the machine", async () => {
+    const { config, ctx } = await opened({ VB_MODEL_BASE_URL: "http://model.example.test/v1" });
+    const { promise: waiting, resolve: started } = Promise.withResolvers<void>();
+    const { promise: gate, resolve: ready } = Promise.withResolvers<void>();
+    const bodies: string[] = [];
+    const endpoint = { host: "127.0.0.1", port: 9, token: "test" };
+    const { service, runtime } = await appFor(ctx, config, endpoint, {
+      prepareEndpoint: async () => { started(); await gate; return endpoint; },
+      fetch: async (_url, init) => {
+        bodies.push(String(init?.body ?? ""));
+        return new Response(textSse("收到"), { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const scope = userScope("user-a");
+    const bot = await createBot({ db: ctx.db, key: ctx.key, credentials: runtime.credentials, providerId: runtime.identity.id }, scope, { name: "Ada", model: "gpt-test" });
+    const task = await service.send({ userId: scope.userId, botId: bot.id, text: "先处理这条", mode: "queue" });
+    await waiting;
+    const chat = chatRepository(ctx.db);
+    const note = "notice arrived during prepare";
+    try {
+      expect(chat.findTask(scope, task.taskId)?.state).toBe("running");
+      chat.insertMessage(scope, { id: ulid(), conversationId: task.conversationId, role: "user", taskId: null,
+        contentJson: noticeContent("test-notice", `${NOTICE_PREFIX}\n应用：pager\n版本：1.0.0 → 2.0.0\n说明：${note}`),
+      });
+    } finally {
+      ready();
+    }
+    await service.idle();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toContain("先处理这条");
+    expect(bodies[0]).not.toContain(note);
+    await service.send({ userId: scope.userId, botId: bot.id, conversationId: task.conversationId, text: "现在查看", mode: "queue" });
+    await service.idle();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]?.split(note)).toHaveLength(2);
+  });
+
+  it("summarizes the entire notice group after an earlier uploaded image ages out mid-run", async () => {
+    const { config, ctx } = await opened({
+      VB_MODEL_BASE_URL: "http://model.example.test/v1", VB_VISION_MODELS: "gpt-test", VB_MODEL_CONTEXT_TOKENS: "20000",
+    });
+    const { promise: waiting, resolve: started } = Promise.withResolvers<void>();
+    const { promise: gate, resolve: reply } = Promise.withResolvers<void>();
+    const bodies: string[] = [];
+    const summaries: string[] = [];
+    const { service, runtime } = await appFor(ctx, config, { host: "127.0.0.1", port: 9, token: "test" }, {
+      fetch: async (_url, init) => {
+        const body = String(init?.body ?? "");
+        if (body.includes("你是对话压缩器")) summaries.push(body);
+        else {
+          bodies.push(body);
+          if (bodies.length === 1) { started(); await gate; }
+        }
+        const text = summaries.at(-1) === body && (body.includes("notice-note-final") || body.includes("summary-keeps-update"))
+          ? "summary-keeps-update" : "收到";
+        return new Response(textSse(text), { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const user = userScope("user-a");
+    const bot = await createBot({ db: ctx.db, key: ctx.key, credentials: runtime.credentials, providerId: runtime.identity.id }, user, { name: "Ada", model: "gpt-test" });
+    const chat = chatRepository(ctx.db);
+    const conversation = chat.insertConversation(user, { id: ulid(), botId: bot.id, title: "通知与附件" })!;
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const upload = await saveUpload({ db: ctx.db, dataDir: config.dataDir, userId: user.userId, filename: "dot.png", stream: Readable.from(Buffer.from(png, "base64")), now: new Date() });
+    const imageId = ulid(1_700_000_000_000);
+    chat.insertMessage(user, { id: imageId, conversationId: conversation.id, role: "user", taskId: null,
+      contentJson: storedContent({ role: "user", content: "older image message", timestamp: 1 }, "older image message", [upload]),
+    });
+    claimUploads(ctx.db, user.userId, imageId, [upload.id]);
+    const noticeIds = [ulid(1_700_000_000_001), ulid(1_700_000_000_003)];
+    for (const [index, id] of noticeIds.entries()) {
+      const note = index === 0 ? "notice-note-first" : "notice-note-final";
+      chat.insertMessage(user, { id, conversationId: conversation.id, role: "user", taskId: null,
+        contentJson: noticeContent(`notice-${index}`, `${NOTICE_PREFIX}\n应用：pager\n版本：1.0.0 → ${index + 2}.0.0\n说明：${note}`),
+      });
+    }
+    chat.insertMessage(user, { id: ulid(1_700_000_000_002), conversationId: conversation.id, role: "assistant", taskId: null,
+      contentJson: JSON.stringify({ delivery: "file", text: "display-only delivery", attachments: [
+        { id: "delivered-file", name: "document.txt", size: 12, mime: "text/plain", kind: "file" },
+      ] }),
+    });
+    await service.send({ userId: user.userId, botId: bot.id, conversationId: conversation.id, text: "查看图片和通知", mode: "queue" });
+    await waiting;
+    try {
+      expect(JSON.parse(bodies[0]!)).toMatchObject({ messages: expect.arrayContaining([
+        expect.objectContaining({ role: "user", content: expect.arrayContaining([
+          expect.objectContaining({ type: "image_url", image_url: { url: `data:image/png;base64,${png}` } }),
+        ]) }),
+      ]) });
+      expect(bodies[0]?.split(NOTICE_PREFIX)).toHaveLength(2);
+      expect(bodies[0]).not.toContain("display-only delivery");
+      await service.send({ userId: user.userId, botId: bot.id, conversationId: conversation.id, text: `long-followup ${"长文".repeat(14000)}`, mode: "steer" });
+    } finally {
+      reply();
+    }
+    await service.idle();
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).not.toContain(png);
+    expect(summaries[0]).toContain("older image message");
+    expect(summaries[0]?.split(NOTICE_PREFIX)).toHaveLength(2);
+    expect(summaries[0]).toContain("期间跨过的版本：2.0.0");
+    expect(summaries[0]).toContain("notice-note-final");
+    const until = chat.readSummary(user, conversation.id)?.untilMessageId;
+    expect(until && until >= noticeIds[1]!).toBe(true);
+    expect(chat.listMessages(user, conversation.id)?.filter((row) => row.contentJson.includes(NOTICE_PREFIX))).toHaveLength(2);
+    await service.send({ userId: user.userId, botId: bot.id, conversationId: conversation.id, text: "继续", mode: "queue" });
+    await service.idle();
+    expect(bodies.at(-1)?.split("summary-keeps-update")).toHaveLength(2);
+    expect(bodies.at(-1)).not.toContain("notice-note-final");
   });
 
   it("keeps the stored summary when a later adjacent notice arrives", async () => {

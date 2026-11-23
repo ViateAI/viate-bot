@@ -493,13 +493,51 @@ export function markImportantVersion(
     if (version.status !== VERSION_ACTIVE) throw new CatalogRejected("不能推荐已下架的版本", 409);
     deps.db.update(appVersions).set({ importantNote: text, importantAt: markedAt }).where(eq(appVersions.id, versionId)).run();
     for (const target of importantAudience(deps, app.id, app.name, version.id, version.version, text, markedAt)) {
-      if (!insertAppUpdateNotice(deps.db, target.userId, target.payload)) continue;
-      const conversationId = deliverPendingNotices(deps.db, target.userId);
+      insertAppUpdateNotice(deps.db, target.userId, target.payload);
+      const conversationId = deliverAppUpdateNotices(deps.db, target.userId);
       if (conversationId) conversations.add(conversationId);
     }
   });
   for (const conversationId of conversations) deps.onNotice?.(conversationId);
   audit(deps, scope.actorUserId, AUDIT_ACTIONS.appImportant, appId, { versionId });
+}
+
+interface ImportantInstall {
+  userId: string;
+  status: string;
+  machineState: string;
+  currentVersion: string;
+  installedVersionId: string;
+  desired: string;
+  installState: string;
+}
+
+function importantInstalls(db: AppDatabase, appId: string, userId?: string): ImportantInstall[] {
+  return db.$client.prepare(
+    `select u.id as userId, u.status as status, m.state as machineState,
+            cur.version as currentVersion, i.app_version_id as installedVersionId,
+            i.desired as desired, i.state as installState
+     from app_installs i
+     join machines m on m.id = i.machine_id
+     join users u on u.id = m.user_id
+     join app_versions cur on cur.id = i.app_version_id
+     where cur.app_id = ? ${userId === undefined ? "" : "and u.id = ?"}
+     order by i.updated_at desc, i.id desc`,
+  ).all(...(userId === undefined ? [appId] : [appId, userId])) as ImportantInstall[];
+}
+
+function eligibleImportantInstall(db: AppDatabase, row: ImportantInstall, appId: string, versionId: string): boolean {
+  return row.status === "active" && row.machineState !== "deleted"
+    && row.desired === DESIRED_PRESENT && row.installState !== "removed"
+    && row.installedVersionId !== versionId
+    && versionVisibleTo(db, row.userId, appId, versionId);
+}
+
+export function deliverAppUpdateNotices(db: AppDatabase, userId: string): string | undefined {
+  return deliverPendingNotices(db, userId, (payload) => {
+    const [row] = importantInstalls(db, payload.appId, userId);
+    return row !== undefined && eligibleImportantInstall(db, row, payload.appId, payload.targetVersionId);
+  });
 }
 
 function importantAudience(
@@ -511,36 +549,13 @@ function importantAudience(
   note: string,
   markedAt: string,
 ): Array<{ userId: string; payload: AppUpdatePayload }> {
-  const rows = deps.db.$client
-    .prepare(
-      `select u.id as userId, u.status as status, m.state as machineState,
-              cur.version as currentVersion, i.app_version_id as installedVersionId,
-              i.desired as desired, i.state as installState
-       from app_installs i
-       join machines m on m.id = i.machine_id
-       join users u on u.id = m.user_id
-       join app_versions cur on cur.id = i.app_version_id
-       where cur.app_id = ?
-       order by i.updated_at desc`,
-    )
-    .all(appId) as Array<{
-      userId: string;
-      status: string;
-      machineState: string;
-      currentVersion: string;
-      installedVersionId: string;
-      desired: string;
-      installState: string;
-    }>;
+  const rows = importantInstalls(deps.db, appId);
   const seen = new Set<string>();
   const targets: Array<{ userId: string; payload: AppUpdatePayload }> = [];
   for (const row of rows) {
     if (seen.has(row.userId)) continue;
     seen.add(row.userId);
-    if (row.status !== "active" || row.machineState === "deleted") continue;
-    if (row.desired !== DESIRED_PRESENT || row.installState === "removed") continue;
-    if (row.installedVersionId === versionId) continue;
-    if (!versionVisibleTo(deps, row.userId, appId, versionId)) continue;
+    if (!eligibleImportantInstall(deps.db, row, appId, versionId)) continue;
     targets.push({
       userId: row.userId,
       payload: {
@@ -557,12 +572,14 @@ function importantAudience(
   return targets;
 }
 
-function versionVisibleTo(deps: CatalogDeps, userId: string, appId: string, versionId: string): boolean {
-  const item = groupApps(deps.db).get(appId);
-  if (!item) return false;
-  const versions = selectableVersions(item, userId, approvedVersionIds(deps.db));
-  if (!versions) return false;
-  return versions.some((version) => version.id === versionId && version.status === VERSION_ACTIVE);
+function versionVisibleTo(db: AppDatabase, userId: string, appId: string, versionId: string): boolean {
+  const app = db.select().from(apps).where(eq(apps.id, appId)).get();
+  const version = db.select().from(appVersions).where(and(eq(appVersions.id, versionId), eq(appVersions.appId, appId))).get();
+  if (!app || version?.status !== VERSION_ACTIVE) return false;
+  const visibility = db.select().from(appVisibility).where(eq(appVisibility.appId, appId)).all();
+  const approved = app.source === APP_SOURCE_USER && db.select({ id: appPublishRequests.id }).from(appPublishRequests)
+    .where(and(eq(appPublishRequests.appVersionId, versionId), eq(appPublishRequests.state, "approved"))).get();
+  return Boolean(selectableVersions({ app, versions: [version], visibility }, userId, new Set(approved ? [versionId] : []))?.length);
 }
 
 export function retireVersion(deps: CatalogDeps, scope: AdminScope, appId: string, versionId: string): void {

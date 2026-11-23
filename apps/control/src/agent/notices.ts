@@ -75,45 +75,48 @@ export function insertAppUpdateNotice(db: AppDatabase, userId: string, payload: 
   return result.changes === 1;
 }
 
-/** 把未投递通知写进主 bot 最近对话。消息和送达标记在同一个事务里，失败时两者都不留。不启动任务，不唤醒机器。没有 bot 时保持未投递。 */
-export function deliverPendingNotices(db: AppDatabase, userId: string): string | undefined {
-  const scope = userScope(userId);
-  const botId = botRepository(db).primaryId(scope);
-  if (!botId) return undefined;
-  const pending = db
-    .select()
-    .from(systemNotices)
-    .where(and(eq(systemNotices.userId, userId), isNull(systemNotices.deliveredAt)))
-    .orderBy(asc(systemNotices.createdAt), asc(systemNotices.id))
-    .all();
-  if (pending.length === 0) return undefined;
-  const chat = chatRepository(db);
-  let conversation = chat.listConversations(scope, botId)?.[0];
-  if (!conversation) {
-    conversation = chat.insertConversation(scope, { id: ulid(), botId, title: NOTICE_CONVERSATION_TITLE });
-  }
-  const target = conversation;
-  if (!target) return undefined;
-  const deliveredAt = new Date().toISOString();
-  db.transaction(() => {
+/** 在同一写事务选取、投递并确认未送达通知，不启动任务或唤醒机器。 */
+export function deliverPendingNotices(
+  db: AppDatabase,
+  userId: string,
+  eligible: (payload: AppUpdatePayload) => boolean,
+): string | undefined {
+  return db.$client.transaction(() => {
+    const scope = userScope(userId);
+    const bots = botRepository(db);
+    const botId = bots.primaryId(scope);
+    if (!botId || !bots.findById(scope, botId)?.noticeReady) return undefined;
+    const pending = db
+      .select()
+      .from(systemNotices)
+      .where(and(eq(systemNotices.userId, userId), eq(systemNotices.kind, "app_update"), isNull(systemNotices.deliveredAt)))
+      .orderBy(asc(systemNotices.createdAt), asc(systemNotices.id))
+      .all()
+      .map((row) => ({ id: row.id, payload: JSON.parse(row.payloadJson) as AppUpdatePayload }))
+      .filter(({ payload }) => eligible(payload));
+    if (pending.length === 0) return undefined;
+    const chat = chatRepository(db);
+    const target = chat.listConversations(scope, botId)?.[0]
+      ?? chat.insertConversation(scope, { id: ulid(), botId, title: NOTICE_CONVERSATION_TITLE });
+    if (!target) throw new Error("通知对话没有写上");
+    const deliveredAt = new Date().toISOString();
     for (const notice of pending) {
-      const payload = JSON.parse(notice.payloadJson) as AppUpdatePayload;
       const row = chat.insertMessage(scope, {
         id: ulid(),
         conversationId: target.id,
         role: "user",
-        contentJson: noticeContent(notice.id, appUpdateText(payload)),
+        contentJson: noticeContent(notice.id, appUpdateText(notice.payload)),
         taskId: null,
       });
-      if (!row) continue;
+      if (!row) throw new Error("通知消息没有写上");
       db.update(systemNotices)
         .set({ deliveredMessageId: row.id, deliveredAt })
         .where(eq(systemNotices.id, notice.id))
         .run();
     }
     chat.touchConversation(scope, target.id);
-  });
-  return target.id;
+    return target.id;
+  }).immediate();
 }
 
 interface NoticeEntry {

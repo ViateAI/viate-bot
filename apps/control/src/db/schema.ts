@@ -99,6 +99,7 @@ export const bots = sqliteTable("bots", {
   modelCredentialId: text("model_credential_id").references((): AnySQLiteColumn => modelCredentials.id),
   displayNo: integer("display_no"),
   settingsJson: text("settings_json").notNull().default("{}"),
+  noticeReady: integer("notice_ready", { mode: "boolean" }).notNull().default(true),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
   deletedAt: text("deleted_at"),
