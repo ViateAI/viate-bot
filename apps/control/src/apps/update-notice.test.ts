@@ -7,8 +7,9 @@ import type { BeforeToolCallContext } from "@earendil-works/pi-agent-core";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
+import { provisionUser, type ProvisionDeps } from "../admin/service.js";
 import { installMcpBlock, installMcpTool } from "../agent/app-tools.js";
-import { deliverPendingNotices, foldNoticeEntries, insertAppUpdateNotice, NOTICE_PREFIX } from "../agent/notices.js";
+import { foldNoticeEntries, insertAppUpdateNotice, NOTICE_PREFIX } from "../agent/notices.js";
 import { buildSystemPrompt, NOTICE_GUIDANCE } from "../agent/prompt.js";
 import { loadTranscriptEntries, messageView } from "../agent/view.js";
 import { createApprovalGate } from "../approvals/gate.js";
@@ -25,6 +26,7 @@ import { sharedCredentialProvider } from "../shared-key.js";
 import { adminScope, userScope } from "../scope.js";
 import type { ResolvedSession } from "../session.js";
 import {
+  deliverAppUpdateNotices,
   installForUser,
   listUserInstalls,
   markImportantVersion,
@@ -32,6 +34,7 @@ import {
   registerCatalogRoutes,
   retireVersion,
   setVisibility,
+  uninstallForUser,
   type CatalogDeps,
   type CatalogInstaller,
 } from "./catalog.js";
@@ -212,6 +215,114 @@ describe("app update notices", () => {
     expect(chat.listConversations(userScope("nina"), ninaRow.id)?.[0]?.title).toBe("系统通知");
   });
 
+  it("keeps an update pending through failed provisioning and delivers it to the retry", async () => {
+    const { db, key, deps } = boot();
+    const scope = adminScope("admin");
+    const old = publish(deps, "1.0.0");
+    const pending = publish(deps, "2.0.0");
+    const during = publish(deps, "3.0.0");
+    setVisibility(deps, scope, old.appId, { scope: "all" });
+    await installForUser(deps, "alice", "pager", { version: "1.0.0" });
+    markImportantVersion(deps, scope, pending.appId, pending.versionId, "before provisioning");
+    const provisioning: ProvisionDeps = {
+      db, key, config: loadConfig({ VB_MODELS: "test-model" }), providerId: "oidc", directory: {},
+      credentials: sharedCredentialProvider(loadConfig({ VB_MODEL_API_KEY: "test-key" })),
+      ensureMachine: async () => {},
+      deleteMachine: async () => {},
+      waitHealthy: async () => {
+        markImportantVersion(deps, scope, during.appId, during.versionId, "during provisioning");
+        throw new Error("health check failed");
+      },
+    };
+    const input = { userId: "alice", templateId: "general" };
+    await expect(provisionUser(provisioning, scope, input)).rejects.toThrow("health check failed");
+    expect(notices(db).map((row) => row.deliveredMessageId)).toEqual([null, null]);
+    const result = await provisionUser({ ...provisioning, waitHealthy: async () => {} }, scope, input);
+    const chat = chatRepository(db);
+    const [conversation] = chat.listConversations(userScope("alice"), result.botId)!;
+    expect(conversation?.title).toBe("系统通知");
+    const messages = chat.listMessages(userScope("alice"), conversation!.id)!.map(messageView);
+    expect(messages.filter((message) => message.notice).map((message) => message.text.split("说明：").at(-1)))
+      .toEqual(["before provisioning", "during provisioning"]);
+  });
+
+  it("does not consume a notice when first-bot creation fails after the version is marked", async () => {
+    const { db, key, deps } = boot();
+    const admin = adminScope("admin");
+    const old = publish(deps, "1.0.0");
+    const next = publish(deps, "2.0.0");
+    setVisibility(deps, admin, old.appId, { scope: "all" });
+    await installForUser(deps, "alice", "pager", { version: "1.0.0" });
+    const botDeps = { db, key, credentials: sharedCredentialProvider(loadConfig({ VB_MODEL_API_KEY: "test-key" })), providerId: "oidc" };
+    const scope = userScope("alice");
+    const input = { name: "First", model: "test-model" };
+    await expect(createBot({ ...botDeps, ensureMachine: async () => {
+      markImportantVersion(deps, admin, next.appId, next.versionId, "while creating");
+      throw new Error("machine setup failed");
+    } }, scope, input)).rejects.toThrow("machine setup failed");
+    expect(notices(db).map((row) => row.deliveredMessageId)).toEqual([null]);
+    const bot = await createBot(botDeps, scope, input);
+    const chat = chatRepository(db);
+    const [conversation] = chat.listConversations(scope, bot.id)!;
+    expect(chat.listMessages(scope, conversation!.id)?.map(messageView).map((message) => message.notice?.kind)).toEqual(["app_update"]);
+  });
+
+  it("delivers the pending update to an already-ready bot when an earlier creation fails", async () => {
+    const { db, key, deps } = boot();
+    const admin = adminScope("admin");
+    const old = publish(deps, "1.0.0");
+    const next = publish(deps, "2.0.0");
+    setVisibility(deps, admin, old.appId, { scope: "all" });
+    await installForUser(deps, "alice", "pager", { version: "1.0.0" });
+    markImportantVersion(deps, admin, next.appId, next.versionId, "pending for next primary");
+    const creds = { db, key, credentials: sharedCredentialProvider(loadConfig({ VB_MODEL_API_KEY: "test-key" })), providerId: "oidc" };
+    const user = userScope("alice");
+    const { promise: entered, resolve: started } = Promise.withResolvers<void>();
+    const { promise: gated, resolve: release } = Promise.withResolvers<void>();
+    const first = createBot({ ...creds, ensureMachine: async () => {
+      started();
+      await gated;
+      throw new Error("first setup failed");
+    } }, user, { name: "First", model: "test-model" });
+    const rejected = expect(first).rejects.toThrow("first setup failed");
+    await entered;
+    const second = await createBot(creds, user, { name: "Second", model: "test-model" }).finally(release);
+    await rejected;
+    const chat = chatRepository(db);
+    const conversation = chat.listConversations(user, second.id)?.[0];
+    expect(conversation?.title).toBe("系统通知");
+    expect(chat.listMessages(user, conversation!.id)?.map(messageView).map((message) => message.notice?.kind)).toEqual(["app_update"]);
+  });
+
+  it.each(["hidden", "uninstalled", "already updated", "disabled"] as const)("does not deliver a deferred update when the user is %s", async (reason) => {
+    const { db, key, deps } = boot();
+    const scope = adminScope("admin");
+    const old = publish(deps, "1.0.0");
+    const next = publish(deps, "2.0.0");
+    setVisibility(deps, scope, old.appId, { scope: "all" });
+    const install = await installForUser(deps, "alice", "pager", { version: "1.0.0" });
+    markImportantVersion(deps, scope, next.appId, next.versionId, "update notice");
+    expect(notices(db).map((row) => row.deliveredMessageId)).toEqual([null]);
+    if (reason === "hidden") setVisibility(deps, scope, old.appId, { scope: "user", userIds: ["nina"] });
+    if (reason === "uninstalled") await uninstallForUser(deps, "alice", install.id);
+    if (reason === "already updated") await installForUser(deps, "alice", "pager", { version: "2.0.0" });
+    if (reason === "disabled") userRepository(db).setStatus("alice", "disabled");
+    const user = userScope("alice");
+    const bot = await createBot(
+      { db, key, credentials: sharedCredentialProvider(loadConfig({ VB_MODEL_API_KEY: "test-key" })), providerId: "oidc" },
+      user,
+      { name: "First", model: "test-model" },
+    );
+    expect(chatRepository(db).listConversations(user, bot.id)).toEqual([]);
+    expect(notices(db).map((row) => row.deliveredMessageId)).toEqual([null]);
+    if (reason === "hidden") {
+      setVisibility(deps, scope, old.appId, { scope: "all" });
+      markImportantVersion(deps, scope, next.appId, next.versionId, "update notice");
+      expect(notices(db)).toHaveLength(1);
+      expect(notices(db)[0]?.deliveredMessageId).toBeTruthy();
+    }
+  });
+
   it("folds adjacent notices for the model and keeps each row for the client", () => {
     const { db } = boot();
     db.$client.prepare("insert into bots (id, user_id, name, model, created_at, updated_at) values ('bot', 'alice', 'Ada', 'm', '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z')").run();
@@ -282,7 +393,7 @@ describe("app update notices", () => {
   });
 
   it("deletes a conversation that delivered a notice and does not deliver it again", async () => {
-    const { db, key } = boot();
+    const { db, key, deps } = boot();
     const creds = {
       db,
       key,
@@ -291,19 +402,14 @@ describe("app update notices", () => {
     };
     const scope = userScope("alice");
     const first = await createBot(creds, scope, { name: "Ada", model: "m" });
-    const payload = {
-      appId: "pager",
-      appName: "pager",
-      currentVersion: "1.0.0",
-      targetVersion: "2.0.0",
-      targetVersionId: "v20",
-      note: "删对话后不能再投",
-      markedAt: "2020-01-01T00:00:00.000Z",
-    };
-    expect(insertAppUpdateNotice(db, "alice", payload)).toBe(true);
-    const conversationId = deliverPendingNotices(db, "alice");
-    expect(conversationId).toBeTruthy();
+    const old = publish(deps, "1.0.0");
+    const next = publish(deps, "2.0.0");
+    setVisibility(deps, adminScope("admin"), old.appId, { scope: "all" });
+    await installForUser(deps, "alice", "pager", { version: "1.0.0" });
+    markImportantVersion(deps, adminScope("admin"), next.appId, next.versionId, "删对话后不能再投");
     const chat = chatRepository(db);
+    const conversationId = chat.listConversations(scope, first.id)?.[0]?.id;
+    expect(conversationId).toBeTruthy();
     const before = db.$client.prepare("select delivered_message_id as deliveredMessageId, delivered_at as deliveredAt from system_notices where user_id='alice'").get() as {
       deliveredMessageId: string | null;
       deliveredAt: string | null;
@@ -321,13 +427,13 @@ describe("app update notices", () => {
     const fresh = chat.insertConversation(scope, { id: ulid(), botId: first.id, title: "之后的对话" });
     expect(fresh).toBeTruthy();
     await createBot(creds, scope, { name: "Bea", model: "m" });
-    expect(deliverPendingNotices(db, "alice")).toBeUndefined();
+    expect(deliverAppUpdateNotices(db, "alice")).toBeUndefined();
     expect(chat.listMessages(scope, fresh!.id)).toEqual([]);
     expect(db.$client.prepare("select count(*) as count from messages").get()).toEqual({ count: 0 });
   });
 
   it("keeps exactly one notice when marking delivery fails before commit", async () => {
-    const { db, key } = boot();
+    const { db, key, deps } = boot();
     const creds = {
       db,
       key,
@@ -335,14 +441,18 @@ describe("app update notices", () => {
       providerId: "oidc",
     };
     const scope = userScope("alice");
-    await createBot(creds, scope, { name: "Ada", model: "m" });
+    const bot = await createBot(creds, scope, { name: "Ada", model: "m" });
     const note = "中途失败不能留两条";
+    const old = publish(deps, "1.0.0");
+    const next = publish(deps, "2.1.0");
+    setVisibility(deps, adminScope("admin"), old.appId, { scope: "all" });
+    await installForUser(deps, "alice", "pager", { version: "1.0.0" });
     expect(insertAppUpdateNotice(db, "alice", {
-      appId: "pager",
+      appId: old.appId,
       appName: "pager",
       currentVersion: "1.0.0",
       targetVersion: "2.1.0",
-      targetVersionId: "v21",
+      targetVersionId: next.versionId,
       note,
       markedAt: "2020-01-05T00:00:00.000Z",
     })).toBe(true);
@@ -353,9 +463,10 @@ describe("app update notices", () => {
         select raise(abort, 'delivery mark failed');
       end
     `);
-    expect(() => deliverPendingNotices(db, "alice")).toThrow(/delivery mark failed/);
+    expect(() => deliverAppUpdateNotices(db, "alice")).toThrow(/delivery mark failed/);
+    expect(chatRepository(db).listConversations(scope, bot.id)).toEqual([]);
     db.$client.exec("drop trigger fail_notice_mark");
-    const conversationId = deliverPendingNotices(db, "alice");
+    const conversationId = deliverAppUpdateNotices(db, "alice");
     expect(conversationId).toBeTruthy();
     const copies = (chatRepository(db).listMessages(scope, conversationId!) ?? []).filter((row) => row.contentJson.includes(note));
     expect(copies).toHaveLength(1);

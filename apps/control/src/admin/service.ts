@@ -1,6 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { storedContent } from "../agent/view.js";
-import { BotRejected, createBot, purgeBot, type BotServiceDeps } from "../bot-service.js";
+import { activateBotNotices, BotRejected, createBot, purgeBot, type BotServiceDeps } from "../bot-service.js";
 import type { ControlConfig } from "../config.js";
 import { auditRepository } from "../db/audit.js";
 import { adminRepository } from "../db/admin.js";
@@ -142,7 +142,6 @@ async function provisionLocked(
   const quotas = quotaRepository(deps.db);
   let userId = "";
   let botId = "";
-  let quotaInserted = false;
   let machineAttempted = false;
   let machineExisted = false;
   try {
@@ -183,6 +182,7 @@ async function provisionLocked(
       providerId: deps.providerId,
       allowModel: (candidate) => deps.config.models.length === 0 || deps.config.models.includes(candidate),
       maxBots: () => quota.maxBots,
+      deferNoticeDelivery: true,
       ensureMachine: async (id) => {
         machineAttempted = true;
         await deps.ensureMachine(id, spec);
@@ -200,10 +200,12 @@ async function provisionLocked(
       memories.save(userScopeFor, bot.id, { id: ulid(), content, sourceTaskId: null });
     }
     await deps.waitHealthy(user.id);
-    writeWelcome(deps.db, user.id, bot.id, template, model, deps.now ?? (() => new Date()));
-    if (!quotas.insert(scope, user.id, quota)) throw new AdminRejected("已经开通", 409);
-    quotaInserted = true;
-    audit.write(scope, auditAction, user.id, { botId: bot.id, templateId: template.id, ok: true });
+    deps.db.transaction(() => {
+      if (!quotas.insert(scope, user.id, quota)) throw new AdminRejected("已经开通", 409);
+      activateBotNotices(deps.db, userScopeFor, bot.id);
+      writeWelcome(deps.db, user.id, bot.id, template, model, deps.now ?? (() => new Date()));
+      audit.write(scope, auditAction, user.id, { botId: bot.id, templateId: template.id, ok: true });
+    });
     return {
       userId: user.id,
       botId: bot.id,
@@ -239,7 +241,6 @@ async function provisionLocked(
         rollbackErrors.push("机器删除失败");
       }
     }
-    if (quotaInserted) quotas.remove(scope, userId);
     const original = error instanceof Error ? error.message : "开通失败";
     const message = rollbackErrors.length > 0 ? `${original}；回滚未完成：${rollbackErrors.join("、")}` : original;
     const target = userId || input.userId || input.subject || "unknown";

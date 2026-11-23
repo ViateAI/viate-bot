@@ -1,5 +1,5 @@
 import { encrypt } from "./crypto.js";
-import { deliverPendingNotices } from "./agent/notices.js";
+import { deliverAppUpdateNotices } from "./apps/catalog.js";
 import { botRepository, type BotRecord } from "./db/bots.js";
 import { credentialRepository } from "./db/credentials.js";
 import { identityRepository } from "./db/identities.js";
@@ -36,6 +36,8 @@ export interface BotServiceDeps {
   maxBots?: (scope: UserScope) => number;
   /** 该用户还没有机器时创建一台停止的机器。失败则删掉刚创建的 bot。 */
   ensureMachine?: (userId: string) => Promise<void>;
+  /** 开通流程在健康检查和配额准备完成后才允许投递。 */
+  deferNoticeDelivery?: boolean;
 }
 
 export async function createBot(deps: BotServiceDeps, scope: UserScope, input: CreateBotInput): Promise<BotRecord> {
@@ -53,6 +55,7 @@ export async function createBot(deps: BotServiceDeps, scope: UserScope, input: C
     id,
     name: input.name,
     model: input.model,
+    noticeReady: false,
     ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
   });
   const subject = identityRepository(deps.db).findByUser(scope.userId, deps.providerId)?.subject ?? null;
@@ -91,28 +94,46 @@ export async function createBot(deps: BotServiceDeps, scope: UserScope, input: C
         throw new BotRejected("凭据保存失败；回滚未完成：凭据吊销失败", 503);
       }
     }
+    retryNoticesAfterBotRollback(deps.db, scope, error);
     throw error;
   }
-  if (deps.ensureMachine) {
+  try {
+    if (deps.ensureMachine) await deps.ensureMachine(scope.userId);
+    if (!deps.deferNoticeDelivery) activateBotNotices(deps.db, scope, id);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "机器创建失败";
+    let failure = new BotRejected(message, 503);
     try {
-      await deps.ensureMachine(scope.userId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "机器创建失败";
-      try {
-        await revokeOwned(deps, scope, id);
-      } catch {
-        throw new BotRejected(`${message}；回滚未完成：凭据吊销失败`, 503);
-      } finally {
-        // 保留未吊销凭据供对账回收，但失败的 bot 不能继续接收任务。
-        bots.softDelete(scope, id);
-      }
-      throw new BotRejected(message, 503);
+      await revokeOwned(deps, scope, id);
+    } catch {
+      failure = new BotRejected(`${message}；回滚未完成：凭据吊销失败`, 503);
+    } finally {
+      // 保留未吊销凭据供对账回收，但失败的 bot 不能继续接收任务。
+      bots.softDelete(scope, id);
     }
+    retryNoticesAfterBotRollback(deps.db, scope, failure);
+    throw failure;
   }
   const created = bots.findById(scope, id);
   if (!created) throw new Error("创建 bot 后读不回来");
-  deliverPendingNotices(deps.db, scope.userId);
   return created;
+}
+
+function retryNoticesAfterBotRollback(db: AppDatabase, scope: UserScope, original: unknown): void {
+  // 较晚的 bot 可能已经创建成功；现在才轮到它接收积压。
+  try {
+    deliverAppUpdateNotices(db, scope.userId);
+  } catch {
+    const message = original instanceof Error ? original.message : "创建 bot 失败";
+    throw new BotRejected(`${message}；更新通知补投失败`, 503);
+  }
+}
+
+export function activateBotNotices(db: AppDatabase, scope: UserScope, id: string): void {
+  db.$client.transaction(() => {
+    if (!botRepository(db).markNoticeReady(scope, id)) throw new BotRejected("找不到 bot", 404);
+    deliverAppUpdateNotices(db, scope.userId);
+  }).immediate();
 }
 
 export async function deleteBot(deps: BotServiceDeps, scope: UserScope, id: string): Promise<boolean> {
