@@ -1,7 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./api.js";
+import { appGhostClass } from "./apps-page.js";
 import { ScanRow } from "./scan-row.js";
+import { isWorkDesktop, resolveMasterId, useMasterReturn, useWorkDesktop } from "./work-layout.js";
 
 interface ReviewListItem {
   id: string;
@@ -48,22 +50,32 @@ export function AdminReviews() {
     queryFn: () => api<{ pendingCount: number; requests: ReviewListItem[] }>("/api/admin/app-reviews"),
   });
   const [selected, setSelected] = useState<string | null>(null);
-  const current = selected ?? reviews.data?.requests[0]?.id ?? null;
+  const desktop = useWorkDesktop();
+  const masterReturn = useMasterReturn();
+  const requests = reviews.data?.requests ?? [];
+  const current = resolveMasterId(selected, requests.map((item) => item.id), desktop);
   return (
-    <section className="mx-auto grid min-w-0 max-w-6xl gap-6 px-4 py-6 sm:px-6" data-testid="admin-review-list">
-      <h1 className="text-xl font-semibold">应用审批</h1>
+    <section className="work-page-wide grid min-w-0 gap-6" data-testid="admin-review-list">
+      <div className="work-head">
+        <h1 className="text-2xl font-semibold">应用审批</h1>
+      </div>
       {reviews.isError ? <p role="alert" className="ui-alert">无法加载审批</p> : null}
       {reviews.isPending ? <p className="text-sm text-muted">正在加载…</p> : null}
       {reviews.data && reviews.data.requests.length === 0 ? <p className="text-sm text-muted">没有发布申请</p> : null}
       <div className="review-split">
-        <ul className="grid gap-2">
-          {(reviews.data?.requests ?? []).map((item) => (
+        <div className={current ? "work-master has-detail" : "work-master"} ref={masterReturn.master} tabIndex={-1}>
+        <ul className="master-list" aria-label="应用审批列表">
+          {requests.map((item) => (
             <li key={item.id}>
               <button
-                className={`w-full rounded-xl border px-3 py-2 text-left text-sm ${current === item.id ? "border-primary bg-active" : "border-line bg-surface hover:bg-hover"}`}
+                className={`app-row min-h-11 w-full text-left text-sm ${current === item.id ? "is-selected border-primary bg-active" : "border-line bg-surface hover:bg-hover"}`}
                 type="button"
                 data-testid={`admin-review-${item.id}`}
-                onClick={() => setSelected(item.id)}
+                aria-pressed={desktop ? current === item.id : undefined}
+                onClick={(event) => {
+                  masterReturn.remember(event.currentTarget);
+                  setSelected(item.id);
+                }}
               >
                 <ScanRow
                   tone="dark"
@@ -77,13 +89,25 @@ export function AdminReviews() {
             </li>
           ))}
         </ul>
-        {current ? <ReviewDetail id={current} onDecided={() => { void client.invalidateQueries({ queryKey: ["admin-app-reviews"] }); }} /> : null}
+        </div>
+        {current ? (
+          <ReviewDetail
+            key={current}
+            id={current}
+            onClose={() => { setSelected(null); masterReturn.restore(); }}
+            onDecided={() => { void client.invalidateQueries({ queryKey: ["admin-app-reviews"] }); }}
+          />
+        ) : null}
       </div>
     </section>
   );
 }
 
-function ReviewDetail({ id, onDecided }: { id: string; onDecided: () => void }) {
+function ReviewDetail({ id, onClose, onDecided }: { id: string; onClose: () => void; onDecided: () => void }) {
+  const backRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!isWorkDesktop()) backRef.current?.focus();
+  }, []);
   const detail = useQuery({
     queryKey: ["admin-app-review", id],
     queryFn: () => api<ReviewDetail>(`/api/admin/app-reviews/${encodeURIComponent(id)}`),
@@ -110,10 +134,13 @@ function ReviewDetail({ id, onDecided }: { id: string; onDecided: () => void }) 
     queryFn: () => api<ReviewFile>(`/api/admin/app-reviews/${encodeURIComponent(id)}/files?path=${encodeURIComponent(path ?? "")}`),
   });
   const card = detail.data;
-  if (detail.isPending) return <p className="text-sm text-muted">正在加载详情…</p>;
-  if (!card) return <p role="alert" className="ui-alert">无法加载详情</p>;
   return (
-    <article className="grid min-w-0 gap-4 overflow-auto rounded-xl border border-line bg-surface p-4" data-testid="admin-review-detail">
+    <div className="min-w-0">
+      <button ref={backRef} className={`${appGhostClass} master-back mb-3`} type="button" onClick={onClose}>返回</button>
+      {detail.isPending ? <p className="text-sm text-muted">正在加载详情…</p> : !card ? (
+        <p role="alert" className="ui-alert">无法加载详情</p>
+      ) : (
+    <article className="master-detail grid min-w-0 gap-4 overflow-auto rounded-xl border border-line bg-surface p-4" data-testid="admin-review-detail">
       <div>
       <h2 className="text-lg font-medium [overflow-wrap:anywhere]">{card.name} {card.version}</h2>
         <p className="mt-2 whitespace-pre-wrap break-all text-sm text-secondary">说明：{card.note}</p>
@@ -130,7 +157,7 @@ function ReviewDetail({ id, onDecided }: { id: string; onDecided: () => void }) 
         <ul className="grid gap-1 text-sm">
           {card.files.map((item) => (
             <li key={item.path}>
-              <button className={`w-full break-all rounded-lg px-2 py-1.5 text-left ${path === item.path ? "bg-active text-primary" : "hover:bg-hover"}`} type="button" onClick={() => setPath(item.path)}>
+              <button className={`min-h-11 w-full break-all rounded-lg px-2 py-1.5 text-left ${path === item.path ? "bg-active text-primary" : "hover:bg-hover"}`} type="button" aria-pressed={path === item.path} onClick={() => setPath(item.path)}>
                 {item.path} · {item.size} 字节{item.executable ? " · 可执行" : ""}
               </button>
             </li>
@@ -174,11 +201,13 @@ function ReviewDetail({ id, onDecided }: { id: string; onDecided: () => void }) 
           <input className={field} value={reason} onChange={(event) => setReason(event.target.value)} />
         </label>
         <div className="flex flex-wrap gap-2">
-        <button className={button} type="button" data-testid="admin-review-approve" disabled={decide.isPending} onClick={() => decide.mutate({ decision: "approve" })}>通过</button>
-        <button className={button} type="button" data-testid="admin-review-reject" disabled={decide.isPending || reason.trim().length === 0} onClick={() => decide.mutate({ decision: "reject", reason })}>驳回</button>
+        <button className={`${button} min-h-11`} type="button" data-testid="admin-review-approve" disabled={decide.isPending} onClick={() => decide.mutate({ decision: "approve" })}>通过</button>
+        <button className={`${button} min-h-11`} type="button" data-testid="admin-review-reject" disabled={decide.isPending || reason.trim().length === 0} onClick={() => decide.mutate({ decision: "reject", reason })}>驳回</button>
       </div>
       </div>
     </article>
+      )}
+    </div>
   );
 }
 

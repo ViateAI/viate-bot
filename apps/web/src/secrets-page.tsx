@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { api } from "./api.js";
 import { AppConfirmDialog, appButtonClass, appDangerClass, appFieldClass, appGhostClass } from "./apps-page.js";
 
@@ -66,6 +66,7 @@ export function SecretsPage() {
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const [formError, setFormError] = useState("");
+  const [deleteError, setDeleteError] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [editError, setEditError] = useState("");
@@ -73,6 +74,12 @@ export function SecretsPage() {
   const [message, setMessage] = useState("");
   const [query, setQuery] = useState("");
   const [confirmName, setConfirmName] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createTouched, setCreateTouched] = useState(false);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const createButton = useRef<HTMLButtonElement>(null);
+  const restoreAfterSave = useRef<HTMLButtonElement | null>(null);
+  const focusCreate = useRef(false);
 
   const rows = [...(secrets.data?.secrets ?? [])]
     .filter((row) => typeof row.name === "string" && typeof row.updatedAt === "string")
@@ -82,9 +89,43 @@ export function SecretsPage() {
   const visible = needle.length === 0 ? rows : rows.filter((row) => row.name.toLowerCase().includes(needle));
   const duplicate = name.length > 0 && names.includes(name) ? "该密钥已存在，请在列表中点击更新" : "";
   const typedNameError = name.length > 0 && !duplicate ? (secretNameError(name) ?? "") : "";
+  const formOpen = createTouched ? createOpen : rows.length === 0;
 
-  function focusCreate() {
-    document.getElementById(nameId)?.focus();
+  function openCreate() {
+    if (formOpen) {
+      nameRef.current?.focus();
+      return;
+    }
+    setCreateTouched(true);
+    setCreateOpen(true);
+    focusCreate.current = true;
+  }
+
+  function closeCreate(afterSave = false) {
+    setName("");
+    setValue("");
+    setFormError("");
+    setCreateTouched(true);
+    setCreateOpen(false);
+    if (afterSave) restoreAfterSave.current = createButton.current;
+    else createButton.current?.focus();
+  }
+
+  useEffect(() => {
+    if (!focusCreate.current || !formOpen) return;
+    focusCreate.current = false;
+    nameRef.current?.focus();
+  }, [formOpen]);
+
+  useEffect(() => {
+    if (pending) return;
+    restoreAfterSave.current?.focus();
+    restoreAfterSave.current = null;
+  }, [pending]);
+
+  function toggleCreate() {
+    if (formOpen) closeCreate();
+    else openCreate();
   }
 
   async function reload() {
@@ -103,8 +144,7 @@ export function SecretsPage() {
     setMessage("");
     try {
       await api(`/api/secrets/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ value }) });
-      setName("");
-      setValue("");
+      closeCreate(true);
       setMessage("已保存");
       await reload();
     } catch (caught) {
@@ -114,7 +154,13 @@ export function SecretsPage() {
     }
   }
 
-  async function updateSecret(secretName: string) {
+  function toggleUpdate(secretName: string) {
+    setEditing(editing === secretName ? null : secretName);
+    setEditValue("");
+    setEditError("");
+  }
+
+  async function updateSecret(secretName: string, form: HTMLFormElement) {
     if (editValue.length === 0) {
       setEditError("密钥内容不能为空");
       return;
@@ -133,6 +179,7 @@ export function SecretsPage() {
       });
       setEditValue("");
       setEditing(null);
+      restoreAfterSave.current = form.parentElement?.querySelector<HTMLButtonElement>("button[aria-expanded]") ?? null;
       setMessage("已更新");
       await reload();
     } catch (caught) {
@@ -145,6 +192,7 @@ export function SecretsPage() {
   async function removeSecret(secretName: string) {
     setPending(true);
     setMessage("");
+    setDeleteError("");
     try {
       await api(`/api/secrets/${encodeURIComponent(secretName)}`, { method: "DELETE", body: "{}" });
       setConfirmName(null);
@@ -155,116 +203,121 @@ export function SecretsPage() {
       setMessage("已删除");
       await reload();
     } catch (caught) {
-      setFormError(caught instanceof Error ? caught.message : "删除失败");
+      setDeleteError(caught instanceof Error ? caught.message : "删除失败");
       setConfirmName(null);
     } finally {
       setPending(false);
     }
   }
 
-  if (secrets.isPending) return <p className="px-6 py-10 text-muted">正在加载密钥…</p>;
+  if (secrets.isPending) return <p className="work-page text-muted">正在加载密钥…</p>;
   if (secrets.isError) {
     return (
-      <section className="mx-auto grid min-w-0 max-w-3xl gap-3 px-4 py-10 sm:px-6">
+      <section className="work-page grid min-w-0 gap-3">
         <h1 className="text-2xl font-semibold">密钥</h1>
-        <p role="alert" className="break-words text-sm text-danger">出错：{secrets.error instanceof Error ? secrets.error.message : "加载失败"}</p>
+        <p role="alert" className="text-sm text-danger [overflow-wrap:anywhere]">出错：{secrets.error instanceof Error ? secrets.error.message : "加载失败"}</p>
         <button className={appGhostClass} type="button" onClick={() => void reload()}>重试</button>
       </section>
     );
   }
 
   return (
-    <section className="mx-auto grid min-w-0 max-w-6xl gap-6 overflow-x-hidden px-4 py-6 sm:px-6">
-      <div className="flex min-w-0 flex-wrap items-end justify-between gap-3">
+    <section className="work-page grid min-w-0 gap-6">
+      <div className="work-head">
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold">密钥</h1>
           <p className="mt-1 max-w-2xl text-sm text-muted">保存的凭证加密存放在控制面，供对话里的 {"{{secret:NAME}}"} 和应用配置引用。页面永不回显明文。</p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button className={appGhostClass} type="button" onClick={focusCreate}>新增密钥</button>
+        <div className="work-head-actions">
+          <button ref={createButton} className={appGhostClass} type="button" aria-expanded={formOpen} disabled={pending} onClick={toggleCreate}>新增密钥</button>
           <button className={appGhostClass} type="button" onClick={() => void reload()}>刷新</button>
         </div>
       </div>
-      <form className="grid min-w-0 gap-3 rounded-xl border border-line bg-surface p-4" onSubmit={(event) => void createSecret(event)}>
-        <h2 className="text-sm font-medium">新增密钥</h2>
-        <label className="grid min-w-0 gap-1 text-sm" htmlFor={nameId}>
-          密钥名
-          <input
-            id={nameId}
-            className={appFieldClass}
-            value={name}
-            autoCapitalize="none"
-            spellCheck={false}
-            autoComplete="off"
-            disabled={pending}
-            onChange={(event) => {
-              setName(event.target.value);
-              setFormError("");
-            }}
-          />
-          <span className="text-muted">小写字母、数字和下划线，最长 64 个字符。</span>
-        </label>
-        <label className="grid min-w-0 gap-1 text-sm">
-          密钥值
-          <input
-            className={appFieldClass}
-            type="password"
-            autoComplete="new-password"
-            value={value}
-            disabled={pending}
-            onChange={(event) => {
-              setValue(event.target.value);
-              setFormError("");
-            }}
-          />
-        </label>
-        {duplicate || typedNameError || formError ? (
-          <p role="alert" className="break-words text-sm text-danger">{duplicate || typedNameError || formError}</p>
-        ) : null}
-        <div>
-          <button className={appButtonClass} type="submit" disabled={pending}>{pending ? "正在保存…" : "保存"}</button>
-        </div>
-      </form>
-      <form role="search" className="grid min-w-0 gap-1" onSubmit={(event) => event.preventDefault()}>
-        <label className="grid min-w-0 gap-1 text-sm" htmlFor="secrets-search">
-          搜索密钥
-          <input
-            id="secrets-search"
-            className={appFieldClass}
-            value={query}
-            spellCheck={false}
-            autoCapitalize="none"
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </label>
-      </form>
+      {formOpen ? (
+        <form className="grid min-w-0 gap-3 rounded-xl border border-line bg-surface p-4" onSubmit={(event) => void createSecret(event)}>
+          <h2 className="text-sm font-medium">新增密钥</h2>
+          <label className="grid min-w-0 gap-1 text-sm" htmlFor={nameId}>
+            密钥名
+            <input
+              id={nameId}
+              ref={nameRef}
+              className={appFieldClass}
+              value={name}
+              autoCapitalize="none"
+              spellCheck={false}
+              autoComplete="off"
+              disabled={pending}
+              onChange={(event) => {
+                setName(event.target.value);
+                setFormError("");
+              }}
+            />
+            <span className="text-muted">小写字母、数字和下划线，最长 64 个字符。</span>
+          </label>
+          <label className="grid min-w-0 gap-1 text-sm">
+            密钥值
+            <input
+              className={appFieldClass}
+              type="password"
+              autoComplete="new-password"
+              value={value}
+              disabled={pending}
+              onChange={(event) => {
+                setValue(event.target.value);
+                setFormError("");
+              }}
+            />
+          </label>
+          {duplicate || typedNameError || formError ? (
+            <p role="alert" className="text-sm text-danger [overflow-wrap:anywhere]">{duplicate || typedNameError || formError}</p>
+          ) : null}
+          <div className="flex flex-wrap gap-2">
+            <button className={appButtonClass} type="submit" disabled={pending}>{pending ? "正在保存…" : "保存"}</button>
+            <button className={appGhostClass} type="button" disabled={pending} onClick={() => closeCreate()}>取消</button>
+          </div>
+        </form>
+      ) : null}
+      <div className="secret-tools">
+        <form role="search" className="secret-search grid min-w-0 gap-1" onSubmit={(event) => event.preventDefault()}>
+          <label className="grid min-w-0 gap-1 text-sm" htmlFor="secrets-search">
+            搜索密钥
+            <input
+              id="secrets-search"
+              className={appFieldClass}
+              value={query}
+              spellCheck={false}
+              autoCapitalize="none"
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+        </form>
+        <p className="text-sm text-muted">共 {visible.length} 个</p>
+      </div>
       {message ? <p role="status" className="text-sm text-ok">{message}</p> : null}
+      {deleteError ? <p role="alert" className="text-sm text-danger [overflow-wrap:anywhere]">{deleteError}</p> : null}
       {rows.length === 0 ? (
         <div className="rounded-xl border border-line bg-surface px-4 py-8 text-sm text-secondary">
           <p>还没有保存的密钥</p>
-          <button className={`${appButtonClass} mt-4`} type="button" onClick={focusCreate}>新增密钥</button>
+          <button className={`${appButtonClass} mt-4`} type="button" disabled={pending} onClick={openCreate}>新增密钥</button>
         </div>
       ) : visible.length === 0 ? (
         <p className="text-sm text-secondary">没有匹配的密钥。</p>
       ) : (
         <ul className="grid min-w-0 gap-2" aria-label="密钥列表">
           {visible.map((row) => (
-            <li key={row.name} className="grid min-w-0 gap-3 rounded-xl border border-line bg-surface p-4">
-              <div className="min-w-0">
+            <li key={row.name} className="secret-row">
+              <div className="secret-row-main">
                 <p className="break-all font-mono text-sm font-medium">{row.name}</p>
-                <p className="mt-1 break-all font-mono text-sm text-muted">{"{{secret:" + row.name + "}}"}</p>
-                <p className="mt-1 text-sm text-muted">
+                <code className="break-all font-mono text-sm text-muted">{"{{secret:" + row.name + "}}"}</code>
+                <p className="text-sm text-muted">
                   最近更新 <time dateTime={row.updatedAt}>{row.updatedAt}</time>
                 </p>
               </div>
-              <details className="min-w-0" onToggle={(event) => {
-                if (!(event.currentTarget as HTMLDetailsElement).open) return;
-                setEditing(row.name);
-                setEditValue("");
-                setEditError("");
-              }}>
-                <summary className={`${appGhostClass} cursor-pointer list-none`}>更新值</summary>
-                <form className="mt-3 grid min-w-0 gap-2" onSubmit={(event) => { event.preventDefault(); void updateSecret(row.name); }}>
+              <div className="secret-actions">
+                <button className={appGhostClass} type="button" aria-expanded={editing === row.name} aria-controls={`${nameId}-edit-${row.name}`} disabled={pending} onClick={() => toggleUpdate(row.name)}>更新值</button>
+                <button className={appDangerClass} type="button" disabled={pending} onClick={() => setConfirmName(row.name)}>删除</button>
+              </div>
+              <form id={`${nameId}-edit-${row.name}`} className="secret-edit" hidden={editing !== row.name} onSubmit={(event) => { event.preventDefault(); void updateSecret(row.name, event.currentTarget); }}>
                   <p className="text-sm text-muted">{SECRET_UPDATE_NOTE}</p>
                   <label className="grid min-w-0 gap-1 text-sm">
                     新的密钥值
@@ -275,21 +328,16 @@ export function SecretsPage() {
                       value={editing === row.name ? editValue : ""}
                       disabled={pending}
                       onChange={(event) => {
-                        setEditing(row.name);
                         setEditValue(event.target.value);
                         setEditError("");
                       }}
                     />
                   </label>
-                  {editing === row.name && editError ? <p role="alert" className="break-words text-sm text-danger">{editError}</p> : null}
+                  {editing === row.name && editError ? <p role="alert" className="text-sm text-danger [overflow-wrap:anywhere]">{editError}</p> : null}
                   <div>
                     <button className={appButtonClass} type="submit" disabled={pending}>保存新值</button>
                   </div>
-                </form>
-              </details>
-              <div>
-                <button className={appDangerClass} type="button" disabled={pending} onClick={() => setConfirmName(row.name)}>删除</button>
-              </div>
+              </form>
             </li>
           ))}
         </ul>

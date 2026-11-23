@@ -409,8 +409,12 @@ function matchFor(category: string, value: string): unknown {
 }
 
 export function Approvals() {
-  return <section className="mx-auto grid w-full max-w-3xl gap-3 px-4 py-6 sm:px-6">
-    <h1 className="text-lg font-medium">待批准操作</h1>
-    <ApprovalList />
+  return <section className="work-page grid min-w-0 gap-3">
+    <div className="work-head">
+      <h1 className="text-2xl font-semibold">待批准操作</h1>
+    </div>
+    <div className="work-approvals grid max-w-4xl gap-3">
+      <ApprovalList />
+    </div>
   </section>;
 }

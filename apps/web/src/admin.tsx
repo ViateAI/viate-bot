@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { readQuotaForm } from "./quota-input.js";
-import { Link, Outlet } from "@tanstack/react-router";
+import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { useState, type FormEvent, type ReactNode } from "react";
 import { api, type Me } from "./api.js";
 import { ScanRow } from "./scan-row.js";
+import { workPageFrame } from "./work-layout.js";
 
 interface AdminUser {
   id: string | null;
@@ -64,8 +65,10 @@ const machineButton = "ui-btn-ghost min-h-8 px-2.5 text-xs";
 
 export function AdminLayout() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<Me>("/api/me") });
-  if (me.isPending) return <p className="px-6 py-10 text-muted">正在确认登录…</p>;
-  if (!me.data?.isAdmin) return <p data-testid="not-found" className="px-6 py-10">404 页面不存在</p>;
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const frame = workPageFrame(pathname) ?? "work-page";
+  if (me.isPending) return <p className={`${frame} text-muted`}>正在确认登录…</p>;
+  if (!me.data?.isAdmin) return <p data-testid="not-found" className={frame}>404 页面不存在</p>;
   return <Outlet />;
 }
 
@@ -228,8 +231,10 @@ export function AdminUsers() {
   });
 
   return (
-    <div className="mx-auto grid w-full min-w-0 max-w-5xl gap-6 px-4 py-6 sm:px-6 sm:py-8">
-      <h1 className="text-2xl font-semibold">用户</h1>
+    <div className="work-page grid min-w-0 gap-6">
+      <div className="work-head">
+        <h1 className="text-2xl font-semibold">用户</h1>
+      </div>
       <div className="triage" data-testid="admin-triage">
         <Link to="/admin/app-reviews" className={reviews.data && reviews.data.pendingCount > 0 ? "triage-amber" : ""}>待审发布 <strong>{reviews.data ? reviews.data.pendingCount : "…"}</strong></Link>
         <Link to="/admin/machines" className={machines.data && machines.data.machines.some((item) => item.state === "error") ? "triage-bad" : ""}>异常机器 <strong>{machines.data ? machines.data.machines.filter((item) => item.state === "error").length : "…"}</strong></Link>
@@ -471,8 +476,10 @@ export function AdminMachines() {
   }
 
   return (
-    <div className="mx-auto grid max-w-5xl gap-6 px-4 py-6 sm:px-6 sm:py-8">
-      <h1 className="text-2xl font-semibold">机器</h1>
+    <div className="work-page grid min-w-0 gap-6">
+      <div className="work-head">
+        <h1 className="text-2xl font-semibold">机器</h1>
+      </div>
       {machines.isPending ? <p className="text-sm text-muted">正在加载机器…</p> : null}
       {machines.isError ? <p role="alert" className={alertClass}>{machines.error.message}</p> : null}
       {machines.data && machines.data.machines.length === 0 ? <p className="text-sm text-muted">没有机器</p> : null}
@@ -573,8 +580,11 @@ export function AdminTemplates() {
   });
 
   return (
-    <div className="mx-auto grid max-w-3xl gap-6 px-4 py-6 sm:px-6 sm:py-8">
-      <h1 className="text-2xl font-semibold">模板</h1>
+    <div className="work-page grid min-w-0 gap-6">
+      <div className="work-head">
+        <h1 className="text-2xl font-semibold">模板</h1>
+      </div>
+      <div className="grid max-w-3xl gap-6">
       {templates.isPending ? <p className="text-sm text-muted">正在加载模板…</p> : null}
       {templates.isError ? <p role="alert" className={alertClass}>{templates.error.message}</p> : null}
       {templates.data && templates.data.templates.length === 0 ? <p className="text-sm text-muted">没有模板</p> : null}
@@ -605,6 +615,7 @@ export function AdminTemplates() {
         <textarea className={field} placeholder="初始记忆，一行一条" value={initialMemories} onChange={(event) => setInitialMemories(event.target.value)} />
         <button className={button} type="submit">添加模板</button>
       </form>
+      </div>
     </div>
   );
 }
@@ -679,8 +690,11 @@ export function AdminSettings() {
   });
 
   return (
-    <div className="mx-auto grid max-w-4xl gap-4 px-4 py-6 sm:px-6 sm:py-8">
+    <div className="work-page grid min-w-0 gap-4">
+    <div className="work-head">
     <h1 className="text-2xl font-semibold">设置</h1>
+    </div>
+    <div className="grid max-w-4xl gap-4">
     <form
       className="grid gap-4"
       onSubmit={(event) => {
@@ -767,6 +781,7 @@ export function AdminSettings() {
       </section>
     </form>
     <ModelLimits settings={settings.data} />
+    </div>
     </div>
   );
 }

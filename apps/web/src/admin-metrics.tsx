@@ -41,8 +41,10 @@ export function AdminMetrics() {
   const punctual = data?.routinePunctuality7d;
   const punctualRate = punctual?.onTimeRate == null ? "—" : `${(punctual.onTimeRate * 100).toFixed(1)}%`;
   return (
-    <section className="grid gap-6 px-4 py-6 sm:px-6">
-      <h2 className="text-lg">运维总览</h2>
+    <section className="work-page grid min-w-0 gap-6">
+      <div className="work-head">
+        <h1 className="text-2xl font-semibold">运维总览</h1>
+      </div>
       {overview.isPending ? <p className="text-muted">正在加载…</p> : null}
       {overview.isError ? <p role="alert" className="ui-alert">看板加载失败</p> : null}
       {data ? (
@@ -128,8 +130,10 @@ export function AdminAudit() {
     queryFn: () => api<{ audit: AuditRow[] }>("/api/admin/audit"),
   });
   return (
-    <section className="grid gap-3 px-4 py-6 sm:px-6">
-      <h2 className="text-lg">审计</h2>
+    <section className="work-page grid min-w-0 gap-3">
+      <div className="work-head">
+        <h1 className="text-2xl font-semibold">审计</h1>
+      </div>
       {audit.isPending ? <p className="text-sm text-muted">正在加载…</p> : null}
       {audit.isError ? <p role="alert" className="ui-alert">{audit.error.message}</p> : null}
       {audit.data && audit.data.audit.length === 0 ? <p className="text-sm text-muted">没有审计记录</p> : null}
