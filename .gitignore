@@ -14,3 +14,4 @@ coverage/
 images/machine/machined.mjs
 images/machine/fs-worker.mjs
 images/machine/LICENSE
+.codegraph/
