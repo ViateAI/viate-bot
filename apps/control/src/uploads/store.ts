@@ -136,14 +136,9 @@ export async function saveUpload(input: SaveUploadInput): Promise<SavedUpload> {
       file.destroy();
       await closed.promise;
     }
-    await rm(partPath, { force: true });
+    await rm(partPath, { force: true }).catch(() => undefined);
     if (inserted) {
-      input.db.$client.prepare("delete from uploads where id=? and user_id=? and message_id is null").run(id, input.userId);
-      try {
-        await storage.remove(input.userId, id);
-      } catch {
-        // 对象删除失败不能把存储服务的响应文本带回客户端。
-      }
+      await discardUpload(input.db, storage, input.userId, id);
       if (!(error instanceof UploadRejected)) throw new UploadRejected("无法保存附件", 502);
     }
     throw error;
@@ -189,7 +184,7 @@ export async function readAttachments(
 export function claimUploads(db: AppDatabase, userId: string, messageId: string, uploadIds: readonly string[]): void {
   for (const id of uploadIds) {
     const result = db.$client
-      .prepare("update uploads set message_id=? where id=? and user_id=? and message_id is null")
+      .prepare("update uploads set message_id=? where id=? and user_id=? and message_id is null and kind in ('file', 'image')")
       .run(messageId, id, userId);
     if (result.changes !== 1) throw new UploadRejected("附件已经发送过", 409);
   }
@@ -227,20 +222,27 @@ export async function cleanupUnreferencedUploads(
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - maxAgeMs).toISOString();
   const rows = db.$client
-    .prepare("select id, user_id as userId, created_at as createdAt from uploads where message_id is null and created_at <= ?")
+    .prepare("select id, user_id as userId, created_at as createdAt from uploads where message_id is null and (kind='deleted' or created_at <= ?)")
     .all(cutoff) as Array<{ id: string; userId: string; createdAt: string }>;
   let removed = 0;
   for (const row of rows) {
     if (uploadPredatesStorage(row.createdAt, since)) continue;
-    try {
-      await storage.remove(row.userId, row.id);
-    } catch {
-      continue;
-    }
-    const deleted = db.$client.prepare("delete from uploads where id=? and message_id is null").run(row.id);
-    if (deleted.changes === 1) removed += 1;
+    if (await discardUpload(db, storage, row.userId, row.id)) removed += 1;
   }
   return removed;
+}
+
+// 先标记，避免在等待 S3 时被看见或被认领。保留未删成功的行供清理任务重试。
+export async function discardUpload(db: AppDatabase, storage: UploadStorage, userId: string, id: string): Promise<boolean> {
+  const marked = db.$client.prepare("update uploads set kind='deleted' where id=? and user_id=? and message_id is null").run(id, userId);
+  if (marked.changes !== 1) return false;
+  try {
+    await storage.remove(userId, id);
+  } catch {
+    return false;
+  }
+  const deleted = db.$client.prepare("delete from uploads where id=? and user_id=? and message_id is null and kind='deleted'").run(id, userId);
+  return deleted.changes === 1;
 }
 
 function insertUpload(
@@ -248,9 +250,9 @@ function insertUpload(
   row: { id: string; userId: string; filename: string; size: number; mime: string; sha256: string; kind: "image" | "file"; createdAt: string },
 ): string {
   const tx = db.$client.transaction(() => {
-    const used = db.$client.prepare("select coalesce(sum(size), 0) from uploads where user_id=?").pluck().get(row.userId);
+    const used = db.$client.prepare("select coalesce(sum(size), 0) from uploads where user_id=? and kind<>'deleted'").pluck().get(row.userId);
     if (Number(used) + row.size > MAX_USER_UPLOAD_BYTES) throw new UploadRejected("\u4e0a\u4f20\u7a7a\u95f4\u5df2\u6ee1\uff0c\u8bf7\u5220\u9664\u65e7\u5bf9\u8bdd", 413);
-    const names = db.$client.prepare("select name from uploads where user_id=?").all(row.userId) as Array<{ name: string }>;
+    const names = db.$client.prepare("select name from uploads where user_id=? and kind<>'deleted'").all(row.userId) as Array<{ name: string }>;
     const name = uniqueName(new Set(names.map((item) => item.name)), row.filename);
     db.$client
       .prepare(

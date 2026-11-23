@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
@@ -9,13 +10,16 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { afterEach, describe, expect, it } from "vitest";
+import { createSendFileTool } from "../agent/file-send-tool.js";
 import { buildApp, chatService, type ControlContext } from "../app.js";
 import { loadConfig, type ControlConfig } from "../config.js";
 import { loadOrCreateKey } from "../crypto.js";
 import { openDatabase, type AppDatabase } from "../db/index.js";
+import { chatRepository } from "../db/chat.js";
 import { settingsRepository } from "../db/settings.js";
 import { ensureDevUser } from "../db/users.js";
 import { createSession } from "../session.js";
+import { userScope } from "../scope.js";
 import { deliverAttachments } from "./deliver.js";
 import { presentForModel, type PresentedEntry } from "./present.js";
 import {
@@ -89,6 +93,31 @@ describe("upload storage contract", () => {
     } finally {
       await local.close();
       await remote.close();
+    }
+  });
+
+  it("reports storage outages without exposing upstream error details", async () => {
+    const remote = await openFakeS3("", { failRead: true });
+    await expect(remote.storage.exists("user-a", "id1")).rejects.toThrow(/^无法检查附件$/);
+    await expect(remote.storage.get("user-a", "id1")).rejects.toThrow(/^无法读取附件$/);
+  });
+
+  it("closes a stalled upstream response when the reader cancels", async () => {
+    let stalled: ServerResponse | undefined;
+    const remote = await openFakeS3("", { stallGet: (res) => {
+      stalled = res;
+      res.writeHead(200, { "content-length": "4" });
+      res.write("a");
+    } });
+    try {
+      const stream = await remote.storage.get("user-a", "id1");
+      expect((await once(stream, "data"))[0]).toEqual(Buffer.from("a"));
+      if (!stalled) throw new Error("missing upstream response");
+      const closed = once(stalled, "close", { signal: AbortSignal.timeout(1000) });
+      stream.destroy();
+      await closed;
+    } finally {
+      stalled?.destroy();
     }
   });
 });
@@ -218,6 +247,11 @@ describe("s3 saveUpload", () => {
     expect(downloaded.statusCode).toBe(200);
     expect(downloaded.headers["x-content-type-options"]).toBe("nosniff");
     expect(downloaded.rawPayload.equals(PNG)).toBe(true);
+    seedUser(ctx.db, "user-b");
+    const bob = createSession(ctx.db, ctx.key, "user-b", "refresh-b", new Date());
+    const denied = await app.inject({ url: `/api/uploads/${upload.id}`, headers: { cookie: cookie(bob.token) } });
+    expect(denied.statusCode).toBe(404);
+    expect((await app.inject({ url: `/api/uploads/${upload.id}` })).statusCode).toBe(401);
     const storage = ctx.uploads;
     if (!storage) throw new Error("missing storage");
     const entries: PresentedEntry[] = [{
@@ -227,23 +261,99 @@ describe("s3 saveUpload", () => {
     }];
     const shown = await presentForModel(entries, { vision: true, storage, userId: "user-a" });
     expect(JSON.stringify(shown[0]?.message)).toContain(PNG.toString("base64"));
-    const delivered: Buffer[] = [];
+    const delivered: Array<{ path: string; bytes: Buffer }> = [];
     await deliverAttachments(
       storage,
       "user-a",
       [{ messageId: "m1", id: upload.id, name: "shot.png" }],
-      async (_path, body) => {
-        delivered.push(await readAll(body));
+      async (path, body) => {
+        delivered.push({ path, bytes: await readAll(body) });
       },
       new Set(),
       () => {},
     );
-    expect(Buffer.concat(delivered).equals(PNG)).toBe(true);
+    expect(delivered).toEqual([{ path: "/home/bot/uploads/m1/shot.png", bytes: PNG }]);
     await remote.close();
   });
 });
 
+describe("s3 send_file", () => {
+  it("cleans up other files when one delete fails and retries the failed object without exposing it", async () => {
+    let failedKey = "";
+    const remote = await openFakeS3("team", { failDelete: (key) => key === failedKey });
+    const fixture = await sendFileFixture(remote);
+    const first = await fixture.sendFile(Buffer.from("first"));
+    const second = await fixture.sendFile(Buffer.from("second"));
+    const firstKey = `team/uploads/user-a/${first}`;
+    const secondKey = `team/uploads/user-a/${second}`;
+    const download = (id: string) => fixture.app.inject({ url: `/api/uploads/${id}`, headers: { cookie: cookie(fixture.alice.token) } });
+    expect((await download(first)).rawPayload.toString()).toBe("first");
+    expect(remote.keys().sort()).toEqual([firstKey, secondKey].sort());
+
+    failedKey = firstKey;
+    expect((await fixture.deleteConversation()).statusCode).toBe(200);
+    expect(remote.keys()).toEqual([firstKey]);
+    expect((await download(first)).statusCode).toBe(404);
+    expect((await download(second)).statusCode).toBe(404);
+    await expect(readAttachments(fixture.ctx.db, "user-a", [first], remote.storage)).rejects.toMatchObject({ statusCode: 404 });
+
+    failedKey = "";
+    expect(await cleanupUnreferencedUploads(fixture.ctx.db, remote.storage, new Date())).toBe(1);
+    expect(remote.keys()).toEqual([]);
+    expect(fixture.ctx.db.$client.prepare("select id from uploads").all()).toEqual([]);
+  });
+
+  it("keeps an old-backend object untouched when deleting its conversation", async () => {
+    const remote = await openFakeS3("team");
+    const fixture = await sendFileFixture(remote);
+    const id = await fixture.sendFile(Buffer.from("historical"));
+    fixture.ctx.db.$client.prepare("update uploads set created_at=? where id=?").run("2020-01-01T00:00:00.000Z", id);
+
+    expect((await fixture.deleteConversation()).statusCode).toBe(200);
+    expect(remote.keys()).toEqual([`team/uploads/user-a/${id}`]);
+    const since = fixture.ctx.uploadStorageSince;
+    expect(await cleanupUnreferencedUploads(fixture.ctx.db, remote.storage, new Date(), since)).toBe(0);
+    expect(fixture.ctx.db.$client.prepare("select id from uploads").all()).toEqual([{ id }]);
+  });
+
+  it("leaves no object, row or temp file after an oversized send or a failed message transaction", async () => {
+    const remote = await openFakeS3("team");
+    const fixture = await sendFileFixture(remote);
+    await expect(fixture.sendFile(new CountingStream(MAX_FILE + 1))).rejects.toMatchObject({ statusCode: 413 });
+    expect((await fixture.deleteConversation()).statusCode).toBe(200);
+    await expect(fixture.sendFile(Buffer.from("unclaimed"))).rejects.toThrow();
+    expect(fixture.ctx.db.$client.prepare("select id from uploads").all()).toEqual([]);
+    expect(filesIn(join(fixture.dir, "uploads"))).toEqual([]);
+    expect(remote.keys()).toEqual([]);
+  });
+});
+
 describe("upload storage switch", () => {
+  it.each([
+    ["broken JSON", "{broken"],
+    ["invalid record shape", "null"],
+    ["unknown backend", '{"backend":"other","since":"2020-01-01T00:00:00.000Z"}'],
+    ["invalid timestamp", '{"backend":"local","since":"yesterday"}'],
+  ])("fails closed and preserves the settings row on %s", (_case, raw) => {
+    const { db, dir } = openDb();
+    db.$client.prepare("insert into settings (key, value_json) values (?, ?)").run(UPLOAD_STORAGE_KEY, raw);
+    expect(() => ensureUploadStorage(db, loadConfig({ VB_DATA_DIR: dir }), new Date())).toThrow(/^附件存储记录无效/);
+    expect(db.$client.prepare("select value_json from settings where key=?").pluck().get(UPLOAD_STORAGE_KEY)).toBe(raw);
+  });
+
+  it("retains the cutoff for bucket, endpoint and prefix changes and sets a new cutoff when returning to local", () => {
+    const { db, dir } = openDb();
+    seedUser(db, "user-a");
+    const first = ensureUploadStorage(db, s3Config(dir, {}), new Date("2026-11-20T00:00:00.000Z"));
+    db.$client.prepare(
+      "insert into uploads (id, user_id, name, size, mime, sha256, kind, created_at) values ('existing', 'user-a', 'notes.txt', 1, 'text/plain', '', 'file', ?)",
+    ).run("2026-11-20T01:00:00.000Z");
+    const later = new Date("2026-11-20T02:00:00.000Z");
+    expect(ensureUploadStorage(db, s3Config(dir, { VB_S3_BUCKET: "different", VB_S3_ENDPOINT: "https://s3.example", VB_S3_PREFIX: "other" }), later)).toEqual(first);
+    expect(() => ensureUploadStorage(db, loadConfig({ VB_DATA_DIR: dir }), later)).toThrow(/VB_UPLOAD_STORAGE_ACCEPT_SWITCH/);
+    expect(ensureUploadStorage(db, loadConfig({ VB_DATA_DIR: dir, VB_UPLOAD_STORAGE_ACCEPT_SWITCH: "1" }), later)).toEqual({ backend: "local", since: later.toISOString() });
+  });
+
   it("refuses a backend change when uploads exist unless the switch is explicitly accepted", () => {
     const { db, dir } = openDb();
     seedUser(db, "user-a");
@@ -458,7 +568,15 @@ async function openLocal(): Promise<Harness> {
   };
 }
 
-async function openFakeS3(prefix: string, options?: { failPut?: boolean; failBody?: string }): Promise<Harness> {
+interface FakeS3Options {
+  failPut?: boolean;
+  failBody?: string;
+  failRead?: boolean;
+  failDelete?: (key: string) => boolean;
+  stallGet?: (res: ServerResponse) => void;
+}
+
+async function openFakeS3(prefix: string, options?: FakeS3Options): Promise<Harness> {
   const dir = scratchDir();
   const objects = new Map<string, Buffer>();
   const server = createServer((req, res) => handleS3(req, res, objects, options));
@@ -487,12 +605,16 @@ function handleS3(
   req: IncomingMessage,
   res: ServerResponse,
   objects: Map<string, Buffer>,
-  options?: { failPut?: boolean; failBody?: string },
+  options?: FakeS3Options,
 ): void {
   if (req.headers.expect === "100-continue") res.writeContinue();
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   const parts = decodeURIComponent(url.pathname).split("/").filter((part) => part.length > 0);
   const key = parts.slice(1).join("/");
+  if ((req.method === "HEAD" || req.method === "GET") && options?.failRead) {
+    res.writeHead(403, { "content-type": "application/xml" }).end(`<Error><Code>AccessDenied</Code><Message>test upstream diagnostic ${SECRET}</Message></Error>`);
+    return;
+  }
   if (req.method === "PUT") {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
@@ -518,6 +640,10 @@ function handleS3(
     return;
   }
   if (req.method === "GET") {
+    if (options?.stallGet) {
+      options.stallGet(res);
+      return;
+    }
     const body = objects.get(key);
     if (!body) {
       res.writeHead(404).end();
@@ -527,6 +653,10 @@ function handleS3(
     return;
   }
   if (req.method === "DELETE") {
+    if (options?.failDelete?.(key)) {
+      res.writeHead(403).end();
+      return;
+    }
     objects.delete(key);
     res.writeHead(204).end();
     return;
@@ -693,6 +823,51 @@ async function boot(env: NodeJS.ProcessEnv) {
 
 function cookie(token: string): string {
   return `vb_session=${token}`;
+}
+
+async function sendFileFixture(remote: Harness) {
+  const dir = scratchDir();
+  const fixture = await boot({
+    VB_DATA_DIR: dir,
+    VB_UPLOAD_STORAGE: "s3",
+    VB_S3_BUCKET: "attachments",
+    VB_S3_REGION: "us-east-1",
+    VB_S3_ENDPOINT: remote.url,
+    VB_S3_FORCE_PATH_STYLE: "1",
+    VB_S3_PREFIX: remote.prefix,
+    VB_S3_ACCESS_KEY_ID: "test-access-key",
+    VB_S3_SECRET_ACCESS_KEY: SECRET,
+  });
+  const { ctx, app, alice } = fixture;
+  const storage = ctx.uploads;
+  if (!storage) throw new Error("missing storage");
+  const scope = userScope("user-a");
+  const botId = await createBot(app, alice);
+  const conversationId = "send-file-conversation";
+  const taskId = "send-file-task";
+  chatRepository(ctx.db).insertConversation(scope, { id: conversationId, botId, title: "files" });
+  ctx.db.$client.prepare("insert into tasks (id, bot_id, conversation_id, state, trigger) values (?, ?, ?, 'succeeded', 'user')").run(taskId, botId, conversationId);
+  return {
+    ...fixture,
+    async sendFile(body: Buffer | Readable): Promise<string> {
+      const tool = createSendFileTool({
+        db: ctx.db, dataDir: dir, storage, userId: "user-a", scope, taskId, conversationId,
+        confined: true, confineNow: () => true, confinePolicyNow: () => ({ allow: [], deny: [] }),
+        knownSecrets: () => [], now: () => new Date(), publish: () => {},
+        files: { download: async () => Buffer.isBuffer(body) ? Readable.from([body]) : body },
+      });
+      const result = await tool.execute("call", { path: "/tmp/notes.txt" });
+      const details = result.details;
+      if (!details || typeof details !== "object" || !("uploadId" in details) || typeof details.uploadId !== "string") {
+        throw new Error("missing upload id");
+      }
+      return details.uploadId;
+    },
+    deleteConversation: () => app.inject({
+      method: "DELETE", url: `/api/conversations/${conversationId}`,
+      headers: { cookie: cookie(alice.token), "x-vb-csrf": alice.csrf },
+    }),
+  };
 }
 
 function multipart(filename: string, content: Buffer): { body: Buffer; contentType: string } {

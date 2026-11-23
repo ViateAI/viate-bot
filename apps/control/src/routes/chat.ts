@@ -20,6 +20,8 @@ import { quotaRepository } from "../db/quotas.js";
 import type { CredentialProvider } from "../providers.js";
 import { userScope } from "../scope.js";
 import type { UploadStorage } from "../uploads/storage.js";
+import { discardUpload } from "../uploads/store.js";
+import { uploadPredatesStorage } from "../uploads/switch.js";
 
 export interface ChatRouteDeps {
   db: AppDatabase;
@@ -32,6 +34,7 @@ export interface ChatRouteDeps {
   tasks: Map<string, { activeMs: number; segmentStartedAt: number | null }>;
   now: () => Date;
   uploads: UploadStorage;
+  uploadStorageSince: string;
 }
 
 export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): void {
@@ -164,10 +167,12 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     const scope = scopeOf(request, reply);
     if (!scope) return;
     try {
-      const uploadIds = chat.deleteConversation(scope, request.params.id);
-      if (!uploadIds) return reply.code(404).send({ error: "找不到对话" });
-      for (const uploadId of uploadIds) {
-        await deps.uploads.remove(scope.userId, uploadId);
+      const uploads = chat.deleteConversation(scope, request.params.id);
+      if (!uploads) return reply.code(404).send({ error: "找不到对话" });
+      for (const { id, createdAt } of uploads) {
+        if (!uploadPredatesStorage(createdAt, deps.uploadStorageSince)) {
+          await discardUpload(deps.db, deps.uploads, scope.userId, id);
+        }
       }
       return { ok: true };
     } catch (error) {

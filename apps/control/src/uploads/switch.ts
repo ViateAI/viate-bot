@@ -17,7 +17,13 @@ export function uploadPredatesStorage(createdAt: string, since: string): boolean
 
 export function ensureUploadStorage(db: AppDatabase, config: ControlConfig, now: Date): UploadStorageRecord {
   const settings = settingsRepository(db);
-  let current = parseUploadStorage(settings.getJson(UPLOAD_STORAGE_KEY));
+  let stored: unknown;
+  try {
+    stored = settings.getJson(UPLOAD_STORAGE_KEY);
+  } catch {
+    throw invalidStorageRecord();
+  }
+  let current = parseUploadStorage(stored);
   const backend = config.uploadStorage;
   if (!current) {
     const existing = uploadCount(db);
@@ -52,8 +58,17 @@ function uploadCount(db: AppDatabase): number {
 }
 
 function parseUploadStorage(value: unknown): UploadStorageRecord | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const record = value as { backend?: unknown; since?: unknown };
-  if ((record.backend !== "local" && record.backend !== "s3") || typeof record.since !== "string") return undefined;
-  return { backend: record.backend, since: record.since };
+  if (value === undefined) return undefined;
+  if (value && typeof value === "object" && "backend" in value && "since" in value) {
+    const { backend, since } = value;
+    if ((backend === "local" || backend === "s3") && typeof since === "string") {
+      const parsed = Date.parse(since);
+      if (Number.isFinite(parsed) && new Date(parsed).toISOString() === since) return { backend, since };
+    }
+  }
+  throw invalidStorageRecord();
+}
+
+function invalidStorageRecord(): Error {
+  return new Error("附件存储记录无效（uploads.storage），请从备份恢复记录后重启");
 }

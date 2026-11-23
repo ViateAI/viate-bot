@@ -8,7 +8,7 @@ import type { AppDatabase } from "../db/index.js";
 import { ulid } from "../id.js";
 import type { UserScope } from "../scope.js";
 import type { UploadStorage } from "../uploads/storage.js";
-import { claimUploads, MAX_UPLOAD_BYTES, saveUpload } from "../uploads/store.js";
+import { claimUploads, discardUpload, MAX_UPLOAD_BYTES, saveUpload } from "../uploads/store.js";
 import { maskSecrets } from "./text.js";
 
 const MAX_TASK_SENDS = 20;
@@ -91,8 +91,7 @@ export function createSendFileTool(binding: SendFileBinding): AgentTool {
           chat.touchConversation(binding.scope, binding.conversationId);
         })();
       } catch (error) {
-        binding.db.$client.prepare("delete from uploads where id=? and user_id=? and message_id is null").run(saved.id, binding.userId);
-        await binding.storage.remove(binding.userId, saved.id).catch(() => undefined);
+        await discardUpload(binding.db, binding.storage, binding.userId, saved.id);
         throw error instanceof Error ? error : new Error("无法发送文件");
       }
       binding.publish(messageId);

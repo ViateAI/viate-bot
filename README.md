@@ -136,7 +136,7 @@ Read from the process environment only. Defaults are the values in `apps/control
 | `VB_UPLOAD_STORAGE` | `local` | `local` or `s3`. Chat attachments stay on the control plane either way. Downloads are still proxied; there are no presigned URLs |
 | `VB_S3_BUCKET` | empty | Required when storage is `s3` |
 | `VB_S3_REGION` | empty | Required when storage is `s3` |
-| `VB_S3_ENDPOINT` | empty | Optional S3-compatible endpoint, such as `https://s3.example` |
+| `VB_S3_ENDPOINT` | empty | Optional HTTP(S) endpoint for an S3-compatible service, such as `https://s3.example`. Do not embed credentials in the URL |
 | `VB_S3_FORCE_PATH_STYLE` | off | Only `1` turns on path-style addressing |
 | `VB_S3_PREFIX` | empty | Optional key prefix. `team` stores objects at `team/uploads/<userId>/<uploadId>`. The original filename is not part of the key |
 | `VB_S3_ACCESS_KEY_ID` | empty | Optional. Set it together with `VB_S3_SECRET_ACCESS_KEY`, or leave both empty to use the SDK default credential chain. Setting only one refuses to start |

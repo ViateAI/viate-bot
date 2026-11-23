@@ -157,7 +157,7 @@ Docker socket 访问相当于该 daemon 的 root 权限；不要用 `chmod 666` 
 | `VB_UPLOAD_STORAGE` | `local` | `local` 或 `s3`。聊天附件仍由控制面保存。下载继续由控制面代理，不发预签名 URL |
 | `VB_S3_BUCKET` | 空 | `s3` 时必填 |
 | `VB_S3_REGION` | 空 | `s3` 时必填 |
-| `VB_S3_ENDPOINT` | 空 | 可选，S3 兼容服务地址，例如 `https://s3.example` |
+| `VB_S3_ENDPOINT` | 空 | 可选，S3 兼容服务的 HTTP(S) 地址，例如 `https://s3.example`；URL 中不能嵌入凭据 |
 | `VB_S3_FORCE_PATH_STYLE` | 关 | 只有 `1` 开启 path-style |
 | `VB_S3_PREFIX` | 空 | 可选键前缀。`team` 的对象键是 `team/uploads/<用户 id>/<上传 id>`。原始文件名不会进入键 |
 | `VB_S3_ACCESS_KEY_ID` | 空 | 可选。和 `VB_S3_SECRET_ACCESS_KEY` 同时填写，或同时留空以使用 SDK 默认凭据链。只填一个会启动失败 |

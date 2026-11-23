@@ -95,7 +95,7 @@ export function chatRepository(db: AppDatabase) {
         .all();
       return new Set(rows.map((row) => row.botId));
     },
-    deleteConversation(scope: UserScope, id: string): string[] | undefined {
+    deleteConversation(scope: UserScope, id: string): Array<{ id: string; createdAt: string }> | undefined {
       if (!this.findConversation(scope, id)) return undefined;
       const tx = db.$client.transaction(() => {
         const busy = db.$client
@@ -105,10 +105,11 @@ export function chatRepository(db: AppDatabase) {
           .get(id, ...TERMINAL_TASK_STATES) as { id: string } | undefined;
         if (busy) throw new ConversationBusy();
         const uploads = db.$client
-          .prepare("select u.id as id from uploads u join messages m on m.id = u.message_id where m.conversation_id = ?")
-          .all(id) as Array<{ id: string }>;
+          .prepare("select u.id, u.created_at as createdAt from uploads u join messages m on m.id = u.message_id where m.conversation_id = ? and u.user_id = ?")
+          .all(id, scope.userId) as Array<{ id: string; createdAt: string }>;
         const taskIds = "select id from tasks where conversation_id = ?";
-        db.$client.prepare("delete from uploads where message_id in (select id from messages where conversation_id = ?)").run(id);
+        // 先隐藏附件。对象删除失败或进程重启后，清理任务仍有记录可以重试。
+        db.$client.prepare("update uploads set kind='deleted', message_id=null, delivered_at=null where user_id=? and message_id in (select id from messages where conversation_id = ?)").run(scope.userId, id);
         db.$client.prepare(`update memories set source_task_id = null where source_task_id in (${taskIds})`).run(id);
         db.$client.prepare(`update routine_runs set task_id = null where task_id in (${taskIds})`).run(id);
         db.$client.prepare(`delete from notifications where task_id in (${taskIds})`).run(id);
@@ -119,7 +120,7 @@ export function chatRepository(db: AppDatabase) {
         db.$client.prepare("update system_notices set delivered_message_id = null where delivered_message_id in (select id from messages where conversation_id = ?)").run(id);
         db.$client.prepare("delete from messages where conversation_id = ?").run(id);
         db.$client.prepare("delete from conversations where id = ?").run(id);
-        return uploads.map((row) => row.id);
+        return uploads;
       });
       return tx();
     },

@@ -175,6 +175,14 @@ describe("loadConfig", () => {
     expect(JSON.stringify({ ...ready.s3, secretAccessKey: undefined })).not.toContain("s3-secret-do-not-print");
   });
 
+  it("rejects invalid S3 endpoint URLs without echoing their values", () => {
+    for (const endpoint of ["not a URL", "ftp://s3.example", "https://fixture:test-endpoint-password@s3.example"]) {
+      expect(() => loadConfig({
+        VB_UPLOAD_STORAGE: "s3", VB_S3_BUCKET: "attachments", VB_S3_REGION: "us-east-1", VB_S3_ENDPOINT: endpoint,
+      })).toThrow(/^VB_S3_ENDPOINT 必须是无凭据的 HTTP\(S\) URL$/);
+    }
+  });
+
   it("defaults the model gateway and rejects bad values", () => {
     const config = loadConfig({});
     expect(config.modelApi).toBe("openai-completions");
