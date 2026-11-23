@@ -206,6 +206,7 @@ export function buildApp(ctx: ControlContext, options: AppOptions = {}) {
     tasks,
     now,
     uploads: storage,
+    uploadStorageSince: since,
   });
   registerUploadRoutes(app, { db, dataDir: config.dataDir, storage, since, now });
   registerAdminRoutes(app, {

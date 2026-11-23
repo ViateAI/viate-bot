@@ -243,6 +243,12 @@ function requireUploadStorage(config: ControlConfig): void {
   if (config.uploadStorage !== "s3") return;
   if (config.s3.bucket === "") throw new Error("附件存储为 s3 时需要 VB_S3_BUCKET");
   if (config.s3.region === "") throw new Error("附件存储为 s3 时需要 VB_S3_REGION");
+  if (config.s3.endpoint !== "") {
+    const endpoint = URL.parse(config.s3.endpoint);
+    if (!endpoint || (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") || endpoint.username || endpoint.password) {
+      throw new Error("VB_S3_ENDPOINT 必须是无凭据的 HTTP(S) URL");
+    }
+  }
   const hasKey = config.s3.accessKeyId !== "";
   const hasSecret = config.s3.secretAccessKey !== "";
   if (hasKey !== hasSecret) {

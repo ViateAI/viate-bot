@@ -9,7 +9,7 @@ import type { GetObjectCommandOutput, S3ClientConfig } from "@aws-sdk/client-s3"
 import { createReadStream, createWriteStream, existsSync, mkdirSync, type WriteStream } from "node:fs";
 import { rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import { once } from "node:events";
 import type { ControlConfig, S3UploadConfig } from "../config.js";
 
@@ -75,17 +75,23 @@ export function s3UploadStorage(options: S3UploadConfig): UploadStorage {
     async put(userId, id, source, size) {
       const Key = uploadObjectKey(options.prefix, userId, id);
       const Body = await openSource(source, size);
-      await client.send(new PutObjectCommand({ Bucket: bucket, Key, Body, ContentLength: size }));
+      try {
+        await client.send(new PutObjectCommand({ Bucket: bucket, Key, Body, ContentLength: size }));
+      } catch {
+        Body.destroy();
+        throw new Error("无法保存附件");
+      }
     },
     async get(userId, id) {
       const Key = uploadObjectKey(options.prefix, userId, id);
+      let out: GetObjectCommandOutput;
       try {
-        const out = await client.send(new GetObjectCommand({ Bucket: bucket, Key }));
-        return bodyStream(out.Body);
+        out = await client.send(new GetObjectCommand({ Bucket: bucket, Key }));
       } catch (error) {
         if (missingObject(error)) throw new Error("找不到附件");
-        throw error;
+        throw new Error("无法读取附件");
       }
+      return bodyStream(out.Body);
     },
     async exists(userId, id) {
       if (!SEGMENT.test(userId) || !SEGMENT.test(id)) return false;
@@ -94,12 +100,16 @@ export function s3UploadStorage(options: S3UploadConfig): UploadStorage {
         return true;
       } catch (error) {
         if (missingObject(error)) return false;
-        throw error;
+        throw new Error("无法检查附件");
       }
     },
     async remove(userId, id) {
       const Key = uploadObjectKey(options.prefix, userId, id);
-      await client.send(new DeleteObjectCommand({ Bucket: bucket, Key }));
+      try {
+        await client.send(new DeleteObjectCommand({ Bucket: bucket, Key }));
+      } catch (error) {
+        if (!missingObject(error)) throw new Error("无法删除附件");
+      }
     },
   };
 }
@@ -156,8 +166,16 @@ function endFile(file: WriteStream): Promise<void> {
 
 function bodyStream(body: GetObjectCommandOutput["Body"]): Readable {
   if (!body) throw new Error("找不到附件");
-  if (body instanceof Readable) return body;
-  return Readable.from(body as AsyncIterable<Uint8Array>);
+  const source = body instanceof Readable ? body : Readable.from(body as AsyncIterable<Uint8Array>);
+  const stream = new PassThrough();
+  const readFailed = () => {
+    if (!stream.destroyed) stream.destroy(new Error("无法读取附件"));
+  };
+  source.on("error", readFailed);
+  source.once("close", () => { if (!source.readableEnded) readFailed(); });
+  // 取消时不等待上游的下一块数据，直接释放其 HTTP 连接。
+  stream.once("close", () => source.destroy());
+  return source.pipe(stream);
 }
 
 function missingObject(error: unknown): boolean {
